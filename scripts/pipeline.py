@@ -47,13 +47,54 @@ from config import (
     BEATS_CKPT as CFG_BEATS_CKPT,   # from config (models/BEATs_iter3_plus_AS2M.pt)
 )
 
-def ensure_asset(local_path: Path, url: str) -> Path:
-    local_path = Path(local_path)
+def _looks_like_lfs_pointer(p: Path) -> bool:
+    try:
+        head = p.read_bytes()[:120]
+        return head.startswith(b"version https://git-lfs.github.com/spec/v1")
+    except Exception:
+        return False
+
+def _looks_like_html(p: Path) -> bool:
+    try:
+        head = p.read_bytes()[:128].lower()
+        return head.startswith(b"<") or b"<html" in head
+    except Exception:
+        return False
+
+def ensure_asset(local_path: Path, url: str, min_bytes: int = 50_000_000) -> Path:
+    """
+    Ensure `local_path` is a real checkpoint. If it's missing, tiny, an LFS pointer,
+    or an HTML page, (re)download from `url`.
+    """
     local_path.parent.mkdir(parents=True, exist_ok=True)
-    if not local_path.exists():
+
+    def _bad_file(p: Path) -> bool:
+        if not p.exists():
+            return True
+        try:
+            sz = p.stat().st_size
+        except Exception:
+            return True
+        # too small, LFS pointer, or HTML error page
+        return (sz < min_bytes) or _looks_like_lfs_pointer(p) or _looks_like_html(p)
+
+    if _bad_file(local_path):
+        # remove junk then download the real thing
+        try:
+            if local_path.exists():
+                local_path.unlink()
+        except Exception:
+            pass
         print(f"[INFO] Downloading {url} -> {local_path}")
         urlretrieve(url, local_path)
         print(f"[INFO] Downloaded {local_path} ({local_path.stat().st_size} bytes)")
+
+        # validate again; bail out if still bad
+        if _bad_file(local_path):
+            raise RuntimeError(
+                f"Downloaded file at {local_path} is not a valid checkpoint "
+                f"(pointer/HTML/too small). Check your release asset URL."
+            )
     return local_path
 
 # Repo roots & sensible defaults
