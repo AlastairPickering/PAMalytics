@@ -14,7 +14,7 @@ import librosa.display
 import io
 import soundfile as sf
 import base64
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Set
 from config import RAW_AUDIO_DIR, EMBEDDINGS_DIR, RESULTS_DIR, TARGET_LENGTH, DEVICE
 
 st.set_page_config(layout="wide", page_title="Dashboard")
@@ -55,6 +55,7 @@ else:
     st.title("Pileated Gibbon Detection Dashboard")
     st.caption("Logo not found (looked in RESULTS_DIR/assets/logo-ci.png and ./logo-ci.png)")
 
+# Repo-relative processed dirs
 PROCESSED_DIR = RAW_AUDIO_DIR / "processed"
 PRESENT_DIR   = PROCESSED_DIR / "present"
 
@@ -239,7 +240,7 @@ else:
     today = pd.Timestamp.utcnow().normalize()
     min_dt = max_dt = today
 
-# FILTER BAR
+# Filter bar
 if "filters_version" not in st.session_state:
     st.session_state["filters_version"] = 0
 kv = st.session_state["filters_version"]
@@ -306,10 +307,9 @@ m3.metric("Detection rate", f"{detection_rate:.1f}%")
 GIBBON_IMAGE = os.environ.get("GIBBON_IMAGE", str(RESULTS_DIR / "assets" / "pileated_gibbon.jpg"))
 img_bytes = load_image_bytes(GIBBON_IMAGE)
 if img_bytes:
-    m4.image(img_bytes, use_container_width=True)
-else:
+    # Use new Streamlit width API to avoid deprecation warnings
     with m4:
-        st.caption("Add an image at RESULTS_DIR/assets/pileated_gibbon.jpg or set GIBBON_IMAGE.")
+        m4.image(img_bytes, width="content")  # natural size within the column
 
 # Location Stats
 if "recorder_id" not in df.columns:
@@ -397,7 +397,10 @@ except Exception:
     tmp = pretty.copy()
     if "Detection Rate (%)" in tmp.columns:
         tmp["Detection Rate (%)"] = (tmp["Detection Rate (%)"] * 100).round(1).astype(str) + "%"
-    st.dataframe(tmp, use_container_width=True)
+    try:
+        st.dataframe(tmp, width="stretch")
+    except Exception:
+        st.dataframe(tmp, use_container_width=True)
 
 # Map
 plot_df = location_stats_p.dropna(subset=["lat", "lon"])
@@ -524,7 +527,21 @@ else:
     st.write("No data for the selected filters.")
 
 # Gibbon detection examples
+
 st.header("Gibbon detection examples")
+
+# Build the set of available stems in PRESENT_DIR
+@st.cache_data(show_spinner=False)
+def list_present_stems(present_dir: str) -> Set[str]:
+    base = Path(present_dir)
+    stems: Set[str] = set()
+    if base.exists() and base.is_dir():
+        for p in base.iterdir():
+            if p.is_file() and p.suffix.lower() in {".wav", ".flac"}:
+                stems.add(p.stem.lower())
+    return stems
+
+present_stem_set = list_present_stems(str(PRESENT_DIR))
 
 # Controls
 c1, c2, c3, c4 = st.columns(4)
@@ -537,11 +554,16 @@ with c3:
 with c4:
     PAGE = st.number_input("Page", min_value=1, value=1, step=1)
 
-# Only files currently considered present
+# Only files currently considered present (effective) AND whose audio exists in PRESENT_DIR
 df_present = df_page[df_page["FinalLabelEffective"].astype(str).str.lower() == "present"].copy()
+if "filename_stem" in df_present.columns:
+    df_present = df_present[df_present["filename_stem"].isin(present_stem_set)]
+else:
+    df_present["filename_stem"] = df_present["filename"].astype(str).map(lambda s: Path(s).stem.lower())
+    df_present = df_present[df_present["filename_stem"].isin(present_stem_set)]
 
 if df_present.empty:
-    st.info("No present clips for the selected filters.")
+    st.info("No present clips with audio available in the present folder for the selected filters.")
 else:
     total_clips = len(df_present)
     start = (int(PAGE)-1) * int(NUM_PER_PAGE)
@@ -576,27 +598,19 @@ else:
         except Exception:
             return None, None
 
-    def find_audio_path_by_stem(filename_stem: str) -> Optional[Path]:
-        base = Path(st.session_state.get("audio_base_dir", str(RAW_AUDIO_DIR / "processed" / "present")))
+    def find_audio_path_by_stem_present_only(filename_stem: str) -> Optional[Path]:
+        """Strictly look in PRESENT_DIR only (ignore any override)."""
+        base = PRESENT_DIR
         if not filename_stem or not base.exists():
             return None
+        stem = Path(filename_stem).stem
         for ext in (".wav", ".WAV", ".flac", ".FLAC"):
-            p = base / f"{Path(filename_stem).stem}{ext}"
+            p = base / f"{stem}{ext}"
             if p.exists():
                 return p
-        lower_stem = Path(filename_stem).stem.lower()
-        try:
-            for p in base.iterdir():
-                if p.is_file() and p.stem.lower() == lower_stem:
-                    return p
-        except Exception:
-            pass
         return None
 
-    def _stem(val: str) -> str:
-        return Path(str(val)).stem
-
-    page_df = page_df.assign(_stem=page_df["filename"].astype(str).map(_stem))
+    page_df = page_df.assign(_stem=page_df["filename"].astype(str).map(lambda s: Path(s).stem))
 
     # Collect proposed overrides to UserLabel
     updates = []
@@ -615,19 +629,23 @@ else:
                 badge = " 🟠 changed" if (u != "" and u != m) else ""
                 st.caption(f"**{row['filename']}**{badge}")
 
-                apath = find_audio_path_by_stem(row["_stem"])
+                apath = find_audio_path_by_stem_present_only(row["_stem"])
                 if apath and apath.exists():
+                    try:
+                        st.image(make_thumbnail_and_audio(str(apath), int(THUMB_SEC))[0], width="stretch")
+                    except Exception:
+                        thumb_png, _ = make_thumbnail_and_audio(str(apath), int(THUMB_SEC))
+                        if thumb_png:
+                            st.image(thumb_png, use_container_width=True)
+                        else:
+                            st.info("No thumbnail")
                     thumb_png, audio_wav = make_thumbnail_and_audio(str(apath), int(THUMB_SEC))
-                    if thumb_png:
-                        st.image(thumb_png, use_container_width=True)
-                    else:
-                        st.info("No thumbnail")
                     if audio_wav:
                         st.audio(io.BytesIO(audio_wav), format="audio/wav")
                     else:
                         st.error("Audio unreadable")
                 else:
-                    st.error("Audio not found")
+                    st.error("Audio not found in present folder")
 
                 # Radio defaults to the current effective label
                 eff = str(row["FinalLabelEffective"]).lower()
@@ -664,7 +682,10 @@ else:
         except Exception as e:
             st.error(f"Failed to save updates: {e}")
 
-# Full Data Table
+# Full Data Table 
 st.header("Full Data Table")
 if st.checkbox("Show full filename-level data"):
-    st.dataframe(df_page)
+    try:
+        st.dataframe(df_page, width="stretch")
+    except Exception:
+        st.dataframe(df_page, use_container_width=True)

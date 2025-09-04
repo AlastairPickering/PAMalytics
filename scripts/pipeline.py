@@ -1,3 +1,4 @@
+# pipeline.py
 import os
 import sys
 import time
@@ -43,20 +44,30 @@ from config import (
     DEVICE,
 )
 
-# Constants
-FILE_BATCH_SIZE      = 100   # max audio files per cycle
-INFERENCE_BATCH_SIZE = 20    # segments per model batch
-POLL_INTERVAL        = 10    # seconds between cycles
+# Repo roots & sensible defaults
+SCRIPTS_DIR = Path(__file__).resolve().parent               # .../scripts
+REPO_ROOT   = SCRIPTS_DIR.parent                            # repo root
+DEFAULT_BEATS_DIR  = (REPO_ROOT / "models" / "unilm" / "beats").resolve()
+DEFAULT_BEATS_CKPT = (REPO_ROOT / "models" / "BEATs" / "BEATs_iter3_plus_AS2M.pt").resolve()
 
-# Ensure BEATs module on path
-BEATS_DIR = Path("/Users/alastairpickering/Desktop/gibbon/gibbon_scripts/models/unilm/beats").expanduser()
-sys.path.append(str(BEATS_DIR))
+# Try to get bundle path from config; else fall back to repo/models
+try:
+    from config import MODEL_BUNDLE_PATH as CFG_BUNDLE
+except Exception:
+    CFG_BUNDLE = (REPO_ROOT / "models" / "logreg_beats_pipeline_v5.joblib").resolve()
 
+# CLI
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Pileated gibbon pipeline")
-    p.add_argument("--audio-dir", type=str, default=str(CFG_RAW_AUDIO_DIR), help="Input audio directory")
-    p.add_argument("--results-dir", type=str, default=str(CFG_RESULTS_DIR), help="Results directory")
-    p.add_argument("--status-file", type=str, default="", help="Optional status JSON path")
+    p.add_argument("--audio-dir",   type=str, default=str(CFG_RAW_AUDIO_DIR), help="Input audio directory")
+    p.add_argument("--results-dir", type=str, default=str(CFG_RESULTS_DIR),   help="Results directory")
+    p.add_argument("--status-file", type=str, default="",                     help="Optional status JSON path")
+    p.add_argument("--log-file",    type=str, default="",                     help="(Accepted, ignored here)")
+    p.add_argument("--beats-dir",   type=str, default=str(DEFAULT_BEATS_DIR), help="Path to BEATs source dir")
+    p.add_argument("--beats-ckpt",  type=str, default=str(DEFAULT_BEATS_CKPT),help="Path to BEATs checkpoint .pt")
+    p.add_argument("--model-bundle",type=str, default=str(CFG_BUNDLE),        help="Classifier bundle (.joblib)")
+    p.add_argument("--metadata-xlsx", type=str, default=str(REPO_ROOT / "metadata.xlsx"),
+                   help="Optional metadata Excel to merge on 'recorder_id'")
     return p.parse_args()
 
 args = parse_args()
@@ -64,16 +75,19 @@ args = parse_args()
 RAW_AUDIO_DIR = Path(args.audio_dir).expanduser().resolve()
 RESULTS_DIR   = Path(args.results_dir).expanduser().resolve()
 STATUS_FILE   = Path(args.status_file).expanduser().resolve() if args.status_file else None
+BEATS_DIR     = Path(args.beats_dir).expanduser().resolve()
+BEATS_CKPT    = Path(args.beats_ckpt).expanduser().resolve()
+BUNDLE_PATH   = Path(args.model_bundle).expanduser().resolve()
+METADATA_XLSX = Path(args.metadata_xlsx).expanduser().resolve()
 
-# Processed audio dirs
-PROCESSED_DIR = RESULTS_DIR.parent / "raw_audio" / "processed"  
-PROCESSED_DIR = CFG_RAW_AUDIO_DIR / "processed"
+#  Dirs 
+PROCESSED_DIR = RAW_AUDIO_DIR / "processed"
 PRESENT_DIR   = PROCESSED_DIR / "present"
 ABSENT_DIR    = PROCESSED_DIR / "absent"
 for d in (PROCESSED_DIR, PRESENT_DIR, ABSENT_DIR, RESULTS_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
-# Status helpers 
+# Status helpers
 def write_status(state: str,
                  progress: float = 0.0,
                  done: int = 0,
@@ -97,21 +111,29 @@ def write_status(state: str,
     except Exception:
         pass
 
-# Load BEATs model 
-beats_model = load_beats_model(
-    Path("/Users/alastairpickering/Desktop/gibbon/gibbon_scripts/models/BEATs/BEATs_iter3_plus_AS2M.pt").expanduser(),
-    BEATS_DIR,
-    DEVICE
-)
+# Load BEATs
+# Ensure BEATs source is importable for preprocessing.load_beats_model
+sys.path.append(str(BEATS_DIR))
 
-# Load production classifier bundle
-MODEL_PATH = Path("~/gdrive_mount/pileated_gibbon_production/models/logreg_beats_pipeline_v5.joblib").expanduser()
+if not BEATS_DIR.exists() or not BEATS_CKPT.exists():
+    print(f"[ERROR] BEATs not found.\n  beats_dir = {BEATS_DIR}\n  beats_ckpt = {BEATS_CKPT}")
+    print("        Set --beats-dir and --beats-ckpt to valid locations.")
+    sys.exit(2)
+
+beats_model = load_beats_model(BEATS_CKPT, BEATS_DIR, DEVICE)
+
+# Load classifier bundle
 with warnings.catch_warnings():
     warnings.simplefilter("ignore", InconsistentVersionWarning)
-    bundle = joblib.load(MODEL_PATH)
+    bundle = joblib.load(BUNDLE_PATH)
 
 classifier_pipeline = bundle["pipeline"]
 DECISION_THRESHOLD  = float(bundle["threshold"])
+
+# Constants
+FILE_BATCH_SIZE      = 100   # max audio files per cycle
+INFERENCE_BATCH_SIZE = 20    # segments per model batch
+POLL_INTERVAL        = 10    # seconds between cycles
 
 # Core per-file logic
 def preprocess_and_segment(audio_file: Path) -> List[Tuple[int, float, float, np.ndarray, int]]:
@@ -126,7 +148,7 @@ def preprocess_and_segment(audio_file: Path) -> List[Tuple[int, float, float, np
 
     seg_samples = SEGMENT_SECONDS * sr
     n_segs = math.ceil(len(y) / seg_samples)
-    segments = []
+    segments: List[Tuple[int, float, float, np.ndarray, int]] = []
     for idx in range(n_segs):
         start = idx * seg_samples
         end = min(start + seg_samples, len(y))
@@ -155,9 +177,7 @@ def process_one_file(audio_file: Path) -> List[dict]:
             idxs, bt0, bt1, chunks, srs = zip(*batch)
 
             emb_batch = []
-            kept_idx  = []
-            kept_t0   = []
-            kept_t1   = []
+            kept_idx, kept_t0, kept_t1 = [], [], []
             for idx, t0, t1, chunk, sr in zip(idxs, bt0, bt1, chunks, srs):
                 try:
                     emb = extract_embedding_from_array(chunk, sr, TARGET_LENGTH, beats_model, DEVICE)
@@ -197,7 +217,7 @@ def process_one_file(audio_file: Path) -> List[dict]:
         pred = (probs >= DECISION_THRESHOLD).astype(int)
         any_positive = bool(pred.any())
 
-        records = []
+        records: List[dict] = []
         for idx, t0, t1, pr, prob in zip(seg_idxs, t0s, t1s, pred, probs):
             records.append({
                 "filename":       stem,
@@ -226,14 +246,14 @@ def process_one_file(audio_file: Path) -> List[dict]:
         print(f"[WARN] Skipping file {audio_file} due to error: {e}")
         return []
 
+# Post-processing
 def merge_metadata() -> None:
-    metadata_file = Path("~/gdrive_mount/pileated_gibbon_production/metadata.xlsx").expanduser()
-    if not metadata_file.exists():
-        print(f"Metadata missing at {metadata_file}, skipping.")
+    if not METADATA_XLSX.exists():
+        print(f"Metadata missing at {METADATA_XLSX}, skipping.")
         return
     try:
         df_res  = pd.read_csv(RESULTS_DIR / "classification_results.csv")
-        df_meta = pd.read_excel(metadata_file)
+        df_meta = pd.read_excel(METADATA_XLSX)
         df_merged = pd.merge(df_res, df_meta, on="recorder_id", how="left")
         out = RESULTS_DIR / "merged_classification_results.csv"
         df_merged.to_csv(out, index=False)
@@ -275,6 +295,7 @@ def append_results(all_records: List[dict]) -> None:
     except Exception as e:
         print(f"[WARN] Failed to write master CSV {idx_path}: {e}")
 
+# Cycle
 def process_audio_files_cycle() -> None:
     files = list_input_files()
     num_files = len(files)
@@ -314,9 +335,13 @@ def process_audio_files_cycle() -> None:
     merge_metadata()
     write_status(state="idle", progress=1.0, done=done, total=num_files, started=started, message="Cycle complete")
 
+# Main
 if __name__ == "__main__":
     print(f"[INFO] Using RAW_AUDIO_DIR={RAW_AUDIO_DIR}")
     print(f"[INFO] Writing results to {RESULTS_DIR}")
+    print(f"[INFO] BEATs dir  : {BEATS_DIR}")
+    print(f"[INFO] BEATs ckpt : {BEATS_CKPT}")
+    print(f"[INFO] Bundle     : {BUNDLE_PATH}")
     if STATUS_FILE:
         print(f"[INFO] Status file: {STATUS_FILE}")
 

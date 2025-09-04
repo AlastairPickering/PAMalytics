@@ -1,4 +1,4 @@
-# pages/2_Validate.py
+# pages/1_Validate.py
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -10,12 +10,14 @@ import matplotlib.pyplot as plt
 import librosa
 import librosa.display
 import soundfile as sf
+from pandas.errors import DtypeWarning
+import warnings
 from typing import Optional, Tuple
 from config import RAW_AUDIO_DIR, RESULTS_DIR
 
 st.set_page_config(layout="wide", page_title="Validate")
 
-# Session defaults
+# Session defaults 
 AUDIO_DEFAULT_DIR = RAW_AUDIO_DIR / "processed" / "present"
 if "audio_base_dir" not in st.session_state:
     st.session_state["audio_base_dir"] = str(AUDIO_DEFAULT_DIR)
@@ -91,12 +93,10 @@ def save_filename_level(path: Path, df: pd.DataFrame) -> None:
 
 # Segment loading
 def find_probability_column(seg: pd.DataFrame) -> Optional[str]:
-    # direct matches first
     direct = [c for c in seg.columns if c.lower() in
               ("probability", "prob", "pred_prob", "pred_probability", "score", "p")]
     if direct:
         return direct[0]
-    # fuzzy contains "prob"
     for c in seg.columns:
         if "prob" in c.lower():
             return c
@@ -107,14 +107,13 @@ def find_filename_like_column(seg: pd.DataFrame) -> Optional[str]:
     for c in candidates:
         if c in seg.columns:
             return c
-    # fallback: first object dtype col
     for c in seg.columns:
         if seg[c].dtype == "object":
             return c
     return None
 
 def load_segments() -> Optional[pd.DataFrame]:
-    """Load segment-level results; return None if unavailable."""
+    """Load segment-level results; be tolerant of mixed dtypes."""
     path = Path(st.session_state.get("segment_results_path", RESULTS_DIR / "merged_classification_results.csv"))
     if not path.exists():
         st.warning(f"Segment file not found: {path}")
@@ -123,7 +122,9 @@ def load_segments() -> Optional[pd.DataFrame]:
         if path.suffix.lower() in (".xlsx", ".xls"):
             seg = pd.read_excel(path)
         else:
-            seg = pd.read_csv(path)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", DtypeWarning)
+                seg = pd.read_csv(path, low_memory=False)
     except Exception as e:
         st.warning(f"Failed to read segments: {e}")
         return None
@@ -131,6 +132,7 @@ def load_segments() -> Optional[pd.DataFrame]:
         st.warning("Segment file is empty.")
         return None
     return seg
+
 
 def make_clip_prob(seg: pd.DataFrame) -> pd.DataFrame:
     """
@@ -147,18 +149,14 @@ def make_clip_prob(seg: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame(columns=["filename_stem", "clip_prob"])
 
     seg["filename_stem"] = seg[fname_col].astype(str).map(to_stem_lower)
-    # coerce to numeric probabilities
     seg[prob_col] = pd.to_numeric(seg[prob_col], errors="coerce")
     seg = seg.dropna(subset=[prob_col, "filename_stem"])
 
-    # normalise if necessary (handle 0–100)
     max_val = seg[prob_col].max()
     if pd.notna(max_val) and max_val > 1:
-        # Heuristic: if max <= 100, treat as percentage
         if max_val <= 100:
             seg[prob_col] = seg[prob_col] / 100.0
         else:
-            # otherwise clamp into [0,1]
             seg[prob_col] = seg[prob_col].clip(0, 1)
 
     clipprob = (
@@ -202,12 +200,10 @@ def find_audio_path_by_stem(filename_stem: str) -> Optional[Path]:
     base = Path(st.session_state.get("audio_base_dir", str(AUDIO_DEFAULT_DIR)))
     if not filename_stem or not base.exists():
         return None
-    # quick direct checks
     for ext in (".wav", ".WAV", ".flac", ".FLAC"):
         p = base / f"{Path(filename_stem).stem}{ext}"
         if p.exists():
             return p
-    # fallback scan
     lower_stem = Path(filename_stem).stem.lower()
     try:
         for p in base.iterdir():
@@ -216,6 +212,24 @@ def find_audio_path_by_stem(filename_stem: str) -> Optional[Path]:
     except Exception:
         pass
     return None
+
+@st.cache_data(show_spinner=False)
+def list_present_stems(base_dir_str: str) -> set:
+    """
+    Return a set of lowercase filename stems that actually exist
+    in the current audio folder (present directory by default).
+    """
+    stems = set()
+    try:
+        base = Path(base_dir_str)
+        if not base.exists():
+            return stems
+        for q in base.iterdir():
+            if q.is_file() and q.suffix.lower() in {".wav", ".flac"}:
+                stems.add(q.stem.lower())
+    except Exception:
+        pass
+    return stems
 
 # Load data
 df_master = load_filename_level()
@@ -229,14 +243,11 @@ df = df_master.copy()
 df["filename_stem"] = df["filename"].astype(str).map(to_stem_lower)
 df = with_effective_labels(df)  # adds FinalLabelEffective, is_present, Changed
 
-# Merge in clip_prob
+# Merge in clip_prob (best segment prob per file)
 seg = load_segments()
 if seg is not None:
     clipprob = make_clip_prob(seg)
-    before = len(df)
     df = df.merge(clipprob, on="filename_stem", how="left")
-    matched = int(df["clip_prob"].notna().sum())
-
 else:
     df["clip_prob"] = np.nan
     st.caption("No segment file loaded — probabilities unavailable.")
@@ -252,20 +263,31 @@ with top2:
 with top3:
     sort_by = st.selectbox("Sort by", ["clip_prob", "filename"], index=0)
 with top4:
-    changed_only = st.checkbox("Changed only", value=False) 
+    changed_only = st.checkbox("Changed only", value=False)
 
-# filter by label
+# Filter rows
 df_view = df.copy()
+
+# label filter
 if show_label in ("present", "absent"):
     df_view = df_view[df_view["FinalLabelEffective"] == show_label]
 
-# keep only already-changed clips
+# changed filter
 if changed_only and "Changed" in df_view.columns:
     df_view = df_view[df_view["Changed"]]
 
-# probability filter and sort
+# prob filter & sort key
 df_view["clip_prob_f"] = pd.to_numeric(df_view["clip_prob"], errors="coerce").fillna(0.0)
 df_view = df_view[df_view["clip_prob_f"] >= float(min_prob)]
+
+# NEW: keep only files that actually exist in the current audio (present) folder
+present_stems = list_present_stems(st.session_state.get("audio_base_dir", str(AUDIO_DEFAULT_DIR)))
+if present_stems:
+    df_view = df_view[df_view["filename_stem"].isin(present_stems)]
+else:
+    st.info("No audio files found in the selected audio folder. Nothing to display.")
+
+# sorting
 if sort_by == "clip_prob":
     df_view = df_view.sort_values(["clip_prob_f", "filename_stem"], ascending=[False, True])
 else:
