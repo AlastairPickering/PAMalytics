@@ -3,7 +3,7 @@
 A complete workflow for deploying a trained pileated gibbon classifier end-to-end, reviewing results, validating clips with spectrograms, and launching the processing pipeline — all from a simple Streamlit UI.
 
 ### Features
-- Deploy a pretrained pileated gibbon classifier with a macro average accuracy of 0.96 to detect gibbon calls in PAM audio
+- Deploy a pretrained pileated gibbon classifier to detect gibbon calls in PAM audio
 - Change threshold and deploy post-processing heuristics to balance recall and precision requirements
 - Interactive and intuitive dashboard to summarise and export results
 - Streamlined validation and updating of results
