@@ -16,6 +16,7 @@ from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import joblib
 from sklearn.exceptions import InconsistentVersionWarning
+from urllib.request import urlretrieve
 
 # Suppress warnings
 warnings.filterwarnings("ignore", category=FutureWarning, module="torch.nn.utils.weight_norm")
@@ -42,13 +43,23 @@ from config import (
     SEGMENT_SECONDS,
     TARGET_LENGTH,
     DEVICE,
+    BEATS_URL,
+    BEATS_CKPT as CFG_BEATS_CKPT,   # from config (models/BEATs_iter3_plus_AS2M.pt)
 )
+
+def ensure_asset(local_path: Path, url: str) -> Path:
+    local_path = Path(local_path)
+    local_path.parent.mkdir(parents=True, exist_ok=True)
+    if not local_path.exists():
+        print(f"[INFO] Downloading {url} -> {local_path}")
+        urlretrieve(url, local_path)
+        print(f"[INFO] Downloaded {local_path} ({local_path.stat().st_size} bytes)")
+    return local_path
 
 # Repo roots & sensible defaults
 SCRIPTS_DIR = Path(__file__).resolve().parent               # .../scripts
 REPO_ROOT   = SCRIPTS_DIR.parent                            # repo root
 DEFAULT_BEATS_DIR  = (REPO_ROOT / "models" / "unilm" / "beats").resolve()
-DEFAULT_BEATS_CKPT = (REPO_ROOT / "models" / "BEATs" / "BEATs_iter3_plus_AS2M.pt").resolve()
 
 # Try to get bundle path from config; else fall back to repo/models
 try:
@@ -59,13 +70,13 @@ except Exception:
 # CLI
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Pileated gibbon pipeline")
-    p.add_argument("--audio-dir",   type=str, default=str(CFG_RAW_AUDIO_DIR), help="Input audio directory")
-    p.add_argument("--results-dir", type=str, default=str(CFG_RESULTS_DIR),   help="Results directory")
-    p.add_argument("--status-file", type=str, default="",                     help="Optional status JSON path")
-    p.add_argument("--log-file",    type=str, default="",                     help="(Accepted, ignored here)")
-    p.add_argument("--beats-dir",   type=str, default=str(DEFAULT_BEATS_DIR), help="Path to BEATs source dir")
-    p.add_argument("--beats-ckpt",  type=str, default=str(DEFAULT_BEATS_CKPT),help="Path to BEATs checkpoint .pt")
-    p.add_argument("--model-bundle",type=str, default=str(CFG_BUNDLE),        help="Classifier bundle (.joblib)")
+    p.add_argument("--audio-dir",     type=str, default=str(CFG_RAW_AUDIO_DIR), help="Input audio directory")
+    p.add_argument("--results-dir",   type=str, default=str(CFG_RESULTS_DIR),   help="Results directory")
+    p.add_argument("--status-file",   type=str, default="",                     help="Optional status JSON path")
+    p.add_argument("--log-file",      type=str, default="",                     help="(Accepted, ignored here)")
+    p.add_argument("--beats-dir",     type=str, default=str(DEFAULT_BEATS_DIR), help="Path to BEATs source dir")
+    p.add_argument("--beats-ckpt",    type=str, default=str(CFG_BEATS_CKPT),    help="Path to BEATs checkpoint .pt")
+    p.add_argument("--model-bundle",  type=str, default=str(CFG_BUNDLE),        help="Classifier bundle (.joblib)")
     p.add_argument("--metadata-xlsx", type=str, default=str(REPO_ROOT / "metadata.xlsx"),
                    help="Optional metadata Excel to merge on 'recorder_id'")
     return p.parse_args()
@@ -80,46 +91,32 @@ BEATS_CKPT    = Path(args.beats_ckpt).expanduser().resolve()
 BUNDLE_PATH   = Path(args.model_bundle).expanduser().resolve()
 METADATA_XLSX = Path(args.metadata_xlsx).expanduser().resolve()
 
-#  Dirs 
+# Dirs
 PROCESSED_DIR = RAW_AUDIO_DIR / "processed"
 PRESENT_DIR   = PROCESSED_DIR / "present"
 ABSENT_DIR    = PROCESSED_DIR / "absent"
 for d in (PROCESSED_DIR, PRESENT_DIR, ABSENT_DIR, RESULTS_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
-# Status helpers
-def write_status(state: str,
-                 progress: float = 0.0,
-                 done: int = 0,
-                 total: int = 0,
-                 current: Optional[str] = None,
-                 started: Optional[str] = None,
-                 message: str = "") -> None:
-    if not STATUS_FILE:
-        return
-    payload = {
-        "state": state,
-        "progress": float(max(0.0, min(1.0, progress))),
-        "done": done,
-        "total": total,
-        "current": current or "",
-        "started": started or "",
-        "message": message,
-    }
-    try:
-        STATUS_FILE.write_text(json.dumps(payload), encoding="utf-8")
-    except Exception:
-        pass
+# BEATs sources: prefer vendored paths in repo; fall back to arg
+BEATS_DIR_CANDIDATES = [
+    REPO_ROOT / "models" / "unilm" / "beats",  # canonical
+    REPO_ROOT / "models" / "unlim" / "beats",  # tolerate earlier name
+    BEATS_DIR,                                 # user-provided
+]
+for _cand in BEATS_DIR_CANDIDATES:
+    if _cand.exists():
+        BEATS_DIR = _cand.resolve()
+        break
+else:
+    raise RuntimeError("BEATs sources not found. Expected at models/unilm/beats/ (or models/unlim/beats/).")
 
-# Load BEATs
-# Ensure BEATs source is importable for preprocessing.load_beats_model
 sys.path.append(str(BEATS_DIR))
 
-if not BEATS_DIR.exists() or not BEATS_CKPT.exists():
-    print(f"[ERROR] BEATs not found.\n  beats_dir = {BEATS_DIR}\n  beats_ckpt = {BEATS_CKPT}")
-    print("        Set --beats-dir and --beats-ckpt to valid locations.")
-    sys.exit(2)
+# Ensure weights exist locally (downloads once from Release URLs)
+ensure_asset(BEATS_CKPT, BEATS_URL)
 
+# Load BEATs
 beats_model = load_beats_model(BEATS_CKPT, BEATS_DIR, DEVICE)
 
 # Load classifier bundle

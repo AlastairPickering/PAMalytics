@@ -1,10 +1,17 @@
-=== Launch 2025-09-03T13:51:50.139131 ===
-CMD: /Users/alastairpickering/.pileated_gibbon_dashboard/.venv/bin/python -u /Users/alastairpickering/gdrive_mount/pileated_gibbon_production/scripts/pipeline.py --audio-dir /Users/alastairpickering/gdrive_mount/pileated_gibbon_production/audio --status-file /Users/alastairpickering/gdrive_mount/pileated_gibbon_production/results/pipeline_status.json --results-dir /Users/alastairpickering/gdrive_mount/pileated_gibbon_production/results
+=== Launch 2025-09-04T14:49:41.841282 ===
+CMD: /Users/alastairpickering/.pileated_gibbon_dashboard/.venv/bin/python -u /Users/alastairpickering/Desktop/Alastair/github/pileated_gibbon_classifier/scripts/pipeline.py --audio-dir /Users/alastairpickering/Desktop/Alastair/github/pileated_gibbon_classifier/audio --status-file /Users/alastairpickering/Desktop/Alastair/github/pileated_gibbon_classifier/results/pipeline_status.json --results-dir /Users/alastairpickering/Desktop/Alastair/github/pileated_gibbon_classifier/results
+[INFO] Downloading https://github.com/AlastairPickering/pileated_gibbon_classifier/releases/download/v.1.0.0/BEATs_iter3_plus_AS2M.pt -> /Users/alastairpickering/Desktop/Alastair/github/pileated_gibbon_classifier/models/BEATs_iter3_plus_AS2M.pt
+[INFO] Downloaded /Users/alastairpickering/Desktop/Alastair/github/pileated_gibbon_classifier/models/BEATs_iter3_plus_AS2M.pt (361499833 bytes)
+[INFO] Downloading https://github.com/AlastairPickering/pileated_gibbon_classifier/releases/download/v.1.0.0/Tokenizer_iter3_plus_AS2M.pt -> /Users/alastairpickering/Desktop/Alastair/github/pileated_gibbon_classifier/models/Tokenizer_iter3_plus_AS2M.pt
+[INFO] Downloaded /Users/alastairpickering/Desktop/Alastair/github/pileated_gibbon_classifier/models/Tokenizer_iter3_plus_AS2M.pt (366757962 bytes)
 /Users/alastairpickering/.pileated_gibbon_dashboard/.venv/lib/python3.9/site-packages/torch/nn/utils/weight_norm.py:28: UserWarning: torch.nn.utils.weight_norm is deprecated in favor of torch.nn.utils.parametrizations.weight_norm.
   warnings.warn("torch.nn.utils.weight_norm is deprecated in favor of torch.nn.utils.parametrizations.weight_norm.")
-[INFO] Using RAW_AUDIO_DIR=/Users/alastairpickering/gdrive_mount/pileated_gibbon_production/audio
-[INFO] Writing results to /Users/alastairpickering/gdrive_mount/pileated_gibbon_production/results
-[INFO] Status file: /Users/alastairpickering/gdrive_mount/pileated_gibbon_production/results/pipeline_status.json
+[INFO] Using RAW_AUDIO_DIR=/Users/alastairpickering/Desktop/Alastair/github/pileated_gibbon_classifier/audio
+[INFO] Writing results to /Users/alastairpickering/Desktop/Alastair/github/pileated_gibbon_classifier/results
+[INFO] BEATs dir  : /Users/alastairpickering/Desktop/Alastair/github/pileated_gibbon_classifier/models/unilm/beats
+[INFO] BEATs ckpt : /Users/alastairpickering/Desktop/Alastair/github/pileated_gibbon_classifier/models/BEATs_iter3_plus_AS2M.pt
+[INFO] Bundle     : /Users/alastairpickering/Desktop/Alastair/github/pileated_gibbon_classifier/models/logreg_beats_pipeline_v5.joblib
+[INFO] Status file: /Users/alastairpickering/Desktop/Alastair/github/pileated_gibbon_classifier/results/pipeline_status.json
 
 Starting processing cycle…
 Processing 0 files (max 100) this cycle.
@@ -31,10 +38,11 @@ Processing 0 files (max 100) this cycle.
 Cycle complete. Sleeping 10s…
 
 Starting processing cycle…
-Processing 1 files (max 100) this cycle.
-Files processed:   0%|          | 0/1 [00:00<?, ?it/s]Files processed: 100%|██████████| 1/1 [00:07<00:00,  7.82s/it]Files processed: 100%|██████████| 1/1 [00:07<00:00,  7.82s/it]
-Master results written to /Users/alastairpickering/gdrive_mount/pileated_gibbon_production/results/classification_results.csv
-Merged results: /Users/alastairpickering/gdrive_mount/pileated_gibbon_production/results/merged_classification_results.csv
+Processing 0 files (max 100) this cycle.
+Cycle complete. Sleeping 10s…
+
+Starting processing cycle…
+Processing 0 files (max 100) this cycle.
 Cycle complete. Sleeping 10s…
 
 Starting processing cycle…
@@ -44,5 +52,7 @@ Cycle complete. Sleeping 10s…
 Starting processing cycle…
 Processing 0 files (max 100) this cycle.
 Cycle complete. Sleeping 10s…
-/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/multiprocessing/resource_tracker.py:216: UserWarning: resource_tracker: There appear to be 1 leaked semaphore objects to clean up at shutdown
-  warnings.warn('resource_tracker: There appear to be %d '
+
+Starting processing cycle…
+Processing 0 files (max 100) this cycle.
+Cycle complete. Sleeping 10s…

@@ -14,6 +14,16 @@ EMBEDDINGS_DIR = (REPO_ROOT / "embeddings").resolve()
 RESULTS_DIR    = (REPO_ROOT / "results").resolve()
 MODELS_DIR     = (REPO_ROOT / "models").resolve()
 
+# Release asset URLs
+BEATS_URL     = "https://github.com/AlastairPickering/pileated_gibbon_classifier/releases/download/v.1.0.0/BEATs_iter3_plus_AS2M.pt"
+
+# Where to cache them locally
+REPO_ROOT  = Path(__file__).resolve().parent.parent
+MODELS_DIR = (REPO_ROOT / "models")
+MODELS_DIR.mkdir(parents=True, exist_ok=True)
+
+BEATS_CKPT     = MODELS_DIR / "BEATs_iter3_plus_AS2M.pt"
+
 # Ensure output folders exist
 for p in (EMBEDDINGS_DIR, RESULTS_DIR):
     p.mkdir(parents=True, exist_ok=True)
