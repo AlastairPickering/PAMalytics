@@ -133,7 +133,6 @@ def load_segments() -> Optional[pd.DataFrame]:
         return None
     return seg
 
-
 def make_clip_prob(seg: pd.DataFrame) -> pd.DataFrame:
     """
     From segment-level results, compute per-file clip_prob = max(probability) across segments.
@@ -255,7 +254,7 @@ else:
 # UI controls
 st.header("Validate predictions")
 
-top1, top2, top3, top4 = st.columns([1.0, 1.0, 1.0, 2.0])
+top1, top2, top3, top4 = st.columns([1.0, 1.0, 1.0, 1.0])
 with top1:
     show_label = st.selectbox("Show clips labelled", ["present", "absent", "all"], index=0)
 with top2:
@@ -263,6 +262,8 @@ with top2:
 with top3:
     sort_by = st.selectbox("Sort by", ["clip_prob", "filename"], index=0)
 with top4:
+    # spacer so the checkbox aligns with the other controls' labels
+    st.markdown("<div style='height:1.95em'></div>", unsafe_allow_html=True)
     changed_only = st.checkbox("Changed only", value=False)
 
 # Filter rows
@@ -280,7 +281,7 @@ if changed_only and "Changed" in df_view.columns:
 df_view["clip_prob_f"] = pd.to_numeric(df_view["clip_prob"], errors="coerce").fillna(0.0)
 df_view = df_view[df_view["clip_prob_f"] >= float(min_prob)]
 
-# NEW: keep only files that actually exist in the current audio (present) folder
+# keep only files that actually exist in the current audio (present) folder
 present_stems = list_present_stems(st.session_state.get("audio_base_dir", str(AUDIO_DEFAULT_DIR)))
 if present_stems:
     df_view = df_view[df_view["filename_stem"].isin(present_stems)]
@@ -339,7 +340,7 @@ else:
                 if apath and apath.exists():
                     thumb_png, audio_wav = make_thumbnail_and_audio(str(apath), int(THUMB_SEC))
                     if thumb_png:
-                        st.image(thumb_png, use_container_width=True)
+                        st.image(thumb_png, width="stretch")  # replaced use_container_width
                     else:
                         st.info("No thumbnail")
                     if audio_wav:
@@ -367,8 +368,10 @@ else:
     view_cols = ["filename", "FinalLabel", "UserLabel", "FinalLabelEffective", "clip_prob"]
     merged = upd_df.merge(df[view_cols], on="filename", how="left", suffixes=("", "_current"))
     merged = merged.sort_values(["clip_prob"], ascending=[False])
-    st.dataframe(merged[["filename", "FinalLabel", "UserLabel", "FinalLabelEffective", "clip_prob"]],
-                 use_container_width=True)
+    st.dataframe(
+        merged[["filename", "FinalLabel", "UserLabel", "FinalLabelEffective", "clip_prob"]],
+        width="stretch"  # replaced use_container_width
+    )
 
 # Save
 left, right = st.columns([1, 3])
