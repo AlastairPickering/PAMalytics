@@ -23,7 +23,3 @@ pyproj>=3.6
 scikit-learn>=1.3
 joblib>=1.3
 tqdm>=4.66
-
-# Deep learning
-torch==2.3.1
-torchaudio==2.3.1
