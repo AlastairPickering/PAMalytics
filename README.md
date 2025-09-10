@@ -2,7 +2,7 @@
 
 A complete workflow for deploying a trained pileated gibbon classifier end-to-end, reviewing results, validating clips with spectrograms, and launching the processing pipeline — all from a simple Streamlit UI.
 
-<img width="2660" height="1431" alt="image" src="https://github.com/user-attachments/assets/eb7e6686-b0da-4320-9024-1e6f079b8482" />
+<img width="2678" height="831" alt="image" src="https://github.com/user-attachments/assets/84076986-dca2-4e3b-9d23-159fa7bc0e07" />
 
 ### Features
 - Deploy a pretrained pileated gibbon classifier to detect gibbon calls in PAM audio
