@@ -1,13 +1,12 @@
-# create venv + install requirements + install/verify PyTorch
+# launch_dashboard.py — venv + deps + minimal PyTorch check
 import os
-import sys
 import subprocess
 import venv
 from pathlib import Path
 import platform
 import webbrowser
 
-HERE = Path(__file__).resolve().parent           # repo folder (contains Dashboard.py)
+HERE = Path(__file__).resolve().parent      # repo/scripts/
 REQS = HERE / "requirements.txt"
 DASH = HERE / "Dashboard.py"
 
@@ -15,8 +14,7 @@ def default_venv_dir() -> Path:
     if os.name == "nt":
         base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
         return base / "PileatedGibbonDashboard" / ".venv"
-    else:
-        return Path.home() / ".pileated_gibbon_dashboard" / ".venv"
+    return Path.home() / ".pileated_gibbon_dashboard" / ".venv"
 
 VENV = Path(os.environ.get("PG_VENV_DIR", default_venv_dir()))
 
@@ -34,53 +32,34 @@ def ensure_venv():
     VENV.parent.mkdir(parents=True, exist_ok=True)
     venv.EnvBuilder(with_pip=True).create(str(VENV))
 
-def install_or_verify_torch(py_exe: str):
-    """
-    Ensure torch/torchvision/torchaudio are importable in this venv.
-    On Windows, force CPU wheels from the official PyTorch index to avoid DLL issues.
-    If WinError 126 occurs, prompt for the VC++ runtime.
-    """
+def torch_import_ok(py_exe: str) -> bool:
+    """Return True if 'import torch' succeeds in the venv."""
     try:
-        import importlib
-        importlib.import_module("torch")
-        print("[setup] PyTorch already present.")
-        return
-    except Exception:
-        pass
+        run([py_exe, "-c", "import torch; print(torch.__version__)"])
+        return True
+    except subprocess.CalledProcessError:
+        return False
 
+def install_torch(py_exe: str):
+    """Install PyTorch once (CPU wheels on Windows), then verify import."""
     print("[setup] Installing PyTorch…")
-    is_windows = platform.system() == "Windows"
-    if is_windows:
-        # Force CPU wheels; override any prior build
-        cmd = [
-            py_exe, "-m", "pip", "install",
-            "--index-url", "https://download.pytorch.org/whl/cpu",
-            "--upgrade", "--force-reinstall",
-            "torch", "torchvision", "torchaudio",
-        ]
+    if platform.system() == "Windows":
+        # Use CPU wheels to avoid GPU/DLL issues
+        run([py_exe, "-m", "pip", "install",
+             "--index-url", "https://download.pytorch.org/whl/cpu",
+             "torch", "torchvision", "torchaudio"])
     else:
-        cmd = [py_exe, "-m", "pip", "install", "torch", "torchvision", "torchaudio"]
+        run([py_exe, "-m", "pip", "install", "torch", "torchvision", "torchaudio"])
 
+    # Verify once
     try:
-        run(cmd)
-    except subprocess.CalledProcessError as e:
-        print("[setup][ERROR] PyTorch install command failed.")
-        raise
-
-    # Verify import and catch common Windows DLL error
-    try:
-        import torch  # noqa
+        run([py_exe, "-c", "import torch, torchaudio; print('torch', torch.__version__, 'torchaudio', torchaudio.__version__)"])
         print("[setup] PyTorch OK.")
-    except OSError as e:
-        # Classic missing MSVC runtime on Windows
-        winerr = getattr(e, "winerror", None)
-        if is_windows and winerr == 126:
-            msg = (
-                "[setup][ERROR] PyTorch failed to load (WinError 126). "
-                "Please install the Microsoft Visual C++ 2015–2022 Redistributable (x64) "
-                "and relaunch:\n  https://aka.ms/vs/17/release/vc_redist.x64.exe"
-            )
-            print(msg)
+    except subprocess.CalledProcessError as e:
+        if platform.system() == "Windows":
+            # Common case: missing MSVC runtime: WinError 126
+            print("[setup][ERROR] PyTorch failed to import. On Windows, install the Microsoft Visual C++ 2015–2022 Redistributable (x64).")
+            print("               Opening the download page…")
             try:
                 webbrowser.open("https://aka.ms/vs/17/release/vc_redist.x64.exe")
             except Exception:
@@ -95,22 +74,23 @@ def main():
     print(f"✅ Using venv: {VENV}")
     run([py, "-V"])
 
-    # Upgrade pip tooling
+    # Pip tooling
     run([py, "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"])
 
-    # Install from requirements.txt
+    # requirements.txt (should NOT contain torch/torchaudio/torchvision)
     if not REQS.exists():
         raise FileNotFoundError(f"requirements.txt not found at {REQS}")
     print("[setup] Installing requirements.txt …")
     run([py, "-m", "pip", "install", "-r", str(REQS)])
 
-    # Ensure PyTorch is correct for this platform 
-    install_or_verify_torch(py)
+    # Minimal torch check + install if needed
+    if not torch_import_ok(py):
+        install_torch(py)
 
-    # Sanity print: where Streamlit is installed
+    # Locate and confirm Streamlit
     run([py, "-c", "import streamlit; print('✅ Streamlit', streamlit.__version__, 'in', streamlit.__file__)"])
 
-    # Launch Streamlit with watcher disabled
+    # Launch Streamlit
     env = os.environ.copy()
     env["STREAMLIT_SERVER_FILEWATCHERTYPE"] = "none"
     env["STREAMLIT_LOG_LEVEL"] = "error"
@@ -118,7 +98,7 @@ def main():
     run([
         py, "-m", "streamlit", "run", str(DASH),
         "--server.fileWatcherType", "none",
-        "--logger.level", "error"
+        "--logger.level", "error",
     ], env=env)
 
 if __name__ == "__main__":
