@@ -2,6 +2,8 @@
 
 A complete workflow for deploying a trained pileated gibbon classifier end-to-end, reviewing results, validating clips with spectrograms, and launching the processing pipeline — all from a simple Streamlit UI.
 
+<img width="2678" height="831" alt="image" src="https://github.com/user-attachments/assets/84076986-dca2-4e3b-9d23-159fa7bc0e07" />
+
 ### Features
 - Deploy a pretrained pileated gibbon classifier to detect gibbon calls in PAM audio
 - Change threshold and deploy post-processing heuristics to balance recall and precision requirements
@@ -10,6 +12,9 @@ A complete workflow for deploying a trained pileated gibbon classifier end-to-en
 - All processes run via app without need for terminal
 
 ### Dashboard (analysis)
+
+<img width="2668" height="1218" alt="image" src="https://github.com/user-attachments/assets/cbf2837b-bd53-474e-9e4b-c3552bf4be8e" />
+
 - Headline stats: total detections, total recordings, detection rate
 - Global date range and recorder filters (AND logic) that control the whole page
 - Location Stats table with detection counts & rates
@@ -28,12 +33,18 @@ A complete workflow for deploying a trained pileated gibbon classifier end-to-en
     - Optional K-of-N smoothing (e.g., 2 detections in 3 segments)
 
 ### Validate (deep review)
+
+<img width="2687" height="1442" alt="image" src="https://github.com/user-attachments/assets/8ac32ce4-ddc4-4c45-a98d-0b822db9bdd8" /> <br>
+
 - Sort & filter by clip probability (max segment probability per file)
 - High-resolution spectrograms optimised for quick visual check
 - Shows pending changes before saving
 - Saves only UserLabel changes so you always preserve the original predictions
 
 ### Classify (Launch classifier)
+
+<img width="2685" height="1242" alt="image" src="https://github.com/user-attachments/assets/e115f8cb-35f3-40bb-9a81-7ef9937f3031" />
+
 - Start/stop scripts/pipeline.py with your chosen audio folder
 - Pass extra CLI args (--tau, --kn, etc.)
 - Live status (progress bar) + auto-refreshing logs
@@ -41,8 +52,8 @@ A complete workflow for deploying a trained pileated gibbon classifier end-to-en
 - Classfier splits incoming .wav files into 10 second segments and calculates probability of containing a gibbon call
 
 # Quick Start
-Prerequisites:
-Python 3.9+
+Prerequisites: <br>
+Python 3.9 <br>
 macOS or Windows
 
 ### macOS
