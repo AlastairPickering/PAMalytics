@@ -1,15 +1,13 @@
-# Pileated Gibbon Classifier and Dashboard
-
-A complete workflow for deploying a trained pileated gibbon classifier end-to-end, reviewing results, validating clips with spectrograms, and launching the processing pipeline — all from a simple Streamlit UI.
-
-<img width="2678" height="831" alt="image" src="https://github.com/user-attachments/assets/84076986-dca2-4e3b-9d23-159fa7bc0e07" />
+# PAMalytics — Pileated Gibbon Classifier, Dashboard & Occupancy
+An end-to-end workflow for deploying a trained pileated gibbon classifier, reviewing results, validating clips with spectrograms, fitting occupancy models that account for imperfect detection, and launching the processing pipeline — all from a simple Streamlit UI.
 
 ### Features
 - Deploy a pretrained pileated gibbon classifier to detect gibbon calls in PAM audio
-- Change threshold and deploy post-processing heuristics to balance recall and precision requirements
-- Interactive and intuitive dashboard to summarise and export results
-- Streamlined validation and updating of results
-- All processes run via app without need for terminal
+- Flexible thresholding and post-processing heuristics to balance recall/precision
+- Occupancy module to convert classifications into detection histories and fit single-season occupancy models (with options for false-positive handling and score-aware/threshold-free workflows)
+- Interactive dashboard to summarise, validate and export results
+- Streamlined clip validation with high-resolution spectrograms
+- All processes run via the app — no terminal required
 
 ### Dashboard (analysis)
 
@@ -51,6 +49,22 @@ A complete workflow for deploying a trained pileated gibbon classifier end-to-en
 - Writes status JSON and log file to results/
 - Classfier splits incoming .wav files into 10 second segments and calculates probability of containing a gibbon call
 
+### Occupancy (modelling)
+
+<img width="2697" height="1281" alt="image" src="https://github.com/user-attachments/assets/3f6680f6-db0c-4721-9762-8180bce8883c" />
+
+- Build detection histories from classifier outputs with two modes:
+    - Thresholded: apply a filename-level probability threshold (with optional K-of-N smoothing).
+    - Score-aware (threshold-free): use classifier scores directly as evidence.
+- Account for imperfect detection by estimating detectability from replicated visits/windows; optionally allow false positives via a verified subset/double-method design.
+- Covariates: include site- and visit-level predictors for occupancy (ψ) and detection (p).
+
+Outputs: <br>
+    - Site-level occupancy probabilities (ψ) with uncertainty <br>
+    - Model fit summaries and diagnostics <br>
+    - Detection/non-detection (or score) matrices for archiving/reuse <br>
+    - Exportable CSVs (histories, coefficients, site-level predictions) <br>
+
 # Quick Start
 Prerequisites: <br>
 Python 3.9 <br>
@@ -84,9 +98,11 @@ repo/
 │  ├─ pages/
 │  │  ├─ 1_Validate.py            # deep validation (optional)
 │  │  ├─ 2_Classify.py            # pipeline launcher + live logs
-│  │  └─ 3_Settings.py            # settings & conversions
+│  │  ├─ 3_Settings.py            # settings & conversions
+│  │  └─ 4_Occupancy.py           # Occupancy modelling - build and display occupancy dashboard
 │  ├─ pipeline.py                 # batch processing loop
 │  ├─ preprocessing.py            # audio preproc + embedding helpers
+│  ├─ prepare_occupancy.py        # occupancy preproc + helpers
 │  ├─ launch_dashboard.py         # Python launcher (creates venv, installs deps)
 │  ├─ launch.command              # macOS double-click launcher
 │  ├─ requirements.txt             
