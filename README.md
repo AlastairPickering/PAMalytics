@@ -1,5 +1,5 @@
-# PAMalytics — Pileated Gibbon Classifier, Dashboard & Occupancy
-An end-to-end workflow for deploying a trained pileated gibbon classifier, reviewing results, validating clips with spectrograms, fitting occupancy models that account for imperfect detection, and launching the processing pipeline — all from a simple Streamlit UI.
+# PAMalytics — PAM Classifier, Detection Dashboard & Occupancy
+An end-to-end workflow for deploying a trained pileated gibbon classifier, reviewing results, validating clips with spectrograms, fitting occupancy models that account for imperfect detection, and launching the processing pipeline.
 
 ### Features
 - Deploy a pretrained pileated gibbon classifier to detect gibbon calls in PAM audio
