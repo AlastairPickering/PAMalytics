@@ -1,0 +1,24 @@
+{
+  "adapter": "batdetect2",
+  "mapping": {
+    "source_file": "auto (from CSV filename)",
+    "start_s": "start_time / te_factor",
+    "end_s": "end_time / te_factor",
+    "label": "thresholds(det_prob,class_prob) -> present/absent",
+    "score": "det_prob",
+    "timestamp_utc": null
+  },
+  "options": {
+    "det_prob_threshold": 0.5,
+    "class_prob_threshold": 0.5,
+    "time_expansion": 1.0,
+    "species_filter": "",
+    "keep_absent": false,
+    "collapse_overlaps_same_species": false
+  },
+  "input_root_csv": "/Users/alastairpickering/Desktop/Alastair/PhD/bct_1_sec/predictions",
+  "input_root_wav": "/Users/alastairpickering/Desktop/Alastair/PhD/bct_1_sec/audio",
+  "rows_out": 1741,
+  "created_at": "2025-11-04T14:24:20.720376+00:00",
+  "app_version": "pamalytics_studio 0.3.0"
+}

@@ -1,0 +1,29 @@
+{
+  "project_id": "6db0af45-fe51-4977-9ac0-7021223b4f7c",
+  "name": "new_birdnet",
+  "use_case": "external_results",
+  "tz": "UTC",
+  "created_by": "alastair",
+  "created_at": "2025-11-20T10:26:59.640270+00:00",
+  "last_opened": "2025-11-20T10:26:59.641701+00:00",
+  "paths": {
+    "root": "/Users/alastairpickering/Desktop/Alastair/github/pileated_gibbon_classifier/studio/projects/new_birdnet",
+    "data_raw": "data_raw/",
+    "data_normalised": "data_normalised/",
+    "metadata": "metadata/",
+    "exports": "exports/",
+    "logs": "logs/",
+    "workspace": "workspace/"
+  },
+  "status": {
+    "import_results": "ready",
+    "audio_resolver": "ready",
+    "metadata_joins": "empty",
+    "analysis": "empty",
+    "export": "empty"
+  },
+  "provenance": {
+    "app": "pamalytics_studio",
+    "version": "0.3.0"
+  }
+}

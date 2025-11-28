@@ -1,0 +1,29 @@
+{
+  "project_id": "458f95e7-fdfb-47bc-a62c-f7dbc20d68b3",
+  "name": "gibbon",
+  "use_case": "external_results",
+  "tz": "UTC",
+  "created_by": "alastair",
+  "created_at": "2025-11-07T11:39:57.880429+00:00",
+  "last_opened": "2025-11-07T11:39:57.881583+00:00",
+  "paths": {
+    "root": "/Users/alastairpickering/Desktop/Alastair/github/pileated_gibbon_classifier/studio/projects/gibbon",
+    "data_raw": "data_raw/",
+    "data_normalised": "data_normalised/",
+    "metadata": "metadata/",
+    "exports": "exports/",
+    "logs": "logs/",
+    "workspace": "workspace/"
+  },
+  "status": {
+    "import_results": "empty",
+    "audio_resolver": "empty",
+    "metadata_joins": "empty",
+    "analysis": "empty",
+    "export": "empty"
+  },
+  "provenance": {
+    "app": "pamalytics_studio",
+    "version": "0.3.0"
+  }
+}

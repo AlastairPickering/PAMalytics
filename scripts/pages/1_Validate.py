@@ -1,456 +1,745 @@
-# pages/1_Validate.py
-import streamlit as st
-import pandas as pd
-import numpy as np
-import os
+# scripts/pages/1_Validate.py
+from __future__ import annotations
+
 import io
 import math
+import hashlib
+import os
 from pathlib import Path
-import matplotlib.pyplot as plt
+from typing import Optional, Tuple, Dict, List
+
+import numpy as np
+import pandas as pd
+import streamlit as st
 import librosa
-import librosa.display
+import matplotlib.pyplot as plt
 import soundfile as sf
-from pandas.errors import DtypeWarning
-import warnings
-from typing import Optional, Tuple
-from config import RAW_AUDIO_DIR, RESULTS_DIR
+from matplotlib.ticker import FuncFormatter
+from matplotlib.patches import Rectangle
 
-st.set_page_config(layout="wide", page_title="Validate")
+# Page config
+try:
+    st.set_page_config(layout="wide", page_title="Validate")
+except Exception:
+    pass
 
-def render_validation(detections: pd.DataFrame, sources: dict) -> None:
-    """
-    Studio entry point. 'detections' is the dataset prepared by Studio.
-    'sources' may contain:
-       - project_root: Path
-       - audio_map: pd.DataFrame (filename, path)
-       - present_dir: Path (optional)
-    """
-    # Avoid set_page_config here (Studio did it already)
+
+# utilities
+
+def _num(x) -> float:
+    try:
+        v = float(x)
+        return v if np.isfinite(v) else np.nan
+    except Exception:
+        return np.nan
+
+
+def _best_prob_from_row(row: pd.Series) -> float:
+    for c in ("detection_probability", "probability", "prob", "score", "class_prob", "det_prob"):
+        if c in row and pd.notna(row[c]):
+            try:
+                v = float(row[c])
+                if np.isfinite(v):
+                    return v
+            except Exception:
+                pass
+    return np.nan
+
+
+def _get_active_dataset_or_load(sources: dict, df_passed: Optional[pd.DataFrame]) -> pd.DataFrame:
+    # Use dataframe passed in by host if available
+    if isinstance(df_passed, pd.DataFrame) and not df_passed.empty:
+        return df_passed.copy()
+
+    # Use in-memory session dataset if set on publish
+    if isinstance(st.session_state.get("pa_df_det"), pd.DataFrame) and not st.session_state["pa_df_det"].empty:
+        return st.session_state["pa_df_det"].copy()
+
+    # Use active dataset path selected by Dashboard
+    active_path = st.session_state.get("active_dataset_path")
+    if isinstance(active_path, str) and active_path.strip() and Path(active_path).exists():
+        try:
+            return pd.read_csv(active_path)
+        except Exception:
+            pass
+
+    # Fallback to project files: validated then original
+    proj_root = Path(sources.get("project") or sources.get("project_root") or ".")
+    dn = proj_root / "data_normalised"
+    for p in [dn / "detections_validated.csv", dn / "detections_normalised.csv"]:
+        try:
+            if p.exists():
+                return pd.read_csv(p)
+        except Exception:
+            continue
+
+    return pd.DataFrame()
+
+
+def _ensure_validation_ready(df_in: pd.DataFrame) -> pd.DataFrame:
+    """Canonicalise fields and derive display state from presence_label + species_name."""
+    df = df_in.copy()
+
+    # Canonical columns
+    if "species_name" not in df.columns:
+        df["species_name"] = df.get("class", "")
+    if "presence_label" not in df.columns:
+        if "FinalLabelEffective" in df.columns:
+            df["presence_label"] = df["FinalLabelEffective"]
+        elif "FinalLabel" in df.columns:
+            df["presence_label"] = df["FinalLabel"]
+        elif "label" in df.columns:
+            df["presence_label"] = df["label"]
+        else:
+            df["presence_label"] = "present"
+
+    # File/paths
+    if "path" not in df.columns and "file_path" in df.columns:
+        df["path"] = df["file_path"]
+
+    if "basename" not in df.columns:
+        src = df.get("file_id", df.get("source_file", ""))
+        df["basename"] = src.astype(str).map(lambda p: Path(p).name)
+
+    if "filename_stem" not in df.columns:
+        df["filename_stem"] = df["basename"].astype(str).map(lambda s: Path(s).stem.lower())
+
+    # Start/end aliases
+    if "start_s" not in df.columns and "detection_start_s" in df.columns:
+        df["start_s"] = pd.to_numeric(df["detection_start_s"], errors="coerce")
+    if "end_s" not in df.columns and "detection_end_s" in df.columns:
+        df["end_s"] = pd.to_numeric(df["detection_end_s"], errors="coerce")
+
+    # Probability
+    if "detection_probability" not in df.columns:
+        df["detection_probability"] = df.apply(_best_prob_from_row, axis=1)
+
+    # Originals for audit/reset
+    if "species_name_original" not in df.columns:
+        df["species_name_original"] = df["species_name"]
+    if "presence_label_original" not in df.columns:
+        df["presence_label_original"] = df["presence_label"]
+
+    # Validation/admin fields
+    for c, default in [
+        ("validation_state", ""), ("validation_label", ""), ("validation_species", ""),
+        ("validated_by", ""), ("validated_at", ""), ("validation_method", ""),
+        ("user_changed", ""), ("user_changed_by", ""), ("user_changed_at", "")
+    ]:
+        if c not in df.columns:
+            df[c] = default
+
+    # Effective present/absent from presence_label
+    pleff = df["presence_label"].astype(str).str.strip().str.lower()
+    df["FinalLabelEffective"] = np.where(pleff == "present", "present", "absent")
+
+    # Species display for UI (absent is not a species)
+    sp = df["species_name"].astype(str)
+    df["species_display"] = np.where(
+        (df["FinalLabelEffective"] != "present") | (sp.str.strip() == ""),
+        "[absent]",
+        sp
+    )
+
+    return df
+
+
+def _resolve_audio_path(row_or_df, df_all: pd.DataFrame) -> Optional[Path]:
+    """Prefer explicit path in row/group; else resolve by filename stem elsewhere in project data."""
+    if isinstance(row_or_df, pd.Series):
+        rows = [row_or_df]
+    else:
+        rows = [row_or_df.iloc[0]] if len(row_or_df) else []
+
+    for r in rows:
+        for col in ("file_path", "path"):
+            p = r.get(col)
+            if isinstance(p, str) and p.strip() and Path(p).exists():
+                return Path(p)
+
+    cand_cols = [c for c in ("file_path", "path") if c in df_all.columns]
+    if not cand_cols:
+        return None
+
+    if isinstance(row_or_df, pd.Series):
+        stem = Path(str(row_or_df.get("basename", row_or_df.get("source_file", "")))).stem.lower()
+    else:
+        s = row_or_df.iloc[0]
+        stem = Path(str(s.get("basename", s.get("source_file", "")))).stem.lower()
+
+    rows2 = df_all[df_all["filename_stem"] == stem]
+    if rows2.empty:
+        return None
+
+    for col in cand_cols:
+        for q in rows2[col]:
+            if isinstance(q, str) and q.strip() and Path(q).exists():
+                return Path(q)
+
+    for col in cand_cols:
+        q = rows2[col].dropna().astype(str).head(1)
+        if not q.empty and Path(q.iloc[0]).exists():
+            return Path(q.iloc[0])
+
+    return None
+
+
+def _decimate_mean(y: np.ndarray, sr: int, te: int) -> Tuple[np.ndarray, int]:
+    """Integer time-expansion by mean decimation; preserves full duration in playback rate."""
+    te = max(1, int(te))
+    if te == 1 or y.size == 0:
+        return y.astype(np.float32, copy=False), int(sr)
+    n = (y.size // te) * te
+    if n <= 0:
+        return y.astype(np.float32, copy=False), int(sr)
+    yy = y[:n].reshape(-1, te).mean(axis=1)
+    return yy.astype(np.float32, copy=False), int(sr // te)
+
+
+def _choose_te_guard(sr: int, high_hz: Optional[float]) -> int:
+    """Nyquist guard; ensure downsampling avoids aliasing for given high bound."""
+    if high_hz is None or not np.isfinite(high_hz) or high_hz <= 0:
+        return 1
+    nyq = 0.5 * sr
+    limit = 0.9 * nyq
+    if high_hz <= limit:
+        return 1
+    return int(max(1, math.ceil(high_hz / limit)))
+
+
+def _estimate_peak_hz_for_group(gdf: pd.DataFrame, sr: int) -> Optional[float]:
+    """Peak frequency estimate for time-expansion targeting."""
+    if "detection_probability" not in gdf.columns:
+        gdf = gdf.assign(detection_probability=gdf.apply(_best_prob_from_row, axis=1))
+
+    try:
+        idx = int(gdf["detection_probability"].astype(float).fillna(-1.0).idxmax())
+        row = gdf.loc[idx]
+    except Exception:
+        row = gdf.iloc[0]
+
+    lf = _num(row.get("low_freq"))
+    hf = _num(row.get("high_freq"))
+    if np.isfinite(lf) and np.isfinite(hf) and hf > lf:
+        return 0.5 * (lf + hf)
+
+    nyq = 0.5 * sr
+    return min(12_000.0, 0.45 * nyq)
+
+
+def _choose_te_for_peak(peak_hz: float) -> int:
+    """Target ~11–12 kHz audible peak."""
+    if not (isinstance(peak_hz, (int, float)) and np.isfinite(peak_hz) and peak_hz > 0):
+        return 1
+    te = int(max(1, round(peak_hz / 11_000.0)))
+    return min(te, 16)
+
+
+def _group_max_prob(gdf: pd.DataFrame) -> float:
+    ps = pd.to_numeric(gdf.get("detection_probability"), errors="coerce")
+    return float(ps.max()) if ps.notna().any() else -np.inf
+
+
+def _tmp_audio_path(proj_root: Path, base: str, species_line: str, te: int, sr: int, n: int) -> Path:
+    """Stable temp WAV path so the browser streams the full clip reliably."""
+    ws = proj_root / "workspace" / "tmp_audio"
+    ws.mkdir(parents=True, exist_ok=True)
+    key = f"{base}|{species_line}|te={te}|sr={sr}|n={n}"
+    h = hashlib.md5(key.encode("utf-8")).hexdigest()[:12]
+    return ws / f"play_{h}.wav"
+
+
+def _now_iso() -> str:
+    try:
+        from datetime import datetime, timezone
+        return datetime.now(timezone.utc).isoformat()
+    except Exception:
+        return ""
+
+
+def _user_name() -> str:
+    return str(st.session_state.get("user_name") or os.environ.get("USER") or os.environ.get("USERNAME") or "")
+
+
+# in-session overrides
+
+def _ov_init():
+    if "val_overrides" not in st.session_state:
+        st.session_state["val_overrides"] = {}
+
+
+def _ov_set_many(ids: List[str], state: str):
+    _ov_init()
+    for d in ids:
+        if not d:
+            continue
+        st.session_state["val_overrides"][str(d)] = {"state": state, "species": "", "label": ""}
+
+
+def _ov_get_state(detection_id: str) -> str:
+    _ov_init()
+    rec = st.session_state["val_overrides"].get(str(detection_id))
+    return (rec or {}).get("state", "")
+
+
+# page entrypoint
+
+def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None:
     st.header("Validation")
 
-    # Use the incoming dataset instead of loading files from disk
-    df = detections.copy()
+    # Load the same dataset the Dashboard uses
+    df_loaded = _get_active_dataset_or_load(sources, detections)
+    if df_loaded is None or df_loaded.empty:
+        st.warning("Validation cannot start because the analysis dataset is not initialised. Open the PAM Dashboard first.")
+        return
 
-    # Example: respect existing columns (FinalLabel/UserLabel) if present
-    if "UserLabel" not in df.columns:
-        df["UserLabel"] = ""
+    proj_root = Path(sources.get("project") or sources.get("project_root") or ".")
+    df_all = _ensure_validation_ready(df_loaded)
+    _ov_init()
 
-    # Show an editor for label overrides (keep light; your existing UI can be dropped in here)
-    edited = st.data_editor(
-        df[["source_file", "label", "score", "timestamp_utc", "UserLabel"]].copy(),
-        use_container_width=True,
-        num_rows="dynamic",
-        key="validate_editor",
-    )
+    # Layout controls
+    top1, top2, top3 = st.columns([1, 1, 1])
+    with top1:
+        NUM_PER_PAGE = st.number_input("Spectrograms per page", min_value=4, max_value=40, value=10, step=2)
+    with top2:
+        COLS_PER_ROW = st.slider("Columns per row", min_value=2, max_value=5, value=2)
+    with top3:
+        PAGE = st.number_input("Page", min_value=1, value=1, step=1)
 
-    # Optional save back into the project (Studio workspace)
-    project_root: Path = sources.get("project_root")
-    if project_root and st.button("Save validation edits"):
-        out = (project_root / "data_normalised" / "detections_validated.csv")
-        edited.to_csv(out, index=False)
-        st.success(f"Saved to {out}")
+    # Filters (collapsible)
+    with st.expander("Advanced filters", expanded=False):
+        r1c1, r1c2, r1c3 = st.columns([1, 1, 1])
+        with r1c1:
+            show_label = st.selectbox(
+                "Show clips labelled",
+                ["present", "absent", "all", "user changed only"],
+                index=0
+            )
+        with r1c2:
+            min_prob = st.slider("Min detection probability", 0.0, 1.0, 0.0, 0.01)
+        with r1c3:
+            sort_by = st.selectbox(
+                "Sort by",
+                ["probability: high → low", "probability: low → high", "basename"],
+                index=0
+            )
 
-# Allow standalone debug run (keeps current dev workflow, does nothing during Studio import)
-if __name__ == "__main__":
-    st.write("This page is designed to be called by Studio via render_validation().")
+        frow1, frow2, frow3, frow4, frow5 = st.columns([0.9, 0.7, 0.2, 0.9, 2.3])
+        with frow1:
+            lock_freq = st.checkbox("Lock frequency (kHz)", value=False)
+        with frow2:
+            fmin_khz = st.number_input("Min", min_value=0.0, max_value=200.0, value=15.0, step=1.0, disabled=not lock_freq)
+        with frow3:
+            st.caption("")
+        with frow4:
+            fmax_khz = st.number_input("Max", min_value=1.0, max_value=250.0, value=90.0, step=1.0, disabled=not lock_freq)
+        with frow5:
+            st.caption("")
 
-    
-# Session defaults 
-AUDIO_DEFAULT_DIR = RAW_AUDIO_DIR / "processed" / "present"
-if "audio_base_dir" not in st.session_state:
-    st.session_state["audio_base_dir"] = str(AUDIO_DEFAULT_DIR)
+    # Defaults when collapsed
+    show_label = locals().get("show_label", "present")
+    min_prob   = locals().get("min_prob", 0.0)
+    sort_by    = locals().get("sort_by", "probability: high → low")
+    lock_freq  = locals().get("lock_freq", False)
+    fmin_khz   = locals().get("fmin_khz", 15.0)
+    fmax_khz   = locals().get("fmax_khz", 90.0)
 
-if "filename_level_path" not in st.session_state:
-    st.session_state["filename_level_path"] = str(RESULTS_DIR / "filename_level.csv")
+    # Effective validation state with overrides
+    eff_state = df_all["validation_state"].astype(str).str.lower() if "validation_state" in df_all.columns else pd.Series([""]*len(df_all))
+    if "detection_id" in df_all.columns:
+        ov_map = st.session_state["val_overrides"]
+        if ov_map:
+            det_ids = df_all["detection_id"].astype(str)
+            eff_state = det_ids.map(lambda d: ov_map.get(d, {}).get("state", "") or "").where(
+                eff_state.eq(""), eff_state
+            )
+    df_all = df_all.assign(validation_state_effective=eff_state)
 
-# Prefer a user-set segment file; else try cleaned.xlsx, else csv
-if "segment_results_path" not in st.session_state:
-    cleaned = RESULTS_DIR / "merged_classification_results_cleaned.xlsx"
-    csv     = RESULTS_DIR / "merged_classification_results.csv"
-    st.session_state["segment_results_path"] = str(cleaned if cleaned.exists() else csv)
+    # Filtering
+    df_view = df_all.copy()
+    if show_label in ("present", "absent"):
+        df_view = df_view[df_view["FinalLabelEffective"] == show_label]
+    elif show_label == "user changed only":
+        ch = df_view.get("user_changed", "").astype(str).isin(["1"]) | df_view.get("user_changed", "").astype(str).ne("").astype(bool)
+        vset = df_view["validation_state_effective"].isin(["correct", "incorrect"])
+        df_view = df_view[ch | vset]
 
-# UserLabel helpers
-def ensure_userlabel(df_in: pd.DataFrame) -> pd.DataFrame:
-    """Ensure an editable UserLabel column exists and uses empty strings (not NaN/'nan')."""
-    df = df_in.copy()
-    if "UserLabel" not in df.columns:
-        df["UserLabel"] = ""
+    df_view["detection_probability"] = pd.to_numeric(df_view["detection_probability"], errors="coerce").fillna(0.0)
+    df_view = df_view[df_view["detection_probability"] >= float(min_prob)]
+    if df_view.empty:
+        st.info("No clips match the current filters.")
+        return
+
+    # Grouping like dashboard: (basename, species_display)
+    df_view = df_view.sort_values(["basename", "species_display", "start_s"])
+    grouped = df_view.groupby(["basename", "species_display"], dropna=False)
+    groups: List[tuple[str, str]] = list(grouped.indices.keys())
+
+    # Sorting groups
+    if sort_by.startswith("probability"):
+        g_scores = {k: _group_max_prob(grouped.get_group(k)) for k in groups}
+        reverse = (sort_by == "probability: high → low")
+        groups = sorted(groups, key=lambda k: g_scores.get(k, -np.inf), reverse=reverse)
     else:
-        df["UserLabel"] = df["UserLabel"].fillna("").replace({"nan": ""})
-    return df
+        groups = sorted(groups, key=lambda k: (k[0], k[1]))
 
-def with_effective_labels(df_in: pd.DataFrame) -> pd.DataFrame:
-    """
-    Add FinalLabelEffective (UserLabel if set, else FinalLabel),
-    is_present from FinalLabelEffective, and Changed flag.
-    Robust to NaN/'nan' in UserLabel.
-    """
-    df = ensure_userlabel(df_in)
-    if "FinalLabel" not in df.columns:
-        st.error("Missing 'FinalLabel' in filename-level data.")
-        st.stop()
+    # Pagination
+    total_cards = len(groups)
+    start_idx = (int(PAGE) - 1) * int(NUM_PER_PAGE)
+    end_idx = min(total_cards, start_idx + int(NUM_PER_PAGE))
+    page_keys = groups[start_idx:end_idx]
+    st.caption(f"Showing {len(page_keys)} of {total_cards} spectrograms (page {PAGE})")
 
-    u = (df["UserLabel"].fillna("").astype(str).replace({"nan": ""}).str.strip().str.lower())
-    m = (df["FinalLabel"].astype(str).str.strip().str.lower())
+    # Page-level bulk validate
+    page_ids: List[str] = []
+    for base, species_line in page_keys:
+        gdf = grouped.get_group((base, species_line))
+        if "detection_id" in gdf.columns:
+            page_ids.extend([str(x) for x in gdf["detection_id"].astype(str).tolist()])
 
-    eff = np.where(u != "", u, m)
-    df = df.copy()
-    df["FinalLabelEffective"] = eff
-    df["is_present"] = (eff == "present").astype(int)
-    df["Changed"] = (u != "") & (u != m)
-    return df
-
-def to_stem_lower(x: str) -> str:
-    return Path(str(x)).stem.lower()
-
-def load_filename_level() -> pd.DataFrame:
-    """Load active filename-level file chosen in Settings; ensure UserLabel is clean."""
-    path = Path(st.session_state.get("filename_level_path", RESULTS_DIR / "filename_level.csv"))
-    if not path.exists():
-        st.error(f"Filename-level file not found: {path}")
-        st.stop()
-    if path.suffix.lower() in (".xlsx", ".xls"):
-        try:
-            df = pd.read_excel(path, sheet_name="filename_level")
-        except Exception:
-            df = pd.read_excel(path)
-    else:
-        df = pd.read_csv(path)
-    return ensure_userlabel(df)
-
-def save_filename_level(path: Path, df: pd.DataFrame) -> None:
-    """Save back to the same file type (CSV/XLSX). Only UserLabel is edited by this page."""
-    if path.suffix.lower() in (".xlsx", ".xls"):
-        try:
-            with pd.ExcelWriter(path, engine="openpyxl", mode="w") as writer:
-                df.to_excel(writer, sheet_name="filename_level", index=False)
-        except Exception:
-            df.to_excel(path, index=False)
-    else:
-        df.to_csv(path, index=False)
-
-# Segment loading
-def find_probability_column(seg: pd.DataFrame) -> Optional[str]:
-    direct = [c for c in seg.columns if c.lower() in
-              ("probability", "prob", "pred_prob", "pred_probability", "score", "p")]
-    if direct:
-        return direct[0]
-    for c in seg.columns:
-        if "prob" in c.lower():
-            return c
-    return None
-
-def find_filename_like_column(seg: pd.DataFrame) -> Optional[str]:
-    candidates = ["filename", "audio_file", "file", "clip_id", "clip", "path"]
-    for c in candidates:
-        if c in seg.columns:
-            return c
-    for c in seg.columns:
-        if seg[c].dtype == "object":
-            return c
-    return None
-
-def load_segments() -> Optional[pd.DataFrame]:
-    """Load segment-level results; be tolerant of mixed dtypes."""
-    path = Path(st.session_state.get("segment_results_path", RESULTS_DIR / "merged_classification_results.csv"))
-    if not path.exists():
-        st.warning(f"Segment file not found: {path}")
-        return None
-    try:
-        if path.suffix.lower() in (".xlsx", ".xls"):
-            seg = pd.read_excel(path)
-        else:
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", DtypeWarning)
-                seg = pd.read_csv(path, low_memory=False)
-    except Exception as e:
-        st.warning(f"Failed to read segments: {e}")
-        return None
-    if seg.empty:
-        st.warning("Segment file is empty.")
-        return None
-    return seg
-
-def make_clip_prob(seg: pd.DataFrame) -> pd.DataFrame:
-    """
-    From segment-level results, compute per-file clip_prob = max(probability) across segments.
-    Normalises probability to 0–1 if needed. Joins on filename_stem.
-    """
-    seg = seg.copy()
-
-    fname_col = find_filename_like_column(seg)
-    prob_col  = find_probability_column(seg)
-
-    if fname_col is None or prob_col is None:
-        st.warning("Could not detect filename/probability columns in the segment file.")
-        return pd.DataFrame(columns=["filename_stem", "clip_prob"])
-
-    seg["filename_stem"] = seg[fname_col].astype(str).map(to_stem_lower)
-    seg[prob_col] = pd.to_numeric(seg[prob_col], errors="coerce")
-    seg = seg.dropna(subset=[prob_col, "filename_stem"])
-
-    max_val = seg[prob_col].max()
-    if pd.notna(max_val) and max_val > 1:
-        if max_val <= 100:
-            seg[prob_col] = seg[prob_col] / 100.0
-        else:
-            seg[prob_col] = seg[prob_col].clip(0, 1)
-
-    clipprob = (
-        seg.groupby("filename_stem")[prob_col]
-        .max()
-        .reset_index()
-        .rename(columns={prob_col: "clip_prob"})
-    )
-    clipprob["clip_prob"] = clipprob["clip_prob"].clip(0, 1)
-    return clipprob
-
-# Audio helpers
-def _figure_to_png(fig) -> bytes:
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", bbox_inches="tight", pad_inches=0)
-    plt.close(fig)
-    buf.seek(0)
-    return buf.read()
-
-@st.cache_data(show_spinner=False)
-def make_thumbnail_and_audio(audio_path: str, preview_seconds: int) -> Tuple[Optional[bytes], Optional[bytes]]:
-    """Return (thumbnail_png_bytes, audio_wav_bytes). Thumbnail uses first N seconds; audio is full file."""
-    try:
-        y, sr = librosa.load(audio_path, sr=None)
-        y_thumb = y[: int(preview_seconds * sr)]
-        fig, ax = plt.subplots(figsize=(3.0, 1.6), dpi=140)  # crisp but compact
-        S = librosa.feature.melspectrogram(y=y_thumb, sr=sr, n_fft=1024, hop_length=512)
-        S_dB = librosa.power_to_db(S, ref=np.max)
-        librosa.display.specshow(S_dB, sr=sr, x_axis=None, y_axis=None, ax=ax)
-        ax.set_axis_off()
-        thumb_png = _figure_to_png(fig)
-
-        abuf = io.BytesIO()
-        sf.write(abuf, y, sr, format="WAV")
-        abuf.seek(0)
-        return thumb_png, abuf.read()
-    except Exception:
-        return None, None
-
-def find_audio_path_by_stem(filename_stem: str) -> Optional[Path]:
-    base = Path(st.session_state.get("audio_base_dir", str(AUDIO_DEFAULT_DIR)))
-    if not filename_stem or not base.exists():
-        return None
-    for ext in (".wav", ".WAV", ".flac", ".FLAC"):
-        p = base / f"{Path(filename_stem).stem}{ext}"
-        if p.exists():
-            return p
-    lower_stem = Path(filename_stem).stem.lower()
-    try:
-        for p in base.iterdir():
-            if p.is_file() and p.stem.lower() == lower_stem:
-                return p
-    except Exception:
-        pass
-    return None
-
-@st.cache_data(show_spinner=False)
-def list_present_stems(base_dir_str: str) -> set:
-    """
-    Return a set of lowercase filename stems that actually exist
-    in the current audio folder (present directory by default).
-    """
-    stems = set()
-    try:
-        base = Path(base_dir_str)
-        if not base.exists():
-            return stems
-        for q in base.iterdir():
-            if q.is_file() and q.suffix.lower() in {".wav", ".flac"}:
-                stems.add(q.stem.lower())
-    except Exception:
-        pass
-    return stems
-
-# Load data
-df_master = load_filename_level()
-required_cols = ["filename", "FinalLabel"]
-missing = [c for c in required_cols if c not in df_master.columns]
-if missing:
-    st.error(f"Missing required columns in filename-level data: {missing}")
-    st.stop()
-
-df = df_master.copy()
-df["filename_stem"] = df["filename"].astype(str).map(to_stem_lower)
-df = with_effective_labels(df)  # adds FinalLabelEffective, is_present, Changed
-
-# Merge in clip_prob (best segment prob per file)
-seg = load_segments()
-if seg is not None:
-    clipprob = make_clip_prob(seg)
-    df = df.merge(clipprob, on="filename_stem", how="left")
-else:
-    df["clip_prob"] = np.nan
-    st.caption("No segment file loaded — probabilities unavailable.")
-
-# default sort order flag for probability
-prob_low_to_high = False
-
-# UI controls
-st.header("Validate predictions")
-
-top1, top2, top3, top4 = st.columns([1.0, 1.0, 1.0, 1.0])
-with top1:
-    show_label = st.selectbox("Show clips labelled", ["present", "absent", "all"], index=0)
-with top2:
-    min_prob = st.slider("Min clip probability", 0.0, 1.0, 0.0, 0.01)
-with top3:
-    sort_by = st.selectbox("Sort by", ["clip_prob", "filename"], index=0)
-    # When sorting by probability, allow low → high as well as high → low (default)
-    if sort_by == "clip_prob":
-        prob_low_to_high = st.checkbox(
-            "Probability: low → high",
-            value=False,
-            help="Tick to see the least confident predictions first."
-        )
-with top4:
-    # spacer so the checkbox aligns with the other controls' labels
-    st.markdown("<div style='height:1.95em'></div>", unsafe_allow_html=True)
-    changed_only = st.checkbox("Changed only", value=False)
-
-# Filter rows
-df_view = df.copy()
-
-# label filter
-if show_label in ("present", "absent"):
-    df_view = df_view[df_view["FinalLabelEffective"] == show_label]
-
-# changed filter
-if changed_only and "Changed" in df_view.columns:
-    df_view = df_view[df_view["Changed"]]
-
-# prob filter & sort key
-df_view["clip_prob_f"] = pd.to_numeric(df_view["clip_prob"], errors="coerce").fillna(0.0)
-df_view = df_view[df_view["clip_prob_f"] >= float(min_prob)]
-
-# keep only files that actually exist in the current audio (present) folder
-present_stems = list_present_stems(st.session_state.get("audio_base_dir", str(AUDIO_DEFAULT_DIR)))
-if present_stems:
-    df_view = df_view[df_view["filename_stem"].isin(present_stems)]
-else:
-    st.info("No audio files found in the selected audio folder. Nothing to display.")
-
-# sorting
-if sort_by == "clip_prob":
-    df_view = df_view.sort_values(
-        ["clip_prob_f", "filename_stem"],
-        ascending=[prob_low_to_high, True]
-    )
-else:
-    df_view = df_view.sort_values("filename_stem")
-
-# Grid controls
-c1, c2, c3, c4 = st.columns(4)
-with c1:
-    NUM_PER_PAGE = st.number_input("Clips per page", min_value=6, max_value=60, value=12, step=6)
-with c2:
-    COLS_PER_ROW = st.slider("Columns per row", min_value=2, max_value=5, value=3)
-with c3:
-    THUMB_SEC = st.slider("Spectrogram preview (seconds)", min_value=5, max_value=60, value=60,
-                          help="Thumbnail only; audio = full file")
-with c4:
-    PAGE = st.number_input("Page", min_value=1, value=1, step=1)
-
-total = len(df_view)
-start = (int(PAGE)-1) * int(NUM_PER_PAGE)
-end = start + int(NUM_PER_PAGE)
-page_df = df_view.iloc[start:end].reset_index(drop=True)
-
-st.caption(f"Showing {len(page_df)} of {total} clips (page {PAGE})")
-
-# Grid + proposed updates
-updates = []
-n_rows = math.ceil(len(page_df) / int(COLS_PER_ROW))
-
-if page_df.empty:
-    st.info("No clips match the current filters.")
-else:
-    page_df = page_df.assign(_stem=page_df["filename"].astype(str).map(to_stem_lower))
-
-    for r in range(n_rows):
-        cols = st.columns(int(COLS_PER_ROW))
-        for c in range(int(COLS_PER_ROW)):
-            i = r * int(COLS_PER_ROW) + c
-            if i >= len(page_df):
-                break
-            row = page_df.iloc[i]
-            with cols[c]:
-                u = str(row.get("UserLabel", "")).strip().lower()
-                m = str(row.get("FinalLabel", "")).strip().lower()
-                badge = " 🟠 changed" if (u != "" and u != m) else ""
-                prob_txt = f" · p={row['clip_prob_f']:.2f}" if pd.notna(row["clip_prob_f"]) else ""
-                st.caption(f"**{row['filename']}**{prob_txt}{badge}")
-
-                apath = find_audio_path_by_stem(row["_stem"])
-                if apath and apath.exists():
-                    thumb_png, audio_wav = make_thumbnail_and_audio(str(apath), int(THUMB_SEC))
-                    if thumb_png:
-                        st.image(thumb_png, width="stretch")  # replaced use_container_width
-                    else:
-                        st.info("No thumbnail")
-                    if audio_wav:
-                        st.audio(io.BytesIO(audio_wav), format="audio/wav")
-                    else:
-                        st.error("Audio unreadable")
-                else:
-                    st.error("Audio not found")
-
-                eff = str(row["FinalLabelEffective"]).lower()
-                idx = 1 if eff == "present" else 0
-                choice = st.radio("Label", ["absent", "present"], index=idx,
-                                  key=f"val_{start+i}", horizontal=True)
-
-                proposed = "" if choice == m else choice
-                if proposed != u:
-                    updates.append({"filename": row["filename"], "UserLabel": proposed})
-
-# Pending changes table
-st.subheader("Pending changes (unsaved)")
-if not updates:
-    st.write("No pending changes.")
-else:
-    upd_df = pd.DataFrame(updates).drop_duplicates(subset=["filename", "UserLabel"])
-    view_cols = ["filename", "FinalLabel", "UserLabel", "FinalLabelEffective", "clip_prob"]
-    merged = upd_df.merge(df[view_cols], on="filename", how="left", suffixes=("", "_current"))
-    merged = merged.sort_values(
-        ["clip_prob"],
-        ascending=[prob_low_to_high if sort_by == "clip_prob" else False]
-    )
-    st.dataframe(
-        merged[["filename", "FinalLabel", "UserLabel", "FinalLabelEffective", "clip_prob"]],
-        width="stretch"  # replaced use_container_width
-    )
-
-# Save
-left, right = st.columns([1, 3])
-with left:
-    if st.button("Save all updates"):
-        try:
-            df_master2 = load_filename_level()  # fresh
-            changes = 0
-            for rec in updates:
-                mask = df_master2["filename"].astype(str) == str(rec["filename"])
-                if mask.any():
-                    old = str(df_master2.loc[mask, "UserLabel"].iloc[0]) if "UserLabel" in df_master2.columns else ""
-                    if old != rec["UserLabel"]:
-                        if "UserLabel" not in df_master2.columns:
-                            df_master2["UserLabel"] = ""
-                        df_master2.loc[mask, "UserLabel"] = rec["UserLabel"]
-                        changes += int(mask.sum())
-            out_path = Path(st.session_state.get("filename_level_path", RESULTS_DIR / "filename_level.csv"))
-            save_filename_level(out_path, df_master2)
-            st.success(f"Saved {changes} update(s) to {out_path.name}.")
+    bL, bR = st.columns([1, 5])
+    with bL:
+        if st.button("Validate all visible as correct"):
+            _ov_set_many([d for d in page_ids if d], state="correct")
             if hasattr(st, "rerun"):
                 st.rerun()
             elif hasattr(st, "experimental_rerun"):
                 st.experimental_rerun()
-        except Exception as e:
-            st.error(f"Failed to save updates: {e}")
-with right:
-    st.caption("Only the **UserLabel** column is updated. The original **FinalLabel** is never overwritten.")
+
+    # Species choice list with UI "[absent]" command first
+    species_choices = sorted(
+        pd.unique(
+            pd.concat([
+                df_all.get("species_name", pd.Series([], dtype=object)).astype(str),
+                df_all.get("class", pd.Series([], dtype=object)).astype(str)
+            ], ignore_index=True)
+        ).tolist()
+    )
+    species_choices = [s for s in species_choices if s and s.lower() not in ("nan", "[absent]")]
+    species_choices.insert(0, "[absent]")
+
+    sp_updates: List[Dict[str, str]] = []
+
+    # Render spectrogram grid
+    n_rows = math.ceil(len(page_keys) / int(COLS_PER_ROW))
+    for r in range(n_rows):
+        cols = st.columns(int(COLS_PER_ROW))
+        for c in range(int(COLS_PER_ROW)):
+            gi = r * int(COLS_PER_ROW) + c
+            if gi >= len(page_keys):
+                break
+
+            base, species_line = page_keys[gi]
+            gdf = grouped.get_group((base, species_line)).copy()
+
+            if "detection_probability" not in gdf.columns:
+                gdf["detection_probability"] = gdf.apply(_best_prob_from_row, axis=1)
+
+            n_det = int(len(gdf))
+            max_cp = _group_max_prob(gdf)
+            title_html = (
+                f"<div style='margin-bottom:2px'><strong>{base}</strong>"
+                f"<br>{species_line}"
+                f"<br>Detections: {n_det}"
+            )
+            if np.isfinite(max_cp):
+                title_html += f"<br>Max probability: {max_cp:.2f}"
+            title_html += "</div>"
+
+            with cols[c]:
+                h1, h2 = st.columns([2.0, 1.0])
+                with h1:
+                    st.markdown(title_html, unsafe_allow_html=True)
+                with h2:
+                    card_ids = [str(x) for x in gdf.get("detection_id", pd.Series([], dtype=object)).astype(str).tolist()]
+                    if st.button("Validate all", key=f"bulk_spec_correct_{hash((base, species_line))}"):
+                        _ov_set_many([d for d in card_ids if d], state="correct")
+                        if hasattr(st, "rerun"):
+                            st.rerun()
+                        elif hasattr(st, "experimental_rerun"):
+                            st.experimental_rerun()
+
+                apath = _resolve_audio_path(gdf, df_all)
+                if not (apath and apath.exists()):
+                    st.error("Audio not found")
+                else:
+                    try:
+                        y, sr = librosa.load(str(apath), sr=None, mono=True)
+                    except Exception as e:
+                        st.error(f"Audio read error: {e}")
+                        y, sr = np.array([], dtype=np.float32), 1
+
+                # Detection windows (top-10 by prob)
+                boxes: List[Dict[str, float]] = []
+                for _, row in gdf.iterrows():
+                    b = {
+                        "start_s": _num(row.get("start_s", row.get("detection_start_s"))),
+                        "end_s":   _num(row.get("end_s",   row.get("detection_end_s"))),
+                        "low_freq":_num(row.get("low_freq")),
+                        "high_freq":_num(row.get("high_freq")),
+                        "prob":    _num(row.get("detection_probability")),
+                    }
+                    if (np.isfinite(b["start_s"]) and np.isfinite(b["end_s"]) and b["end_s"] > b["start_s"]):
+                        boxes.append(b)
+
+                if boxes:
+                    boxes = sorted(
+                        boxes,
+                        key=lambda b: (b["prob"] if np.isfinite(b["prob"]) else -1.0),
+                        reverse=True
+                    )[:10]
+
+                if apath and y.size > 0:
+                    # Frequency window
+                    if lock_freq and (fmax_khz > fmin_khz):
+                        ymin = max(0.0, float(fmin_khz) * 1000.0)
+                        ymax = float(fmax_khz) * 1000.0
+                        nyq = 0.5 * sr * 0.98
+                        ymax = min(ymax, nyq)
+                    else:
+                        highs = [b["high_freq"] for b in boxes if np.isfinite(b["high_freq"])]
+                        lows  = [b["low_freq"]  for b in boxes if np.isfinite(b["low_freq"])]
+                        if highs and lows and max(highs) > min(lows):
+                            fmin, fmax = min(lows), max(highs)
+                        else:
+                            fmin, fmax = 0.0, 0.5 * sr
+                        span = max(1.0, (fmax - fmin))
+                        pad = max(4_000.0, 0.30 * span)
+                        nyq = 0.5 * sr * 0.98
+                        ymin = max(0.0, fmin - pad)
+                        ymax = min(nyq, fmax + pad)
+
+                    # Spectrogram
+                    try:
+                        n_fft = 8192 if sr > 48_000 else 4096
+                        hop = n_fft // 8
+                        D = librosa.stft(y=y, n_fft=n_fft, hop_length=hop)
+                        S = np.abs(D) ** 2
+                        S_dB = librosa.power_to_db(S, ref=np.max, top_db=90)
+
+                        times = librosa.frames_to_time(np.arange(S.shape[1]), sr=sr, hop_length=hop)
+                        freqs_hz = np.linspace(0.0, sr * 0.5, S.shape[0])
+                        dur = max(1e-6, len(y) / sr)
+                        tpad = dur * 0.01
+                        xmin, xmax = 0 - tpad, dur + tpad
+                    except Exception as e:
+                        st.error(f"Spectrogram setup error: {e}")
+                        times = np.arange(2); freqs_hz = np.arange(2)
+                        S_dB = np.zeros((2, 2)); xmin, xmax = 0, 1; ymin, ymax = 0, 1
+
+                    try:
+                        fig, ax = plt.subplots(figsize=(8.6, 5.2), dpi=280, constrained_layout=False)
+                        extent = [times.min(), times.max(), freqs_hz.min(), freqs_hz.max()]
+                        ax.imshow(
+                            S_dB,
+                            origin="lower",
+                            aspect="auto",
+                            interpolation="nearest",
+                            extent=extent,
+                            vmin=S_dB.max() - 90,
+                            vmax=S_dB.max(),
+                        )
+                        ax.set_xlim(xmin, xmax)
+                        ax.set_ylim(ymin, ymax)
+                        ax.set_xlabel("Time (s)")
+                        ax.set_ylabel("Frequency (kHz)")
+                        ax.yaxis.set_major_formatter(FuncFormatter(lambda ytick, pos: f"{ytick/1000:.0f}"))
+
+                        # Windows + inline probability labels
+                        for b in boxes:
+                            x0, x1 = b["start_s"], b["end_s"]
+                            prob = b["prob"]
+                            ax.add_patch(Rectangle((x0, ymin), x1 - x0, ymax - ymin,
+                                                   facecolor=(1, 1, 1, 0.06), edgecolor=(1, 1, 1, 0.12), lw=0.6))
+                            if np.isfinite(prob):
+                                xm = (x0 + x1) * 0.5
+                                ym = ymin + 0.88 * (ymax - ymin)
+                                ax.text(
+                                    xm, ym, f"{prob:.2f}",
+                                    ha="center", va="center",
+                                    color="white",
+                                    fontsize=9,
+                                    bbox=dict(boxstyle="round,pad=0.18", fc=(0, 0, 0, 0.55), ec=(1, 1, 1, 0.25), lw=0.5)
+                                )
+
+                        st.pyplot(fig, use_container_width=True, clear_figure=True)
+                        plt.close(fig)
+                    except Exception as e:
+                        st.error(f"Spectrogram error: {e}")
+
+                    # Playback TE from peak
+                    try:
+                        highs = [b["high_freq"] for b in boxes if np.isfinite(b["high_freq"])]
+                        max_high = max(highs) if highs else None
+                        te_guard = _choose_te_guard(sr, max_high)
+                        peak_hz  = _estimate_peak_hz_for_group(gdf, sr)
+                        te_peak  = _choose_te_for_peak(peak_hz)
+                        te = max(te_guard, te_peak)
+
+                        y_play, psr = _decimate_mean(y, sr, te)
+                        peak = float(np.max(np.abs(y_play))) if y_play.size else 0.0
+                        if peak > 0:
+                            y_play = (y_play / peak * 0.98).astype(np.float32)
+
+                        tmp_wav = _tmp_audio_path(proj_root, base, species_line, int(te), int(psr), int(y_play.size))
+                        sf.write(str(tmp_wav), y_play, int(psr), format="WAV", subtype="PCM_16")
+                        st.audio(str(tmp_wav))
+                    except Exception as e:
+                        st.error(f"Playback error: {e}")
+
+                # In-place editor
+                with st.expander("Edit detections (species & validation)"):
+                    rgdf = gdf.reset_index(drop=True)
+                    for ridx, row in rgdf.iterrows():
+                        det_id = str(row.get("detection_id", f"{base}#{ridx}"))
+                        ts = row.get("start_s", row.get("detection_start_s", np.nan))
+                        ts_str = f"{float(ts):.2f}s" if np.isfinite(_num(ts)) else "—"
+
+                        # Current species/presence -> UI choice
+                        cur_sp = str(row.get("species_name", "") or "")
+                        cur_pl = str(row.get("presence_label", "") or "").lower()
+                        current_species_choice = "[absent]" if (cur_pl != "present" or cur_sp.strip() == "") else cur_sp
+                        try:
+                            idx_choice = species_choices.index(current_species_choice)
+                        except ValueError:
+                            idx_choice = 0  # "[absent]"
+
+                        eff_state = _ov_get_state(det_id) or str(row.get("validation_state", "")).lower()
+                        state_opt = ["", "correct", "incorrect"]
+                        state_lbl = ["Unknown", "Correct", "Incorrect"]
+                        state_idx = state_opt.index(eff_state) if eff_state in state_opt else 0
+
+                        cc1, cc2 = st.columns([1.3, 0.9])
+                        with cc1:
+                            new_sp_choice = st.selectbox(
+                                f"Detection {ridx+1} @ {ts_str}",
+                                options=species_choices,
+                                index=idx_choice,
+                                key=f"sp_{base}_{species_line}_{ridx}"
+                            )
+                        with cc2:
+                            new_state_lbl = st.selectbox("Validation", state_lbl, index=state_idx, key=f"val_{base}_{species_line}_{ridx}")
+                            new_state = state_opt[state_lbl.index(new_state_lbl)]
+
+                        # Species change capture (convert "[absent]" to canonical fields on write)
+                        # Store target in 'new_species_choice' so write step can set presence/species correctly.
+                        if new_sp_choice != current_species_choice:
+                            sp_updates.append({
+                                "detection_id": det_id,
+                                "new_species_choice": new_sp_choice  # either "[absent]" or a species string
+                            })
+
+                        # Validation state overrides (in-session)
+                        if new_state != eff_state:
+                            _ov_set_many([det_id], state=new_state)
+
+    st.divider()
+
+    #pending changes + save/publish
+    st.subheader("Pending species changes")
+    if not sp_updates:
+        st.write("No pending changes.")
+    else:
+        # Collapse to last change per detection_id
+        upd_df = pd.DataFrame(sp_updates)
+        upd_df = (upd_df
+                  .groupby("detection_id", as_index=False)
+                  .last())
+        st.dataframe(upd_df, use_container_width=True)
+
+        left, mid, right = st.columns([1, 1, 2])
+
+        def _apply_updates_and_write(det: pd.DataFrame, out_path: Path) -> int:
+            det = det.copy()
+
+            # Ensure expected columns
+            for col in ("species_name", "presence_label", "species_name_original", "presence_label_original",
+                        "user_changed", "user_changed_by", "user_changed_at"):
+                if col not in det.columns:
+                    if col.endswith("_original"):
+                        base = col.replace("_original", "")
+                        det[col] = det.get(base, "")
+                    else:
+                        det[col] = ""
+
+            # detection_id -> indices
+            key_to_idx: Dict[str, List[int]] = {}
+            if "detection_id" in det.columns:
+                for i, r in det.iterrows():
+                    did = str(r.get("detection_id"))
+                    if did and did.lower() != "nan":
+                        key_to_idx.setdefault(did, []).append(i)
+
+            user_id = st.session_state.get("user_id") or st.session_state.get("username") or _user_name()
+            now_iso = _now_iso()
+
+            applied = 0
+            for rec in upd_df.to_dict(orient="records"):
+                detid = rec["detection_id"]
+                choice = rec["new_species_choice"]
+                idxs = key_to_idx.get(detid, [])
+                for i in idxs:
+                    # Set originals if blank
+                    if (str(det.at[i, "species_name_original"]).strip() == ""):
+                        det.at[i, "species_name_original"] = det.at[i, "species_name"]
+                    if (str(det.at[i, "presence_label_original"]).strip() == ""):
+                        det.at[i, "presence_label_original"] = det.at[i, "presence_label"]
+
+                    if choice == "[absent]":
+                        new_species = ""
+                        new_presence = "absent"
+                    else:
+                        new_species = choice
+                        new_presence = "present"
+
+                    changed = (str(det.at[i, "species_name"]) != new_species) or (str(det.at[i, "presence_label"]).lower() != new_presence)
+
+                    det.at[i, "species_name"] = new_species
+                    det.at[i, "presence_label"] = new_presence
+
+                    if changed:
+                        det.at[i, "user_changed"] = "1" if not user_id else user_id
+                        det.at[i, "user_changed_by"] = user_id
+                        det.at[i, "user_changed_at"] = now_iso
+                        applied += 1
+
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            det.to_csv(out_path, index=False)
+
+            # Update session so Dashboard uses validated immediately
+            st.session_state["active_dataset_label"] = "validated"
+            st.session_state["active_dataset_path"] = str(out_path)
+            st.session_state["pa_df_det"] = det  # keep in memory for immediate page reload
+
+            # Clear pending overrides for a clean state after save
+            st.session_state["val_overrides"] = {}
+
+            return applied
+
+        with left:
+            if st.button("Save species changes"):
+                try:
+                    det = df_all.copy()
+                    out = proj_root / "data_normalised" / "detections_validated.csv"
+                    applied = _apply_updates_and_write(det, out)
+                    st.success(f"Applied {applied} change(s). Saved to: {out}")
+                    if hasattr(st, "rerun"):
+                        st.rerun()
+                    elif hasattr(st, "experimental_rerun"):
+                        st.experimental_rerun()
+                except Exception as e:
+                    st.error(f"Failed to save updates: {e}")
+
+        with mid:
+            if st.button("Save & Publish"):
+                try:
+                    det = df_all.copy()
+                    out = proj_root / "data_normalised" / "detections_validated.csv"
+                    applied = _apply_updates_and_write(det, out)
+                    st.success(f"Applied {applied} change(s). Published validated dataset.")
+                    if hasattr(st, "rerun"):
+                        st.rerun()
+                    elif hasattr(st, "experimental_rerun"):
+                        st.experimental_rerun()
+                except Exception as e:
+                    st.error(f"Failed to publish validated dataset: {e}")

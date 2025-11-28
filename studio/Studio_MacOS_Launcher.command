@@ -11,4 +11,4 @@ python -m pip install --upgrade pip
 python -m pip install streamlit pydantic python-dateutil streamlit-extras
 
 # Start via app root so Streamlit sees ./pages/*
-python -m streamlit run studio/launch_studio.py --server.port 8510
+python -m streamlit run studio/Home.py --server.port 8510

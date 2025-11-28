@@ -1,0 +1,29 @@
+{
+  "project_id": "cfbb4d4c-577e-47c3-9d04-ae2bae8f5c46",
+  "name": "batdetect2",
+  "use_case": "external_results",
+  "tz": "UTC",
+  "created_by": "alastair",
+  "created_at": "2025-11-06T17:19:07.937741+00:00",
+  "last_opened": "2025-11-06T17:24:38.442428+00:00",
+  "paths": {
+    "root": "/Users/alastairpickering/Desktop/Alastair/github/pileated_gibbon_classifier/studio/projects/batdetect2",
+    "data_raw": "data_raw/",
+    "data_normalised": "data_normalised/",
+    "metadata": "metadata/",
+    "exports": "exports/",
+    "logs": "logs/",
+    "workspace": "workspace/"
+  },
+  "status": {
+    "import_results": "ready",
+    "audio_resolver": "ready",
+    "metadata_joins": "empty",
+    "analysis": "empty",
+    "export": "empty"
+  },
+  "provenance": {
+    "app": "pamalytics_studio",
+    "version": "0.3.0"
+  }
+}

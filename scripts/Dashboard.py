@@ -1,16 +1,17 @@
 # scripts/dashboard.py
-# Integrated: works both (1) called from Studio via render_dashboard(df, sources)
-# and (2) standalone (legacy) using RESULTS_DIR/RAW_AUDIO_DIR.
-# UK English.
+# Dashboard with canonical-only group-by (species_name, recorder_id if populated),
+# dataset choice limited to Original / Validated (published),
+# detection-level headline stats, gallery with TE playback + top-10 prob labels,
+# and robust lat/lon handling. No Studio/session dataset option left in the selector.
+# Keeps functionality; adds session sync so Validate loads the same dataset.
 
 from __future__ import annotations
 
 import os
 import io
 import math
-import base64
 from pathlib import Path
-from typing import Optional, Tuple, Set, Dict
+from typing import Optional, Tuple, Dict, List
 
 import numpy as np
 import pandas as pd
@@ -19,41 +20,65 @@ import altair as alt
 import pydeck as pdk
 import matplotlib.pyplot as plt
 import librosa
-import librosa.display
 import soundfile as sf
+from matplotlib.ticker import FuncFormatter
+from matplotlib.patches import Rectangle
+from pyproj import Transformer  # UTM->WGS84 (EPSG:32648)
 
-# -----------------------
-# Legacy config (standalone mode only)
-# -----------------------
-try:
-    from config import RAW_AUDIO_DIR, RESULTS_DIR  # only used when running standalone
-except Exception:
-    RAW_AUDIO_DIR = Path("./data/audio").resolve()
-    RESULTS_DIR = Path("./results").resolve()
-
-# Avoid double set_page_config errors if Studio already set it.
 try:
     st.set_page_config(layout="wide", page_title="Dashboard")
 except Exception:
     pass
 
-os.environ["STREAMLIT_SERVER_FILEWATCHERTYPE"] = "none"  # Disable file watcher noise
+os.environ["STREAMLIT_SERVER_FILEWATCHERTYPE"] = "none"
 
 # -----------------------
-# Helpers (common to both modes)
+# Legacy config (standalone only)
 # -----------------------
+try:
+    from config import RAW_AUDIO_DIR, RESULTS_DIR
+except Exception:
+    RAW_AUDIO_DIR = Path("./data/audio").resolve()
+    RESULTS_DIR = Path("./results").resolve()
 
-def _logo_b64(paths):
-    for p in paths:
-        try:
-            data = Path(p).read_bytes()
-            return base64.b64encode(data).decode()
-        except Exception:
-            continue
-    return ""
+# -----------------------
+# Canonical → legacy shim (ADD-ONLY)
+# -----------------------
+def _apply_canonical_overrides(df_in: pd.DataFrame) -> pd.DataFrame:
+    df = df_in.copy()
+    num = lambda s: pd.to_numeric(s, errors="coerce")
 
+    if "file_id" in df.columns and "source_file" not in df.columns:
+        df["source_file"] = df["file_id"].astype(str)
+    if "file_path" in df.columns and "path" not in df.columns:
+        df["path"] = df["file_path"].astype(str)
+
+    if "start_s" not in df.columns and "detection_start_s" in df.columns:
+        df["start_s"] = num(df["detection_start_s"])
+    if "end_s" not in df.columns and "detection_end_s" in df.columns:
+        df["end_s"] = num(df["detection_end_s"])
+
+    if "presence_label" in df.columns:
+        if "FinalLabel" not in df.columns:
+            df["FinalLabel"] = df["presence_label"].astype(str)
+        elif "label" not in df.columns:
+            df["label"] = df["presence_label"].astype(str)
+
+    if "species_name" in df.columns and "class" not in df.columns:
+        df["class"] = df["species_name"].astype(str)
+
+    if "detection_probability" in df.columns:
+        if "class_prob" not in df.columns:
+            df["class_prob"] = num(df["detection_probability"])
+        elif "probability" not in df.columns and "score" not in df.columns:
+            df["probability"] = num(df["detection_probability"])
+
+    return df
+
+# -----------------------
+# Label prep
+# -----------------------
 def ensure_userlabel(df_in: pd.DataFrame) -> pd.DataFrame:
-    """Ensure an editable UserLabel column exists and uses empty strings (not NaN/'nan')."""
     df = df_in.copy()
     if "UserLabel" not in df.columns:
         df["UserLabel"] = ""
@@ -62,59 +87,30 @@ def ensure_userlabel(df_in: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def with_effective_labels(df_in: pd.DataFrame) -> pd.DataFrame:
-    """
-    Add FinalLabelEffective (UserLabel if set, else FinalLabel),
-    is_present from FinalLabelEffective, and Changed flag.
-    Robust to NaN/'nan' in UserLabel.
-    """
     df = df_in.copy()
+
     if "FinalLabel" not in df.columns:
-        st.error("Missing 'FinalLabel' in filename-level data.")
-        st.stop()
+        if "label" in df.columns:
+            df["FinalLabel"] = df["label"].astype(str)
+        elif "presence_label" in df.columns:
+            df["FinalLabel"] = df["presence_label"].astype(str)
+        else:
+            df["FinalLabel"] = "absent"
 
     df = ensure_userlabel(df)
 
-    u = (
-        df["UserLabel"]
-        .fillna("")
-        .astype(str)
-        .replace({"nan": ""})
-        .str.strip()
-        .str.lower()
-    )
-    m = (
-        df["FinalLabel"]
-        .astype(str)
-        .str.strip()
-        .str.lower()
-    )
-
+    u = df["UserLabel"].fillna("").astype(str).replace({"nan": ""}).str.strip().str.lower()
+    m = df["FinalLabel"].astype(str).str.strip().str.lower()
     eff = np.where(u != "", u, m)
     df["FinalLabelEffective"] = eff
     df["is_present"] = (eff == "present").astype(int)
     df["Changed"] = (u != "") & (u != m)
     return df
 
-@st.cache_data(show_spinner=False)
-def load_image_bytes(src: str) -> bytes:
-    p = Path(src)
-    if p.exists():
-        return p.read_bytes()
-    try:
-        import urllib.request
-        with urllib.request.urlopen(src, timeout=10) as r:
-            return r.read()
-    except Exception:
-        return b""
-
-# Robust datetime parsers (keep your originals)
+# -----------------------
+# Datetime helpers
+# -----------------------
 def parse_dt_col(s: pd.Series) -> pd.Series:
-    """
-    Tolerant parser for date_time for DATE USE:
-    - strips non-digits
-    - tries %Y%m%d%H%M%S then falls back to %Y%m%d
-    - RETURNS NORMALISED (midnight) timestamps for stable date grouping/merges
-    """
     ss = s.astype(str).str.replace(r"\D", "", regex=True)
     dt14 = pd.to_datetime(ss.str.slice(0, 14), format="%Y%m%d%H%M%S", errors="coerce")
     mask = dt14.isna()
@@ -124,12 +120,6 @@ def parse_dt_col(s: pd.Series) -> pd.Series:
     return dt14.dt.normalize()
 
 def parse_dt_full(s: pd.Series) -> pd.Series:
-    """
-    Parser for date_time for TIME-OF-DAY USE:
-    - strips non-digits
-    - tries %Y%m%d%H%M%S, falls back to %Y%m%d (those will be midnight)
-    - PRESERVES HH:MM:SS where available
-    """
     ss = s.astype(str).str.replace(r"\D", "", regex=True)
     dt = pd.to_datetime(ss.str.slice(0, 14), format="%Y%m%d%H%M%S", errors="coerce")
     missing = dt.isna()
@@ -138,358 +128,695 @@ def parse_dt_full(s: pd.Series) -> pd.Series:
         dt[missing] = dt8[missing]
     return dt
 
-def to_stem_lower(x: str) -> str:
-    return Path(str(x)).stem.lower()
+# -----------------------
+# Lat/Lon helpers (UTM -> WGS84)
+# -----------------------
+def _ensure_latlon(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    out = df.copy()
+    if "lat" not in out.columns:
+        out["lat"] = np.nan
+    if "lon" not in out.columns:
+        out["lon"] = np.nan
 
-def _figure_to_png(fig) -> bytes:
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", bbox_inches="tight", pad_inches=0)
-    plt.close(fig)
-    buf.seek(0)
-    return buf.read()
+    has_vals = (pd.to_numeric(out["lat"], errors="coerce").notna().any() and
+                pd.to_numeric(out["lon"], errors="coerce").notna().any())
+    if has_vals:
+        return out
 
-@st.cache_data(show_spinner=False)
-def make_thumbnail_and_audio(audio_path: str, preview_seconds: int) -> Tuple[Optional[bytes], Optional[bytes]]:
-    try:
-        y, sr = librosa.load(audio_path, sr=None)
-        y_thumb = y[: int(preview_seconds * sr)]
-        fig, ax = plt.subplots(figsize=(2.6, 1.4), dpi=120)
-        S = librosa.feature.melspectrogram(y=y_thumb, sr=sr, n_fft=1024, hop_length=512)
-        S_dB = librosa.power_to_db(S, ref=np.max)
-        librosa.display.specshow(S_dB, sr=sr, x_axis=None, y_axis=None, ax=ax)
-        ax.set_axis_off()
-        thumb_png = _figure_to_png(fig)
+    if "utm_x" in out.columns and "utm_y" in out.columns:
+        try:
+            out["utm_x"] = pd.to_numeric(out["utm_x"], errors="coerce")
+            out["utm_y"] = pd.to_numeric(out["utm_y"], errors="coerce")
+            valid = out["utm_x"].notna() & out["utm_y"].notna()
+            if valid.any():
+                transformer = Transformer.from_crs("EPSG:32648", "EPSG:4326", always_xy=True)
+                xs = np.array(out.loc[valid, "utm_x"], dtype=float)
+                ys = np.array(out.loc[valid, "utm_y"], dtype=float)
+                lons, lats = transformer.transform(xs, ys)
+                out.loc[valid, "lon"] = np.asarray(lons, dtype=float)
+                out.loc[valid, "lat"] = np.asarray(lats, dtype=float)
+        except Exception:
+            return out
+    return out
 
-        abuf = io.BytesIO()
-        sf.write(abuf, y, sr, format="WAV")
-        abuf.seek(0)
-        return thumb_png, abuf.read()
-    except Exception:
-        return None, None
+def _build_latlon_lookup(df_all: pd.DataFrame) -> Dict[str, pd.DataFrame]:
+    res: Dict[str, pd.DataFrame] = {}
+    if df_all is None or df_all.empty:
+        return res
+    df_ll = _ensure_latlon(df_all)
+    if {"basename", "lat", "lon"} <= set(df_ll.columns):
+        by_base = (df_ll.dropna(subset=["lat", "lon"])
+                        .groupby("basename", dropna=False)[["lat", "lon"]]
+                        .mean()
+                        .reset_index())
+        if not by_base.empty:
+            res["by_basename"] = by_base
+    if {"recorder_id", "lat", "lon"} <= set(df_ll.columns):
+        by_rec = (df_ll.dropna(subset=["lat", "lon"])
+                       .groupby("recorder_id", dropna=False)[["lat", "lon"]]
+                       .mean()
+                       .reset_index())
+        if not by_rec.empty:
+            res["by_recorder"] = by_rec
+    return res
+
+def _attach_latlon_from_glob(df_page: pd.DataFrame, df_all: pd.DataFrame) -> pd.DataFrame:
+    if df_page is None or df_page.empty:
+        return df_page
+    out = df_page.copy()
+    if "lat" not in out.columns:
+        out["lat"] = np.nan
+    if "lon" not in out.columns:
+        out["lon"] = np.nan
+
+    need = out[["lat", "lon"]].dropna().empty
+    if not need:
+        return out
+
+    lk = _build_latlon_lookup(df_all)
+    if "by_basename" in lk and "basename" in out.columns:
+        out = out.merge(lk["by_basename"], on="basename", how="left", suffixes=("", "_lk"))
+        if "lat_lk" in out.columns and "lon_lk" in out.columns:
+            out["lat"] = out["lat"].fillna(out["lat_lk"])
+            out["lon"] = out["lon"].fillna(out["lon_lk"])
+            out = out.drop(columns=[c for c in ["lat_lk", "lon_lk"] if c in out.columns])
+
+    if out[["lat", "lon"]].dropna().empty and "by_recorder" in lk and "recorder_id" in out.columns:
+        out = out.merge(lk["by_recorder"], on="recorder_id", how="left", suffixes=("", "_rk"))
+        if "lat_rk" in out.columns and "lon_rk" in out.columns:
+            out["lat"] = out["lat"].fillna(out["lat_rk"])
+            out["lon"] = out["lon"].fillna(out["lon_rk"])
+            out = out.drop(columns=[c for c in ["lat_rk", "lon_rk"] if c in out.columns])
+
+    return out
 
 # -----------------------
-# Studio integration
+# Probability overlays (top 10)
 # -----------------------
+def _extract_prob(row: pd.Series) -> float:
+    for key in ("detection_probability", "class_prob", "probability", "score"):
+        if key in row and pd.notna(row[key]):
+            try:
+                return float(row[key])
+            except Exception:
+                continue
+    return float("nan")
 
-def _studio_normalise(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Convert Studio dataset (detections with audio, metadata) into the legacy
-    filename-level shape used by this dashboard:
-      - filename (stem + extension if available) from source_file/path
-      - FinalLabel from Studio 'label' (present/absent)
-      - UserLabel empty (validation page will handle edits)
-      - recorder_id passthrough (or derived from filename)
-      - date_time (string) from timestamp_utc as YYYYmmddHHMMSS if present
-      - lat/lon/station_name/Elevation/location_situation carried through if present
-    Also adds filename_stem and is_present as before.
-    """
-    d = df.copy()
+def _collect_boxes_and_probs(gdf: pd.DataFrame):
+    mids, lows, highs, ps = [], [], [], []
+    for _, row in gdf.iterrows():
+        try:
+            sx = float(row.get("start_s", np.nan))
+            ex = float(row.get("end_s",   np.nan))
+            if not (np.isfinite(sx) and np.isfinite(ex) and ex > sx):
+                continue
+            lf = float(row.get("low_freq",  np.nan))
+            hf = float(row.get("high_freq", np.nan))
+            p  = _extract_prob(row)
+            mids.append(0.5 * (sx + ex)); lows.append(lf); highs.append(hf); ps.append(float(np.clip(p, 0.0, 1.0)))
+        except Exception:
+            continue
+    if not mids:
+        return np.array([]), np.array([]), np.array([]), np.array([])
+    return (np.asarray(mids, dtype=float),
+            np.asarray(lows, dtype=float),
+            np.asarray(highs, dtype=float),
+            np.asarray(ps, dtype=float))
 
-    # Filename: prefer basename of 'path', else source_file
-    if "path" in d.columns:
-        fn = d["path"].astype(str).map(lambda p: Path(p).name)
-    else:
-        fn = d["source_file"].astype(str).map(lambda p: Path(p).name if p else "")
-    d["filename"] = fn
+def _draw_prob_labels_inline(ax, gdf: pd.DataFrame, xmin: float, xmax: float, ymin: float, ymax: float) -> None:
+    mids, lows, highs, ps = _collect_boxes_and_probs(gdf)
+    if mids.size == 0:
+        return
+    keep = (mids >= xmin) & (mids <= xmax)
+    mids, lows, highs, ps = mids[keep], lows[keep], highs[keep], ps[keep]
+    if mids.size == 0:
+        return
+    order = np.argsort(-ps)
+    if order.size > 10:
+        order = order[:10]
+    mids, lows, highs, ps = mids[order], lows[order], highs[order], ps[order]
 
-    # FinalLabel from Studio 'label'
-    if "label" in d.columns:
-        d["FinalLabel"] = d["label"].astype(str).str.strip().str.lower().map(lambda x: "present" if x == "present" else "absent")
-    elif "FinalLabel" not in d.columns:
-        d["FinalLabel"] = "absent"  # default conservative
+    vspan = max(1.0, ymax - ymin)
+    vpad = 0.02 * vspan
+    fixed_high = ymin + 0.90 * vspan
 
-    # UserLabel is empty in Studio context (edits happen in Validation)
-    if "UserLabel" not in d.columns:
-        d["UserLabel"] = ""
-
-    # recorder_id — ensure present
-    if "recorder_id" not in d.columns:
-        d["recorder_id"] = d["filename"].astype(str).map(lambda n: n.split("_", 1)[0] if "_" in n else Path(n).stem)
-
-    # date_time — derive from timestamp_utc if available (UTC → YYYYmmddHHMMSS)
-    if "date_time" not in d.columns:
-        if "timestamp_utc" in d.columns:
-            ts = pd.to_datetime(d["timestamp_utc"], errors="coerce", utc=True)
-            d["date_time"] = ts.dt.strftime("%Y%m%d%H%M%S")
+    for i, (x, lf, hf, p) in enumerate(zip(mids, lows, highs, ps)):
+        label = f"{p:.2f}"
+        has_lf = np.isfinite(lf); has_hf = np.isfinite(hf)
+        if has_lf and has_hf:
+            y_raw = (hf + vpad) if (i % 2 == 0) else (lf - vpad)
+            va = "bottom" if (i % 2 == 0) else "top"
         else:
-            d["date_time"] = ""
-
-    # filename_stem + is_present used in visuals
-    d["filename_stem"] = d["filename"].astype(str).map(to_stem_lower)
-    d = with_effective_labels(d)
-
-    return d
-
-def _studio_find_audio_by_stem(df_present: pd.DataFrame, stem: str) -> Optional[Path]:
-    """
-    Find an audio path for a given filename stem from the Studio dataset.
-    """
-    if "path" not in df_present.columns:
-        return None
-    rows = df_present[df_present["filename_stem"] == stem]
-    if rows.empty:
-        return None
-    # Prefer any non-empty path
-    for p in rows["path"]:
-        if isinstance(p, str) and p.strip() and Path(p).exists():
-            return Path(p)
-    # If files not found on disk, still return a candidate (may fail to load)
-    p = rows["path"].dropna().astype(str).head(1)
-    return Path(p.iloc[0]) if not p.empty else None
+            y_raw = fixed_high; va = "center"
+        y_clamped = float(np.clip(y_raw, ymin + vpad, ymax - vpad))
+        ax.text(x, y_clamped, label, ha="center", va=va, fontsize=9, color="white",
+                bbox=dict(boxstyle="round,pad=0.18", fc=(0, 0, 0, 0.55), ec=(1, 1, 1, 0.25), lw=0.5))
 
 # -----------------------
-# Main renderer (Studio calls this)
+# Audio playback helpers
 # -----------------------
+def _num(x) -> float:
+    try:
+        v = float(x)
+        return v if np.isfinite(v) else np.nan
+    except Exception:
+        return np.nan
 
-def render_dashboard(df: Optional[pd.DataFrame], sources: Dict[str, str]):
-    """
-    Called by Studio tabs. 'df' is the final dataset (detections with audio path),
-    'sources' includes {'project', 'detections', 'audio_map'}.
-    """
-    # Header + Logo
+def _choose_te_guard(sr: int, high_hz: Optional[float]) -> int:
+    if high_hz is None or not np.isfinite(high_hz) or high_hz <= 0:
+        return 1
+    nyq = 0.5 * sr
+    limit = 0.9 * nyq
+    if high_hz <= limit:
+        return 1
+    return int(max(1, math.ceil(high_hz / limit)))
+
+def _estimate_peak_hz_for_group(gdf: pd.DataFrame, sr: int) -> Optional[float]:
+    if "detection_probability" not in gdf.columns:
+        gdf = gdf.assign(detection_probability=gdf.apply(_extract_prob, axis=1))
+    try:
+        idx = int(gdf["detection_probability"].astype(float).fillna(-1.0).idxmax())
+        row = gdf.loc[idx]
+    except Exception:
+        row = gdf.iloc[0]
+    lf = _num(row.get("low_freq")); hf = _num(row.get("high_freq"))
+    if np.isfinite(lf) and np.isfinite(hf) and hf > lf:
+        return 0.5 * (lf + hf)
+    nyq = 0.5 * sr
+    return min(12_000.0, 0.45 * nyq)
+
+def _choose_te_for_peak(peak_hz: float) -> int:
+    if not (isinstance(peak_hz, (int, float)) and np.isfinite(peak_hz) and peak_hz > 0):
+        return 1
+    te = int(max(1, round(peak_hz / 11_000.0)))
+    return min(te, 16)
+
+def _decimate_mean(y: np.ndarray, sr: int, te: int) -> Tuple[np.ndarray, int]:
+    te = max(1, int(te))
+    if te == 1 or y.size == 0:
+        return y.astype(np.float32, copy=False), int(sr)
+    n = (y.size // te) * te
+    if n <= 0:
+        return y.astype(np.float32, copy=False), int(sr)
+    yy = y[:n].reshape(-1, te).mean(axis=1)
+    return yy.astype(np.float32, copy=False), int(sr // te)
+
+# -----------------------
+# Examples/gallery
+# -----------------------
+def show_detection_examples(df_page: pd.DataFrame, df_all: pd.DataFrame):
+    st.header("Detection examples")
+
+    c1, c2, _, c4 = st.columns(4)
+    with c1:
+        NUM_PER_PAGE = st.number_input("Spectrograms per page", min_value=4, max_value=60, value=12, step=4)
+    with c2:
+        COLS_PER_ROW = st.slider("Columns per row", min_value=2, max_value=5, value=3)
+    with c4:
+        PAGE = st.number_input("Page", min_value=1, value=1, step=1)
+
+    df_det = df_page[df_page["FinalLabelEffective"].astype(str).str.lower() == "present"].copy()
+    if "basename" not in df_det.columns:
+        df_det["basename"] = df_det.get("source_file", "").astype(str).map(lambda p: Path(p).name)
+    if "filename_stem" not in df_det.columns:
+        df_det["filename_stem"] = df_det["basename"].astype(str).map(lambda s: Path(s).stem.lower())
+    if "class" not in df_det.columns and "species_name" in df_det.columns:
+        df_det["class"] = df_det["species_name"]
+    disp_species = df_det.get("class", "").astype(str).str.strip()
+    norm_species = disp_species.str.lower().replace({"": np.nan, "nan": np.nan})
+    df_det["species_display"] = disp_species.where(norm_species.notna(), "[absent]")
+
+    if "start_s" not in df_det.columns and "detection_start_s" in df_det.columns:
+        df_det["start_s"] = pd.to_numeric(df_det["detection_start_s"], errors="coerce")
+    if "end_s" not in df_det.columns and "detection_end_s" in df_det.columns:
+        df_det["end_s"] = pd.to_numeric(df_det["detection_end_s"], errors="coerce")
+
+    if df_det.empty:
+        st.info("No present detections with audio available for the selected filters.")
+        return
+
+    df_det = df_det.sort_values(["basename", "species_display", "start_s"])
+    grouped = df_det.groupby(["basename", "species_display"], dropna=False)
+    keys: List[Tuple[str, str]] = list(grouped.indices.keys())
+
+    per_group_max = {}
+    try:
+        tmp = df_det.assign(_p=df_det.apply(_extract_prob, axis=1))
+        per_group_max = tmp.groupby(["basename", "species_display"])["_p"].max(numeric_only=True).to_dict()
+    except Exception:
+        pass
+
+    def _sort_key(k: Tuple[str, str]):
+        mp = per_group_max.get(k, -1)
+        mpv = mp if (isinstance(mp, (int, float)) and np.isfinite(mp)) else -1
+        return (-mpv, k[0], k[1])
+
+    keys = sorted(keys, key=_sort_key)
+
+    total_cards = len(keys)
+    start_idx = (int(PAGE) - 1) * int(NUM_PER_PAGE)
+    end_idx   = min(total_cards, start_idx + int(NUM_PER_PAGE))
+    page_keys = keys[start_idx:end_idx]
+    st.caption(f"Showing {len(page_keys)} of {total_cards} Spectrograms (page {PAGE})")
+
+    def _resolve_audio_path(row_or_df) -> Optional[Path]:
+        if isinstance(row_or_df, pd.Series):
+            rows = [row_or_df]
+        else:
+            rows = [row_or_df.iloc[0]] if len(row_or_df) else []
+        for r_ in rows:
+            for col_ in ("path", "file_path"):
+                p_ = r_.get(col_)
+                if isinstance(p_, str) and p_.strip() and Path(p_).exists():
+                    return Path(p_)
+        def _by_stem(df_present: pd.DataFrame, stem: str) -> Optional[Path]:
+            for col_ in ("path", "file_path"):
+                if col_ not in df_present.columns:
+                    continue
+                rows2 = df_present[df_present["filename_stem"] == stem]
+                if rows2.empty:
+                    continue
+                for p_ in rows2[col_]:
+                    if isinstance(p_, str) and p_.strip() and Path(p_).exists():
+                        return Path(p_)
+                q = rows2[col_].dropna().astype(str).head(1)
+                if not q.empty and Path(q.iloc[0]).exists():
+                    return Path(q.iloc[0])
+            return None
+        if isinstance(row_or_df, pd.Series):
+            stem = Path(str(row_or_df.get("basename", row_or_df.get("source_file", "")))).stem.lower()
+        else:
+            s = row_or_df.iloc[0]
+            stem = Path(str(s.get("basename", s.get("source_file", "")))).stem.lower()
+        return _by_stem(df_all, stem)
+
+    n_rows = math.ceil(len(page_keys) / int(COLS_PER_ROW))
+    for r in range(n_rows):
+        cols = st.columns(int(COLS_PER_ROW))
+        for c in range(int(COLS_PER_ROW)):
+            gi = r * int(COLS_PER_ROW) + c
+            if gi >= len(page_keys):
+                break
+
+            base, species_line = page_keys[gi]
+            gdf = grouped.get_group((base, species_line)).copy()
+
+            n_det = int(len(gdf))
+            try:
+                ps = gdf.apply(_extract_prob, axis=1).to_numpy()
+                ps = ps[np.isfinite(ps)]
+                max_cp = float(np.max(ps)) if ps.size else None
+            except Exception:
+                max_cp = None
+
+            apath = _resolve_audio_path(gdf)
+
+            with cols[c]:
+                title_html = (
+                    f"<div style='margin-bottom:2px'><strong>{base}</strong>"
+                    f"<br>{species_line}"
+                    f"<br>Detections: {n_det}"
+                )
+                if max_cp is not None and np.isfinite(max_cp):
+                    title_html += f"<br>Max probability: {max_cp:.2f}"
+                title_html += "</div>"
+                st.markdown(title_html, unsafe_allow_html=True)
+
+                if not (apath and apath.exists()):
+                    st.error("Audio not found")
+                    continue
+
+                try:
+                    y, sr = librosa.load(str(apath), sr=None, mono=True)
+                except Exception as e:
+                    st.error(f"Audio read error: {e}")
+                    continue
+
+                boxes: List[Dict[str, float]] = []
+                for _, row in gdf.iterrows():
+                    b = {
+                        "start_s": _num(row.get("start_s", row.get("detection_start_s"))),
+                        "end_s":   _num(row.get("end_s",   row.get("detection_end_s"))),
+                        "low_freq":_num(row.get("low_freq")),
+                        "high_freq":_num(row.get("high_freq")),
+                        "prob":    _num(_extract_prob(row)),
+                    }
+                    if (np.isfinite(b["start_s"]) and np.isfinite(b["end_s"]) and b["end_s"] > b["start_s"]):
+                        boxes.append(b)
+                if boxes:
+                    boxes = sorted(boxes, key=lambda b: (b["prob"] if np.isfinite(b["prob"]) else -1.0), reverse=True)[:10]
+
+                highs = [b["high_freq"] for b in boxes if np.isfinite(b["high_freq"])]
+                lows  = [b["low_freq"]  for b in boxes if np.isfinite(b["low_freq"])]
+                if highs and lows and max(highs) > min(lows):
+                    fmin, fmax = min(lows), max(highs)
+                else:
+                    fmin, fmax = 0.0, 0.5 * sr
+                span = max(1.0, (fmax - fmin))
+                pad = max(4_000.0, 0.30 * span)
+                nyq = 0.5 * sr * 0.98
+                ymin = max(0.0, fmin - pad)
+                ymax = min(nyq, fmax + pad)
+
+                try:
+                    n_fft = 4096 if sr <= 48_000 else 8192
+                    hop = n_fft // 8
+                    D = librosa.stft(y=y, n_fft=n_fft, hop_length=hop)
+                    S = np.abs(D) ** 2
+                    S_dB = librosa.power_to_db(S, ref=np.max, top_db=90)
+                    times = librosa.frames_to_time(np.arange(S.shape[1]), sr=sr, hop_length=hop)
+                    freqs_hz = np.linspace(0.0, sr * 0.5, S.shape[0])
+                    dur = max(1e-6, len(y) / sr)
+                    tpad = dur * 0.01
+                    xmin, xmax = 0 - tpad, dur + tpad
+                except Exception as e:
+                    st.error(f"Spectrogram setup error: {e}")
+                    continue
+
+                try:
+                    fig, ax = plt.subplots(figsize=(7.0, 4.0), dpi=220, constrained_layout=False)
+                    extent = [times.min(), times.max(), freqs_hz.min(), freqs_hz.max()]
+                    ax.imshow(
+                        S_dB,
+                        origin="lower",
+                        aspect="auto",
+                        interpolation="nearest",
+                        extent=extent,
+                        vmin=S_dB.max() - 90,
+                        vmax=S_dB.max(),
+                    )
+                    ax.set_xlim(xmin, xmax)
+                    ax.set_ylim(ymin, ymax)
+                    ax.set_xlabel("Time (s)")
+                    ax.set_ylabel("Frequency (kHz)")
+                    ax.yaxis.set_major_formatter(FuncFormatter(lambda ytick, pos: f"{ytick/1000:.0f}"))
+                    for b in boxes:
+                        x0, x1 = b["start_s"], b["end_s"]
+                        ax.add_patch(Rectangle((x0, ymin), x1 - x0, ymax - ymin,
+                                               facecolor=(1, 1, 1, 0.06), edgecolor=(1, 1, 1, 0.12), lw=0.6))
+                    _draw_prob_labels_inline(ax, gdf, xmin, xmax, ymin, ymax)
+                    st.pyplot(fig, use_container_width=True, clear_figure=True)
+                    plt.close(fig)
+                except Exception as e:
+                    st.error(f"Spectrogram error: {e}")
+
+                try:
+                    max_high = max(highs) if highs else None
+                    te_guard = _choose_te_guard(sr, max_high)
+                    peak_hz  = _estimate_peak_hz_for_group(gdf, sr)
+                    te = max(te_guard, _choose_te_for_peak(peak_hz))
+                    y_play, psr = _decimate_mean(y, sr, te)
+                    peak = float(np.max(np.abs(y_play))) if y_play.size else 0.0
+                    if peak > 0:
+                        y_play = (y_play / peak * 0.98).astype(np.float32)
+                    abuf = io.BytesIO()
+                    sf.write(abuf, y_play, psr, format="WAV")
+                    abuf.seek(0)
+                    st.audio(abuf, format="audio/wav")
+                except Exception as e:
+                    st.error(f"Playback error: {e}")
+
+    st.caption("")
+
+# -----------------------
+# Studio integration helpers
+# -----------------------
+def _augment_grouping_fields_class(df_in: pd.DataFrame) -> pd.DataFrame:
+    df = df_in.copy()
+    if "basename" not in df.columns:
+        if "path" in df.columns and df["path"].notna().any():
+            df["basename"] = df["path"].astype(str).apply(lambda p: Path(p).name if p else "")
+        else:
+            df["basename"] = df.get("source_file", "").astype(str).apply(lambda p: Path(p).name if p else "")
+    df["filename_stem"] = df["basename"].astype(str).apply(lambda n: Path(n).stem.lower())
+
+    if "FinalLabel" not in df.columns and "label" in df.columns:
+        df["FinalLabel"] = df["label"].astype(str)
+    df = with_effective_labels(df)
+
+    if "class" not in df.columns and "species_name" in df.columns:
+        df["class"] = df["species_name"].astype(str)
+    if "class" not in df.columns:
+        df["class"] = "Unknown"
+
+    if "lat" not in df.columns:
+        df["lat"] = np.nan
+    if "lon" not in df.columns:
+        df["lon"] = np.nan
+
+    return df
+
+# -----------------------
+# Dataset loading/selection (Original / Validated only)
+# -----------------------
+def _load_csv_safe(p: Path) -> Optional[pd.DataFrame]:
+    try:
+        if p.exists():
+            df = pd.read_csv(p, low_memory=False)
+            try:
+                df.columns = df.columns.str.strip()
+            except Exception:
+                pass
+            return df
+    except Exception:
+        return None
+    return None
+
+def _dataset_choice(sources: Dict[str, str]) -> Tuple[pd.DataFrame, str, Dict[str, pd.DataFrame], Dict[str, Path]]:
+    proj_root = Path(sources.get("project") or sources.get("project_root") or ".")
+    data_dir  = proj_root / "data_normalised"
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    p_original  = data_dir / "detections_normalised.csv"
+    p_valid_pub = data_dir / "detections_validated.csv"
+
+    choices: Dict[str, pd.DataFrame] = {}
+    path_map: Dict[str, Path] = {}
+
+    df_orig = _load_csv_safe(p_original)
+    if df_orig is not None:
+        choices["Original"] = df_orig
+        path_map["Original"] = p_original
+
+    df_val_pub = _load_csv_safe(p_valid_pub)
+    if df_val_pub is not None:
+        choices["Validated (published)"] = df_val_pub
+        path_map["Validated (published)"] = p_valid_pub
+
+    if not choices:
+        return pd.DataFrame(), "None", {}, {}
+
+    default_label = "Validated (published)" if "Validated (published)" in choices else "Original"
+
+    active = st.session_state.get("active_dataset_label")
+    if isinstance(active, str) and active in choices:
+        default_label = active
+
+    return choices[default_label].copy(), default_label, choices, path_map
+
+def _has_data(df: pd.DataFrame, col: str) -> bool:
+    if col not in df.columns:
+        return False
+    s = df[col].astype(str).str.strip()
+    s = s.replace({"": np.nan, "nan": np.nan, "None": np.nan})
+    return s.notna().any()
+
+# -----------------------
+# Main renderer
+# -----------------------
+def render_dashboard(df: Optional[pd.DataFrame], sources: Dict[str, str], page: str = "Dashboard", use_internal_nav: Optional[bool] = None):
     st.title("Detection Dashboard")
 
-    # Decide mode
     running_in_studio = df is not None and isinstance(df, pd.DataFrame)
+    if use_internal_nav is None:
+        use_internal_nav = not running_in_studio
 
-    # ---------------- Data load / normalise ----------------
-    if running_in_studio:
-        # Studio dataset → legacy shape
-        df_raw = _studio_normalise(df)
-        # For “examples” gallery we use in-DF paths, not a present/ folder
-        present_mode = "studio"
-        PRESENT_DIR = None
+    if use_internal_nav:
+        with st.sidebar:
+            st.header("Pages")
+            pages = ["Dashboard"]
+            _ = st.radio("Navigate", pages, index=0, key="dashboard_nav_radio")
+
+    # ---- Dataset: ONLY Original / Validated (published)
+    df_default, ds_label, ds_choices, ds_paths = _dataset_choice(sources)
+    if ds_label == "None" or df_default.empty:
+        st.error("No dataset found in this project. Ingest data first.")
+        return
+
+    ds_labels = list(ds_choices.keys())
+    ds_index = ds_labels.index(ds_label) if ds_label in ds_labels else 0
+
+    # Date bounds from selected dataset
+    df_dt_probe = df_default.copy()
+    if "date_time" not in df_dt_probe.columns and "recording_dt" in df_dt_probe.columns:
+        df_dt_probe["date_time"] = df_dt_probe["recording_dt"].astype(str)
+    if "date_time" in df_dt_probe.columns:
+        df_dt_probe["dt"] = parse_dt_col(df_dt_probe["date_time"])
     else:
-        # Legacy standalone mode
-        AUDIO_DEFAULT_DIR = RAW_AUDIO_DIR / "processed" / "present"
-        if "audio_base_dir" not in st.session_state:
-            st.session_state["audio_base_dir"] = str(AUDIO_DEFAULT_DIR)
-
-        if "filename_level_path" not in st.session_state:
-            st.session_state["filename_level_path"] = str(RESULTS_DIR / "filename_level.csv")
-
-        # Data sources
-        FILENAME_LEVEL_CSV   = RESULTS_DIR / "filename_level.csv"
-        FILENAME_LEVEL_XLSX  = RESULTS_DIR / "merged_classification_results_cleaned.xlsx"
-        FILENAME_LEVEL_SHEET = "filename_level"
-
-        def load_filename_level():
-            chosen = Path(st.session_state.get("filename_level_path", ""))
-            if str(chosen) and chosen.exists():
-                if chosen.suffix.lower() in (".xlsx", ".xls"):
-                    try:
-                        df0 = pd.read_excel(chosen, sheet_name="filename_level")
-                    except Exception:
-                        df0 = pd.read_excel(chosen)
-                else:
-                    df0 = pd.read_csv(chosen)
-                return ensure_userlabel(df0)
-
-            if FILENAME_LEVEL_CSV.exists():
-                return ensure_userlabel(pd.read_csv(FILENAME_LEVEL_CSV))
-
-            if not FILENAME_LEVEL_XLSX.exists():
-                st.error(f"Could not find {FILENAME_LEVEL_CSV.name} or {FILENAME_LEVEL_XLSX.name}.")
-                st.stop()
-            try:
-                return ensure_userlabel(pd.read_excel(FILENAME_LEVEL_XLSX, sheet_name=FILENAME_LEVEL_SHEET))
-            except ValueError:
-                try:
-                    return ensure_userlabel(pd.read_excel(FILENAME_LEVEL_XLSX, sheet_name="Filename_Level"))
-                except Exception as e:
-                    st.error(f"Unable to open sheet '{FILENAME_LEVEL_SHEET}' in {FILENAME_LEVEL_XLSX.name}: {e}")
-                    st.stop()
-
-        df_raw = load_filename_level()
-        present_mode = "legacy"
-        PROCESSED_DIR = RAW_AUDIO_DIR / "processed"
-        PRESENT_DIR   = PROCESSED_DIR / "present"
-
-    # Normalise + Effective labels (legacy helper)
-    required_cols = ["filename", "FinalLabel"]
-    missing = [c for c in required_cols if c not in df_raw.columns]
-    if missing:
-        st.error(f"Missing required columns in filename-level data: {missing}")
-        st.stop()
-
-    df_all = with_effective_labels(df_raw)
-
-    # ---------------- Datetime prep & filters ----------------
-    df_dt = df_all.copy()
-    if "date_time" in df_dt.columns:
-        df_dt["dt"] = parse_dt_col(df_dt["date_time"])
-    else:
-        df_dt["dt"] = pd.NaT
-
-    no_dates = df_dt["dt"].dropna().empty
+        df_dt_probe["dt"] = pd.NaT
+    no_dates = df_dt_probe["dt"].dropna().empty
     if not no_dates:
-        min_dt, max_dt = df_dt["dt"].min(), df_dt["dt"].max()
+        min_dt, max_dt = df_dt_probe["dt"].min(), df_dt_probe["dt"].max()
     else:
         today = pd.Timestamp.utcnow().normalize()
         min_dt = max_dt = today
 
-    # Filter bar
-    if "filters_version" not in st.session_state:
-        st.session_state["filters_version"] = 0
-    kv = st.session_state["filters_version"]
-    date_key = f"date_range_{kv}"
-    rec_key  = f"recorder_{kv}"
+    # Build canonical group-by candidates ONLY when they have real data
+    group_candidates: List[str] = []
+    if _has_data(df_default, "species_name"):
+        group_candidates.append("species_name")
+    if _has_data(df_default, "recorder_id"):
+        group_candidates.append("recorder_id")
+    if not group_candidates:
+        group_candidates = ["species_name"]
+    default_group = "species_name" if ("species_name" in group_candidates and
+                                       df_default["species_name"].astype(str).replace({"": np.nan, "nan": np.nan}).nunique() > 1) else (
+                        "recorder_id" if "recorder_id" in group_candidates else group_candidates[0])
 
-    fb1, fb2, fb3 = st.columns([1.4, 1.0, 0.6])
-    default_range = (min_dt.date(), max_dt.date())
-    with fb1:
+    # Top row controls (same line)
+    c0, c1, c2, c3 = st.columns([1.3, 1.2, 1.0, 0.7])
+    with c0:
+        dataset_label = st.selectbox("Dataset", ds_labels, index=ds_index, key="dataset_selector")
+    with c1:
+        default_range = (min_dt.date(), max_dt.date())
         date_sel = st.date_input(
             "Date range",
             value=default_range,
             min_value=default_range[0],
             max_value=default_range[1],
-            key=date_key,
             disabled=no_dates,
+            key=f"date_range_{dataset_label}"
         )
+    with c2:
+        group_key = st.selectbox("Group by", options=group_candidates,
+                                 index=group_candidates.index(default_group),
+                                 key=f"group_key_{dataset_label}")
+    with c3:
+        st.markdown("<div style='height:1.95em'></div>", unsafe_allow_html=True)
+        if st.button("Clear filters", use_container_width=True):
+            for k in list(st.session_state.keys()):
+                if str(k).startswith("date_range_") or str(k).startswith("group_key_"):
+                    st.session_state.pop(k, None)
+            if hasattr(st, "rerun"):
+                st.rerun()
 
-    # Apply date range
-    if no_dates:
-        df_range = df_dt.copy()
+    # If the user changed the dataset, swap and update session state
+    if dataset_label != ds_label:
+        df_default = ds_choices[dataset_label].copy()
+        st.session_state["active_dataset_label"] = dataset_label
+        st.session_state["active_dataset_path"]  = str(ds_paths.get(dataset_label, ""))
+        st.session_state["pa_df_det"]            = df_default.copy()
+
+    # Also ensure we set these on first load so Validate can read them
+    st.session_state.setdefault("active_dataset_label", dataset_label)
+    st.session_state.setdefault("active_dataset_path",  str(ds_paths.get(dataset_label, "")))
+    st.session_state["pa_df_det"] = df_default.copy()
+
+    # Canonical → legacy, normalise, coords
+    df_raw = _apply_canonical_overrides(df_default)
+    df_all = _augment_grouping_fields_class(df_raw)
+    df_all = _ensure_latlon(df_all)
+
+    # Apply date filter
+    df_dt = df_all.copy()
+    if "date_time" not in df_dt.columns and "recording_dt" in df_dt.columns:
+        df_dt["date_time"] = df_dt["recording_dt"].astype(str)
+    if "date_time" in df_dt.columns:
+        df_dt["dt"] = parse_dt_col(df_dt["date_time"])
     else:
+        df_dt["dt"] = pd.NaT
+
+    if not no_dates:
         if isinstance(date_sel, (tuple, list)):
             d_start, d_end = date_sel[0], date_sel[-1]
         else:
             d_start = d_end = date_sel
-        range_mask = df_dt["dt"].dt.date.between(d_start, d_end)
-        df_range = df_dt.loc[range_mask].copy()
-
-    # Recorder options depend on the date range
-    rec_options = ["All recorders"] + sorted(
-        list(pd.Series(df_range.get("recorder_id", pd.Series(dtype=object))).dropna().unique())
-    )
-    with fb2:
-        rec_choice = st.selectbox("Recorder", rec_options, index=0, key=rec_key)
-
-    with fb3:
-        st.markdown("<div style='height:1.95em'></div>", unsafe_allow_html=True)
-        if st.button("Clear filters", use_container_width=True):
-            st.session_state["filters_version"] += 1
-            if hasattr(st, "rerun"):
-                st.rerun()
-            elif hasattr(st, "experimental_rerun"):
-                st.experimental_rerun()
-
-    df_page = df_range.copy()
-    if rec_choice != "All recorders":
-        df_page = df_page[df_page["recorder_id"] == rec_choice]
-
-    # ---------------- Headline metrics ----------------
-    total_recordings = len(df_page)
-    total_detections = int(df_page["is_present"].sum())
-    detection_rate = (total_detections / total_recordings * 100.0) if total_recordings else 0.0
-
-    m1, m2, m3, m4 = st.columns([1, 1, 1, 1.2])
-    m1.metric("Total detections", f"{total_detections:,}")
-    m2.metric("Total recordings", f"{total_recordings:,}")
-    m3.metric("Detection rate", f"{detection_rate:.1f}%")
-
-    # Header image
-    GIBBON_IMAGE = os.environ.get("GIBBON_IMAGE", str(Path(sources.get("project", "")) / "assets" / "pileated_gibbon.jpg"))
-    img_bytes = load_image_bytes(GIBBON_IMAGE)
-    if img_bytes:
-        with m4:
-            m4.image(img_bytes, width="content")
-
-    # ---------------- Location stats ----------------
-    if "recorder_id" not in df_all.columns:
-        st.error("Column 'recorder_id' is required for location stats and charts.")
-        st.stop()
-
-    present_stats_p = df_page.groupby("recorder_id", dropna=False).agg(
-        present_count=("is_present", "sum")
-    ).reset_index()
-
-    def first_valid(s: pd.Series):
-        s = s.dropna()
-        return s.iloc[0] if not s.empty else np.nan
-
-    agg_map = {}
-    for col in ["lat", "lon"]:
-        if col in df_page.columns:
-            agg_map[col] = first_valid
-    for col in ["station_name", "Elevation", "location_situation"]:
-        if col in df_page.columns:
-            agg_map[col] = "first"
-
-    if agg_map:
-        location_df_p = df_page.groupby("recorder_id", dropna=False).agg(agg_map).reset_index()
+        mask = df_dt["dt"].dt.date.between(d_start, d_end)
+        df_page = df_dt.loc[mask].copy()
     else:
-        location_df_p = present_stats_p.copy()
-        location_df_p["lat"] = np.nan
-        location_df_p["lon"] = np.nan
-        location_df_p["station_name"] = ""
-        location_df_p["Elevation"] = np.nan
-        location_df_p["location_situation"] = ""
+        df_page = df_dt.copy()
 
-    location_stats_p = pd.merge(location_df_p, present_stats_p, on="recorder_id", how="left")
-    location_stats_p["present_count"] = location_stats_p["present_count"].fillna(0).astype(int)
+    if "class" not in df_page.columns and "species_name" in df_page.columns:
+        df_page["class"] = df_page["species_name"].astype(str)
 
-    st.header("Location Stats")
+    # ---------- Headline metrics: detection-level ----------
+    total_dets   = int(len(df_page))
+    present_dets = int((df_page["FinalLabelEffective"].astype(str).str.lower() == "present").sum())
+    det_rate_pct = (100.0 * present_dets / total_dets) if total_dets else 0.0
 
-    _loc = location_stats_p.copy()
-    _totals = df_page.groupby("recorder_id", dropna=False).size().reset_index(name="total_recordings")
-    loc_aug = _loc.merge(_totals, on="recorder_id", how="left")
-    loc_aug["total_recordings"] = loc_aug["total_recordings"].fillna(0).astype(int)
-    loc_aug["detection_rate"] = np.where(
-        loc_aug["total_recordings"] > 0,
-        loc_aug["present_count"] / loc_aug["total_recordings"],
-        np.nan
+    m1, m2, m3 = st.columns([1, 1, 1])
+    m1.metric("Present detections", f"{present_dets:,}")
+    m2.metric("Total detections", f"{total_dets:,}")
+    m3.metric("Detection rate", f"{det_rate_pct:.1f}%")
+
+    # ---------- Group table (detections) ----------
+    grp = (
+        df_page.assign(_present=(df_page["FinalLabelEffective"].str.lower() == "present"))
+              .groupby(group_key, dropna=False)["_present"]
+              .agg(present_detections="sum", total_detections="count")
+              .reset_index()
     )
+    grp["detection_rate"] = grp["present_detections"] / grp["total_detections"]
+    grp = grp.sort_values("present_detections", ascending=False)
 
-    display_df = loc_aug.sort_values("present_count", ascending=False)
-
-    cols_order = [c for c in [
-        "recorder_id", "station_name", "Elevation", "location_situation",
-        "present_count", "total_recordings", "detection_rate", "lat", "lon"
-    ] if c in display_df.columns]
-
-    pretty = (display_df[cols_order]
-              .rename(columns={
-                  "recorder_id": "Recorder",
-                  "station_name": "Station Name",
-                  "Elevation": "Elevation",
-                  "location_situation": "Location Situation",
-                  "present_count": "Present",
-                  "total_recordings": "Total Recordings",
-                  "detection_rate": "Detection Rate (%)",
-                  "lat": "Lat",
-                  "lon": "Lon"
-              }))
-
+    pretty = grp.rename(columns={
+        group_key: ("Species" if group_key == "species_name" else "Recorder"),
+        "present_detections": "Present Detections",
+        "total_detections": "Total Detections",
+        "detection_rate": "Detection Rate (%)",
+    })
     try:
         styled = (pretty.style
                   .format({"Detection Rate (%)": "{:.1%}"})
-                  .set_properties(**{"text-align": "center"})
-                  .set_table_styles([
-                      {"selector": "th", "props": [("text-align", "center"), ("font-weight", "bold")]}
-                  ]))
-        if hasattr(styled, "hide"):
-            styled = styled.hide(axis="index")
-        elif hasattr(styled, "hide_index"):
+                  .set_properties(**{"text-align": "center"}))
+        if hasattr(styled, "hide_index"):
             styled = styled.hide_index()
-        try:
-            st.write(styled)
-        except Exception:
-            st.markdown(styled.to_html(), unsafe_allow_html=True)
+        st.write(styled)
     except Exception:
         tmp = pretty.copy()
         if "Detection Rate (%)" in tmp.columns:
             tmp["Detection Rate (%)"] = (tmp["Detection Rate (%)"] * 100).round(1).astype(str) + "%"
-        try:
-            st.dataframe(tmp, width="stretch")
-        except Exception:
-            st.dataframe(tmp, use_container_width=True)
+        st.dataframe(tmp, use_container_width=True)
 
-    # ---------------- Map ----------------
-    plot_df = location_stats_p.dropna(subset=["lat", "lon"]) if {"lat","lon"}.issubset(location_stats_p.columns) else pd.DataFrame()
+    # ---------- Map ----------
+    df_page = _ensure_latlon(df_page)
+    need_latlon = df_page[["lat", "lon"]].dropna().empty
+    if need_latlon:
+        df_page = _attach_latlon_from_glob(df_page, df_all)
+
+    present_by_group = (
+        df_page.assign(_present=(df_page["FinalLabelEffective"].str.lower() == "present"))
+               .groupby([group_key, "basename"], dropna=False)["_present"]
+               .max()
+               .reset_index()
+               .groupby(group_key, dropna=False)["_present"]
+               .sum()
+               .reset_index(name="present_files")
+    )
+
+    if "lat" in df_page.columns and "lon" in df_page.columns:
+        latlon_source = df_page.dropna(subset=["lat", "lon"])
+        if not latlon_source.empty:
+            latlon_by_group = (
+                latlon_source.groupby(group_key, dropna=False)[["lat", "lon"]]
+                             .mean()
+                             .reset_index()
+            )
+        else:
+            latlon_by_group = pd.DataFrame(columns=[group_key, "lat", "lon"])
+    else:
+        latlon_by_group = pd.DataFrame(columns=[group_key, "lat", "lon"])
+
+    present_by_group[group_key] = present_by_group[group_key].astype(str)
+    latlon_by_group[group_key]  = latlon_by_group[group_key].astype(str)
+    location_stats_p = present_by_group.merge(latlon_by_group, on=group_key, how="left")
+
+    plot_df = location_stats_p.dropna(subset=["lat", "lon"])
     if not plot_df.empty:
         plot_df = plot_df.copy()
-        plot_df["radius"] = np.maximum(plot_df["present_count"] * 40, 40)
+        plot_df["radius"] = np.maximum(plot_df["present_files"] * 40, 40)
         plot_df = plot_df.sort_values("radius", ascending=False)
 
         layer_scatter = pdk.Layer(
@@ -509,7 +836,7 @@ def render_dashboard(df: Optional[pd.DataFrame], sources: Dict[str, str]):
             "TextLayer",
             data=plot_df,
             get_position=["lon", "lat"],
-            get_text="present_count",
+            get_text="present_files",
             get_color="[0, 0, 0, 255]",
             sizeScale=5,
             get_size=16,
@@ -524,265 +851,107 @@ def render_dashboard(df: Optional[pd.DataFrame], sources: Dict[str, str]):
         deck = pdk.Deck(
             layers=[layer_scatter, layer_text],
             initial_view_state=view_state,
-            tooltip={"text": "Recorder: {recorder_id}\nPresences: {present_count}"}
+            tooltip={"text": f"{'Species' if group_key=='species_name' else 'Recorder'}: {{{group_key}}}\nPresent files: {{present_files}}"}
         )
         st.pydeck_chart(deck, height=800)
     else:
         st.info("Map not shown (no valid lat/lon in the selected filters).")
 
-    # ---------------- Detections Over Time ----------------
-    st.header("Detections Over Time")
+    # ---------- Detections over time ----------
+    st.header(f"Detections Over Time (by {('Species' if group_key=='species_name' else 'Recorder')})")
     if "date_time" in df_page.columns and not df_page.empty and not df_dt["dt"].dropna().empty:
         dfc = df_page.copy()
         dfc["date"] = parse_dt_col(dfc["date_time"])
-        unique_dates = pd.DataFrame({"date": pd.to_datetime(sorted(dfc["date"].dropna().unique()))})
-        unique_recorders = pd.DataFrame({"recorder_id": dfc["recorder_id"].dropna().unique()})
 
-        if unique_dates.empty or unique_recorders.empty:
-            st.write("No data for the selected filters.")
-        else:
-            all_combinations = unique_dates.merge(unique_recorders, how="cross")
+        unique_dates  = pd.DataFrame({"date": pd.to_datetime(sorted(dfc["date"].dropna().unique()))})
+        unique_group  = pd.DataFrame({group_key: dfc[group_key].dropna().unique()})
+
+        if not unique_dates.empty and not unique_group.empty:
+            all_combinations = unique_dates.merge(unique_group, how="cross")
 
             counts = (
-                dfc[dfc["is_present"] == 1]
-                .groupby(["date", "recorder_id"])
-                .size()
-                .reset_index(name="present_count")
+                dfc.assign(_present=(dfc["FinalLabelEffective"].str.lower() == "present"))
+                   .groupby(["date", group_key, "basename"], dropna=False)["_present"]
+                   .max()
+                   .reset_index()
+                   .groupby(["date", group_key], dropna=False)["_present"]
+                   .sum()
+                   .reset_index(name="present_files")
             )
 
-            counts["date"] = pd.to_datetime(counts["date"]).dt.normalize()
-            df_time = pd.merge(all_combinations, counts, on=["date", "recorder_id"], how="left")
-            df_time["present_count"] = df_time["present_count"].fillna(0)
+            df_time = all_combinations.merge(counts, on=["date", group_key], how="left").fillna({"present_files": 0})
 
             date_chart = (
                 alt.Chart(df_time)
                 .mark_bar()
                 .encode(
                     x=alt.X("date:T", title="Date", axis=alt.Axis(format="%d-%m-%y")),
-                    y=alt.Y("present_count:Q", title="Number of Present Detections", axis=alt.Axis(format="d", tickMinStep=1)),
-                    color=alt.Color("recorder_id:N", title="Recorder ID"),
+                    y=alt.Y("present_files:Q", title="Present Files", axis=alt.Axis(format="d", tickMinStep=1)),
+                    color=alt.Color(f"{group_key}:N", title=("Species" if group_key=="species_name" else "Recorder")),
                     tooltip=[
                         alt.Tooltip("date:T", title="Date", format="%d-%m-%y"),
-                        alt.Tooltip("recorder_id:N", title="Recorder"),
-                        alt.Tooltip("present_count:Q", title="Presences", format="d"),
+                        alt.Tooltip(f"{group_key}:N", title=("Species" if group_key=='species_name' else 'Recorder')),
+                        alt.Tooltip("present_files:Q", title="Present Files", format="d"),
                     ],
                 )
                 .interactive()
             )
             st.altair_chart(date_chart, use_container_width=True)
+        else:
+            st.write("No data for the selected filters.")
     else:
         st.write("No data for the selected filters.")
 
-    # ---------------- Detections by Time of Day ----------------
-    st.header("Detections by Time of Day")
+    # ---------- Time of day ----------
+    st.header(f"Detections by Time of Day (by {('Species' if group_key=='species_name' else 'Recorder')})")
     if "date_time" in df_page.columns and not df_page.empty:
         dft = df_page.copy()
-        dft["dt"] = parse_dt_full(dft["date_time"])  # preserve real times here
+        dft["dt"] = parse_dt_full(dft["date_time"])
         dft["time_of_day"] = dft["dt"].dt.time
-        tod_counts = (
-            dft[dft["is_present"] == 1]
-            .groupby(["time_of_day", "recorder_id"])
-            .size()
-            .reset_index(name="present_count")
-        )
-        tod_counts["tod_ts"] = pd.to_datetime(tod_counts["time_of_day"].astype(str), format="%H:%M:%S", errors="coerce")
 
-        if tod_counts.empty:
-            st.write("No data for the selected filters.")
-        else:
+        tod = (
+            dft.assign(_present=(dft["FinalLabelEffective"].str.lower() == "present"))
+               .groupby([group_key, "basename", "time_of_day"], dropna=False)["_present"]
+               .max()
+               .reset_index()
+               .groupby([group_key, "time_of_day"], dropna=False)["_present"]
+               .sum()
+               .reset_index(name="present_files")
+        )
+        tod["tod_ts"] = pd.to_datetime(tod["time_of_day"].astype(str), format="%H:%M:%S", errors="coerce")
+
+        if not tod.empty:
             tod_chart = (
-                alt.Chart(tod_counts.dropna(subset=["tod_ts"]))
+                alt.Chart(tod.dropna(subset=["tod_ts"]))
                 .mark_bar()
                 .encode(
                     x=alt.X("tod_ts:T", title="Time of Day", axis=alt.Axis(format="%H:%M")),
-                    y=alt.Y("present_count:Q", title="Number of Present Detections", axis=alt.Axis(format="d", tickMinStep=1)),
-                    color=alt.Color("recorder_id:N", title="Recorder ID"),
+                    y=alt.Y("present_files:Q", title="Present Files", axis=alt.Axis(format="d", tickMinStep=1)),
+                    color=alt.Color(f"{group_key}:N", title=("Species" if group_key=="species_name" else "Recorder")),
                     tooltip=[
-                        alt.Tooltip("recorder_id:N", title="Recorder"),
+                        alt.Tooltip(f"{group_key}:N", title=("Species" if group_key=="species_name" else "Recorder")),
                         alt.Tooltip("tod_ts:T", title="Time", format="%H:%M"),
-                        alt.Tooltip("present_count:Q", title="Presences", format="d"),
+                        alt.Tooltip("present_files:Q", title="Present Files", format="d"),
                     ],
                 )
                 .interactive()
             )
             st.altair_chart(tod_chart, use_container_width=True)
+        else:
+            st.write("No data for the selected filters.")
     else:
         st.write("No data for the selected filters.")
 
-    # ---------------- Gibbon detection examples ----------------
-    st.header("Gibbon detection examples")
+    # ---------- Examples + Data Table ----------
+    show_detection_examples(df_page, df_all)
 
-    if present_mode == "legacy":
-        # Build the set of available stems in PRESENT_DIR
-        @st.cache_data(show_spinner=False)
-        def list_present_stems(present_dir: str) -> Set[str]:
-            base = Path(present_dir)
-            stems: Set[str] = set()
-            if base.exists() and base.is_dir():
-                for p in base.iterdir():
-                    if p.is_file() and p.suffix.lower() in {".wav", ".flac"}:
-                        stems.add(p.stem.lower())
-            return stems
-
-        present_stem_set = list_present_stems(str(PRESENT_DIR))
-
-        def find_audio_path_by_stem_present_only(filename_stem: str) -> Optional[Path]:
-            """Strictly look in PRESENT_DIR only (legacy mode)."""
-            base = PRESENT_DIR
-            if not filename_stem or not base or not base.exists():
-                return None
-            stem = Path(filename_stem).stem
-            for ext in (".wav", ".WAV", ".flac", ".FLAC"):
-                p = base / f"{stem}{ext}"
-                if p.exists():
-                    return p
-            return None
-    else:
-        # Studio: derive stems and resolve from df['path']
-        def find_audio_path_by_stem_present_only(filename_stem: str) -> Optional[Path]:
-            return _studio_find_audio_by_stem(df_all[df_all["FinalLabelEffective"].astype(str).str.lower() == "present"], filename_stem)
-
-        present_stem_set = set(
-            df_all.loc[
-                (df_all["FinalLabelEffective"].astype(str).str.lower() == "present")
-                & df_all.get("filename_stem", pd.Series([], dtype=str)).notna()
-            ]["filename_stem"].astype(str).str.lower().unique()
-        )
-
-    # Controls
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        NUM_PER_PAGE = st.number_input("Clips per page", min_value=6, max_value=60, value=12, step=6)
-    with c2:
-        COLS_PER_ROW = st.slider("Columns per row", min_value=2, max_value=5, value=3)
-    with c3:
-        THUMB_SEC = st.slider("Spectrogram preview (seconds)", min_value=5, max_value=60, value=60, help="Thumbnail only; audio = full file")
-    with c4:
-        PAGE = st.number_input("Page", min_value=1, value=1, step=1)
-
-    # Only files currently considered present AND whose audio is resolvable
-    df_present = df_page[df_page["FinalLabelEffective"].astype(str).str.lower() == "present"].copy()
-    if "filename_stem" not in df_present.columns:
-        df_present["filename_stem"] = df_present["filename"].astype(str).map(lambda s: Path(s).stem.lower())
-    df_present = df_present[df_present["filename_stem"].isin(present_stem_set)]
-
-    if df_present.empty:
-        st.info("No present clips with audio available for the selected filters.")
-    else:
-        total_clips = len(df_present)
-        start = (int(PAGE)-1) * int(NUM_PER_PAGE)
-        end = start + int(NUM_PER_PAGE)
-        page_df = df_present.iloc[start:end].reset_index(drop=True)
-
-        st.caption(f"Showing {len(page_df)} of {total_clips} present clips (page {PAGE})")
-
-        # Collect proposed overrides to UserLabel
-        updates = []
-        n_rows = math.ceil(len(page_df) / int(COLS_PER_ROW))
-        for r in range(n_rows):
-            cols = st.columns(int(COLS_PER_ROW))
-            for c in range(int(COLS_PER_ROW)):
-                i = r * int(COLS_PER_ROW) + c
-                if i >= len(page_df):
-                    break
-                row = page_df.iloc[i]
-                with cols[c]:
-                    # header + change badge
-                    u = str(row.get("UserLabel", "")).strip().lower()
-                    m = str(row.get("FinalLabel", "")).strip().lower()
-                    badge = " 🟠 changed" if (u != "" and u != m) else ""
-                    st.caption(f"**{row['filename']}**{badge}")
-
-                    apath = find_audio_path_by_stem_present_only(str(row["filename_stem"]))
-                    if apath and Path(apath).exists():
-                        try:
-                            st.image(make_thumbnail_and_audio(str(apath), int(THUMB_SEC))[0], width="stretch")
-                        except Exception:
-                            thumb_png, _ = make_thumbnail_and_audio(str(apath), int(THUMB_SEC))
-                            if thumb_png:
-                                st.image(thumb_png, use_container_width=True)
-                            else:
-                                st.info("No thumbnail")
-                        thumb_png, audio_wav = make_thumbnail_and_audio(str(apath), int(THUMB_SEC))
-                        if audio_wav:
-                            st.audio(io.BytesIO(audio_wav), format="audio/wav")
-                        else:
-                            st.error("Audio unreadable")
-                    else:
-                        st.error("Audio not found")
-
-                    # Radio defaults to the current effective label
-                    eff = str(row["FinalLabelEffective"]).lower()
-                    idx = 1 if eff == "present" else 0
-                    new_choice = st.radio("Label", ["absent", "present"], index=idx, key=f"val_{start+i}", horizontal=True)
-
-                    # If user choice equals model FinalLabel -> clear override (empty)
-                    # Else store the chosen label in UserLabel
-                    proposed = "" if new_choice == m else new_choice
-                    if proposed != u:
-                        updates.append({"filename": row["filename"], "UserLabel": proposed})
-
-        # Save overrides:
-        if running_in_studio:
-            st.info("Edits are saved in the **Validation** page as part of the integrated workflow.")
-        else:
-            if st.button("Save All Updates"):
-                try:
-                    # Legacy save back to the active file (CSV/XLSX)
-                    def save_filename_level(path: Path, df_out: pd.DataFrame) -> None:
-                        if path.suffix.lower() in (".xlsx", ".xls"):
-                            try:
-                                with pd.ExcelWriter(path, engine="openpyxl", mode="w") as writer:
-                                    df_out.to_excel(writer, sheet_name="filename_level", index=False)
-                            except Exception:
-                                df_out.to_excel(path, index=False)
-                        else:
-                            df_out.to_csv(path, index=False)
-
-                    # Reload master
-                    chosen = Path(st.session_state.get("filename_level_path", RESULTS_DIR / "filename_level.csv"))
-                    if chosen.suffix.lower() in (".xlsx", ".xls"):
-                        try:
-                            df_master = pd.read_excel(chosen, sheet_name="filename_level")
-                        except Exception:
-                            df_master = pd.read_excel(chosen)
-                    else:
-                        df_master = pd.read_csv(chosen)
-                    df_master = ensure_userlabel(df_master)
-
-                    changes = 0
-                    for rec in updates:
-                        mask = df_master["filename"].astype(str) == str(rec["filename"])
-                        if mask.any():
-                            old = str(df_master.loc[mask, "UserLabel"].iloc[0]) if "UserLabel" in df_master.columns else ""
-                            if old != rec["UserLabel"]:
-                                if "UserLabel" not in df_master.columns:
-                                    df_master["UserLabel"] = ""
-                                df_master.loc[mask, "UserLabel"] = rec["UserLabel"]
-                                changes += int(mask.sum())
-
-                    save_filename_level(chosen, df_master)
-                    st.success(f"Saved {changes} update(s) to {chosen.name}.")
-                    if hasattr(st, "rerun"):
-                        st.rerun()
-                    elif hasattr(st, "experimental_rerun"):
-                        st.experimental_rerun()
-                except Exception as e:
-                    st.error(f"Failed to save updates: {e}")
-
-    # ---------------- Full Data Table ----------------
     st.header("Full Data Table")
-    if st.checkbox("Show full filename-level data"):
-        try:
-            st.dataframe(df_page, width="stretch")
-        except Exception:
-            st.dataframe(df_page, use_container_width=True)
+    if st.checkbox("Show full detection-level data"):
+        st.dataframe(df_page, use_container_width=True)
 
 # -----------------------
-# Standalone entry point (legacy)
+# Standalone entry
 # -----------------------
 if __name__ == "__main__":
-    st.warning("Running dashboard in standalone mode. For Studio integration, it is called via render_dashboard(df, sources).")
-
-    # Minimal shim to call render_dashboard with df=None (legacy path)
-    render_dashboard(df=None, sources={"project": str(RESULTS_DIR)})
+    st.warning("Running dashboard in standalone mode.")
+    render_dashboard(df=None, sources={"project": str(RESULTS_DIR)}, page="Dashboard", use_internal_nav=True)
