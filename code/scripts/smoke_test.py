@@ -1,47 +1,44 @@
+# code/scripts/smoke_test.py
+
+from __future__ import annotations
 from pathlib import Path
-import importlib.util
+import importlib
 import sys
 
-assert (3, 9) <= sys.version_info < (3, 13), "Python 3.9-3.12 required"
+# Sanity-check Python version
+assert (3, 9) <= sys.version_info < (3, 13), "Python 3.9–3.12 required"
 
-# repo root
-ROOT = Path(__file__).resolve().parents[1]
-SCRIPTS_DIR = ROOT / "scripts"
+# Assume we run this from repo root: `python -m code.scripts.smoke_test`
+REPO_ROOT = Path(__file__).resolve().parents[2]   # .../<repo>
+CODE_ROOT = REPO_ROOT / "code"
 
-FILES = [
-    "preprocessing.py",
-    "prepare_occupancy.py",
-    "pipeline.py",
+if not CODE_ROOT.exists():
+    raise SystemExit(f"code/ folder not found at {CODE_ROOT}")
+
+MODULES = [
+    "code.Home",
+    "code.core.pa_data",
+    "code.core.project",
+    "code.core.ui",
+    "code.pages.40_Dashboard",
+    "code.pages.41_Validation",
+    "code.pages.43_Recalculate",
 ]
 
-def load_module_from_path(mod_name: str, file_path: Path):
-    spec = importlib.util.spec_from_file_location(mod_name, file_path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Could not load spec for {file_path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module) 
-    return module
-
 failures = []
-for fname in FILES:
-    path = SCRIPTS_DIR / fname
-    if not path.exists():
-        failures.append((fname, f"File not found: {path}"))
-        continue
+for modname in MODULES:
     try:
-        # give each temp module a unique, throwaway name
-        load_module_from_path(f"pamalytics_{fname[:-3]}", path)
+        importlib.import_module(modname)
     except Exception as e:
-        failures.append((fname, repr(e)))
+        failures.append((modname, repr(e)))
 
 if failures:
-    detail = "\n".join(f"- {f}: {err}" for f, err in failures)
+    detail = "\n".join(f"- {m}: {err}" for m, err in failures)
     raise SystemExit(f"Smoke test import failures:\n{detail}")
 
-# Non-fatal sanity signal if these folders are absent in CI workspaces
-expected = ["audio", "results", "models"]
-missing = [d for d in expected if not (ROOT / d).exists()]
-if missing:
-    print(f"Note: missing expected folders (may be fine in CI): {missing}")
+# Optional: light-touch structural checks
+projects_dir = CODE_ROOT / "projects"
+if not projects_dir.exists():
+    print(f"Note: projects directory missing at {projects_dir} (may be fine in CI)")
 
-print("Smoke test passed on", sys.version)
+print("PAMalytics smoke test passed on", sys.version)
