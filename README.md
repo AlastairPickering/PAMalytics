@@ -36,7 +36,7 @@ A no-code, classifier-agnostic tool to efficiently review bioacoustic classifier
 
 # Quick Start
 Prerequisites: <br>
-Python 3.9 <br>
+Python 3.9 - 3.12 <br>
 macOS or Windows
 
 ### macOS
