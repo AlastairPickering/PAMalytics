@@ -1,5 +1,5 @@
 # 41_PAM_Validation.py
-# Streamlit page shim that loads your real Validation page from scripts/pages/1_Validate.py
+# Streamlit page shim 
 # Expects a callable: render_validation(df, sources)
 
 from pathlib import Path
@@ -22,10 +22,10 @@ for p in (SCRIPTS_DIR, CORE_DIR, PAGE_IMPL_DIR):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
-# Page chrome — let the main dashboard control visibility; we just ensure expanded here.
+# Page chrome — let the main dashboard control visibility
 st.set_page_config(page_title="PAMalytics — Validation", layout="wide", initial_sidebar_state="expanded")
 
-# ---- Load analysis data prepared by the Dashboard launcher (from session_state) ----
+# Load analysis data prepared by the Dashboard launcher
 def _pull_from_state(*candidates):
     for k in candidates:
         if k in st.session_state and st.session_state[k] is not None:
@@ -40,7 +40,7 @@ if df_det is None:
              "Open the PAM Dashboard first so it can prepare the data.")
     st.stop()
 
-# ---- Dynamically import scripts/pages/1_Validate.py and call render_validation ----
+# Dynamically import scripts/pages/1_Validate.py and call render_validation
 if not REAL_PAGE.exists():
     st.error(f"Could not find the Validation page at:\n`{REAL_PAGE}`")
     st.stop()
@@ -57,7 +57,7 @@ except Exception as e:
     st.error(f"Import error in 1_Validate.py: {e}")
     st.stop()
 
-# Prefer an explicitly named entrypoint; fail loudly if absent.
+# Prefer an explicitly named entrypoint; fail if absent.
 render_fn = getattr(mod, "render_validation", None)
 
 if render_fn is None or not callable(render_fn):
@@ -67,7 +67,6 @@ if render_fn is None or not callable(render_fn):
     )
     st.stop()
 
-# ---- Render your real Validation page ----
 try:
     render_fn(df_det, sources)
 except Exception as e:
