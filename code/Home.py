@@ -1,4 +1,4 @@
-# studio/launch_studio.py
+# code/Home.py
 # Flow: Login → Project Hub → Overview → Data mapping → Audio mapping → Metadata mapping → Dashboard
 # Global chrome hidden everywhere EXCEPT inside Dashboard, where a sidebar is used for page navigation.
 # Python 3.9 compatible. UK English.
@@ -15,9 +15,9 @@ import subprocess
 import sys
 
 # Paths
-STUDIO_ROOT = Path(__file__).resolve().parent      
-REPO_ROOT   = STUDIO_ROOT.parent                   
-SCRIPTS_DIR = STUDIO_ROOT / "scripts"              
+STUDIO_ROOT = Path(__file__).resolve().parent      # code/
+REPO_ROOT   = STUDIO_ROOT.parent                   # repo root
+SCRIPTS_DIR = STUDIO_ROOT / "scripts"              # code/scripts
 
 # Ensure scripts/ is importable
 if str(SCRIPTS_DIR) not in sys.path:
@@ -37,10 +37,10 @@ from pathlib import Path as _Path
 import platform as _platform
 import os as _os
 
-_STUDIO_FILE = _Path(__file__).resolve()          
-_STUDIO_ROOT = _STUDIO_FILE.parent                
-_REPO_ROOT   = _STUDIO_ROOT.parent                
-_SCRIPTS_DIR = _STUDIO_ROOT / "scripts"           
+_STUDIO_FILE = _Path(__file__).resolve()           # code/Home.py
+_STUDIO_ROOT = _STUDIO_FILE.parent                 # code/
+_REPO_ROOT   = _STUDIO_ROOT.parent                 # repo root
+_SCRIPTS_DIR = _STUDIO_ROOT / "scripts"            # code/scripts
 
 _REQS_FILE = _SCRIPTS_DIR / "requirements.txt"
 if not _REQS_FILE.exists() and (_REPO_ROOT / "requirements.txt").exists():
@@ -305,7 +305,7 @@ st.set_page_config(page_title="PAMalytics Studio", layout="wide", initial_sideba
 hide_chrome(True, True)  # hide everywhere by default
 
 # -----------------------------
-# NEW: Auth helpers + Sign out
+# Auth helpers + Sign out
 # -----------------------------
 def _is_logged_in() -> bool:
     return bool(st.session_state.get("auth_user"))
@@ -490,7 +490,7 @@ def compute_import_stats(
             mp["_stem_lc"]     = mp["_filename_lc"].apply(lambda s: os.path.splitext(s)[0])
             stats["audio_files_indexed"] = int(mp["_filename_lc"].nunique())
 
-            # If file_path wasn’t present (or most are blank), compute coverage via the map
+            # If file_path was not present (or most are blank), compute coverage via the map
             if ("file_path" not in det.columns) or (stats["detections_with_audio"] == 0):
                 name_set = set(mp["_filename_lc"].unique())
                 mask = det["_name_lower"].isin(name_set)
@@ -872,25 +872,45 @@ def view_login() -> None:
             st.rerun()
 
 def view_hub() -> None:
+    """
+    Project Hub:
+    - Explain what PAMalytics does.
+    - Let the user create a project (single use_case: external_results).
+    - List recent projects with Launch / Edit / Delete.
+    """
     hide_chrome(True, True)
     if not st.session_state.get("auth_user"):
         st.session_state.route = "login"; st.rerun()
 
     # Page title + top-right Sign out
     st.title("Project Hub")
-    _top_right_signout_button()  # <-- NEW: sign out on the hub, top-right
+    _top_right_signout_button()  # sign out on the hub, top-right
 
     with st.expander("Create a new project", expanded=True):
-        name = st.text_input("Project name", placeholder="e.g. Sabah 2024 – external results", key="proj_name")
-        mode = st.radio(
-            "What would you like to do?",
-            options=["external_results", "pipeline"],
-            index=0,
-            format_func=lambda x: "I already have classifier results" if x == "external_results" else "I have audio; I want to run a classifier",
-            horizontal=True,
+        st.markdown(
+            "PAMalytics helps you **explore, review and validate classifier detections** "
+            "from tools such as **BatDetect2** and **BirdNET**, and then summarise them "
+            "in a consistent, project-based dashboard."
         )
+        st.markdown(
+            "- Start by creating a project for a single survey or study.\n"
+            "- In the next step you will choose whether your detections come from **BatDetect2**, "
+            "**BirdNET**, or a **custom / manual** CSV.\n"
+        )
+
+        name = st.text_input(
+            "Project name",
+            placeholder="e.g. Sabah 2024 – external results",
+            key="proj_name",
+        )
+
         if _btn("Create project", key="create_project_btn") and name.strip():
-            folder = create_project(name.strip(), mode, created_by=st.session_state.auth_user)
+            # Single use-case for now: external classifier results
+            folder = create_project(
+                name=name.strip(),
+                use_case="external_results",
+                created_by=st.session_state.auth_user,
+            )
             touch_last_opened(folder)
             st.session_state.current_project = str(folder)
             st.session_state.route = "overview"
@@ -911,7 +931,7 @@ def view_hub() -> None:
             cols = st.columns([4, 2, 2, 1, 1, 1])
             with cols[0]:
                 st.markdown(f"**{data.get('name','(unnamed)')}**  \n`{p.name}`")
-            cols[1].write(f"Mode: `{data.get('use_case')}`")
+            cols[1].write(f"Mode: `{data.get('use_case', 'external_results')}`")
             cols[2].write(f"Timezone: `{data.get('tz','UTC')}`")
 
             edit_key   = f"edit_{p.name}"
@@ -979,7 +999,7 @@ def view_overview() -> None:
     if c_back.button("⬅︎ Back to Project Hub", key="back_to_hub_from_overview"):
         st.session_state.route = "hub"
         st.rerun()
-    st.caption(f"Project: **{data['name']}** • Mode: `{data['use_case']}` • Timezone: `{data.get('tz','UTC')}`")
+    st.caption(f"Project: **{data['name']}** • Mode: `{data.get('use_case','external_results')}` • Timezone: `{data.get('tz','UTC')}`")
 
     st.write("### Import phase (2 steps)")
     st.caption("Complete these in order: **1) Data mapping** → **2) Metadata mapping (optional)**.")
@@ -1069,7 +1089,6 @@ def view_import_results() -> None:
         Row with [text][Browse…] that updates session_state[state_key] safely and immediately.
         """
         st.session_state.setdefault(state_key, "")
-        # label above keeps the button aligned with the input
         st.markdown(f"**{label}**")
         c_txt, c_btn = st.columns([9, 1])  # wide text, narrow button -> aligned
         widget_key = f"{state_key}__widget"
@@ -1476,7 +1495,7 @@ def view_import_results() -> None:
     need = df_link["file_path"].isna() | df_link["file_path"].astype(str).str.strip().eq("")
     if need.any():
         stem_counts = wav_index["stem_lc"].value_counts()
-        uniq_stems  = set(stem_counts[stem_counts == 1].index)  # only unambiguous stems
+        uniq_stems  = set(stem_counts[stem_counts == 1].index)
         stem_to_path = dict(zip(
             wav_index.loc[wav_index["stem_lc"].isin(uniq_stems), "stem_lc"],
             wav_index.loc[wav_index["stem_lc"].isin(uniq_stems), "path"]
@@ -1735,7 +1754,7 @@ def view_import_results() -> None:
                 mapped_sources.add(label_col)
 
         # Use the shared helper – identical behaviour, now centralised
-        out_df = drop_mapped_columns(out_df, mapped_sources)
+        cn = drop_mapped_columns(cn, mapped_sources)
 
         st.session_state.import_preview_ready = True
         st.session_state.import_preview_df = cn.to_dict(orient="records")
