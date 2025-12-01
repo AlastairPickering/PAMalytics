@@ -49,12 +49,12 @@ Double click MacOS_launcher.command (first run may need permission override in S
 It will:
 - Create .venv
 - Install requirements.txt
-- Launch Streamlit on port 8503
-- The app opens in your browser at http://localhost:8503.
+- Launch Streamlit on port 8510
+- The app opens in your browser at http://localhost:8510.
 
 ### Windows
 - Double-click Windows_launcher.bat (or run python scripts\launch_dashboard.py).
-- Same behaviour: venv + requirements + Streamlit on port 8503.
+- Same behaviour: venv + requirements + Streamlit on port 8510.
 
 ### manual launch
 python -m venv .venv <br>
