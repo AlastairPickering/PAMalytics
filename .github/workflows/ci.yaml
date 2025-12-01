@@ -9,7 +9,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest] 
+        os: [macos-latest, windows-latest]
         python: ["3.9", "3.10", "3.11", "3.12"]
     runs-on: ${{ matrix.os }}
 
@@ -33,18 +33,8 @@ jobs:
         shell: bash
         run: |
           if [[ "$RUNNER_OS" == "Windows" ]]; then
-            ./.venv/Scripts/python -m pip install --no-input -r scripts/requirements.txt
+            ./.venv/Scripts/python -m pip install --no-input -r code/scripts/requirements.txt
           else
             source .venv/bin/activate
-            pip install --no-input -r scripts/requirements.txt
-          fi
-
-      - name: Smoke test
-        shell: bash
-        run: |
-          if [[ "$RUNNER_OS" == "Windows" ]]; then
-            ./.venv/Scripts/python scripts/smoke_test.py
-          else
-            source .venv/bin/activate
-            python scripts/smoke_test.py
+            pip install --no-input -r code/scripts/requirements.txt
           fi

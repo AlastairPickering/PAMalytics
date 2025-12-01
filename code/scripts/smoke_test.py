@@ -8,7 +8,7 @@ import sys
 # Sanity-check Python version
 assert (3, 9) <= sys.version_info < (3, 13), "Python 3.9–3.12 required"
 
-# Assume we run this from repo root: `python -m code.scripts.smoke_test`
+# run this from repo root: `python -m code.scripts.smoke_test`
 REPO_ROOT = Path(__file__).resolve().parents[2]   # .../<repo>
 CODE_ROOT = REPO_ROOT / "code"
 
@@ -36,7 +36,7 @@ if failures:
     detail = "\n".join(f"- {m}: {err}" for m, err in failures)
     raise SystemExit(f"Smoke test import failures:\n{detail}")
 
-# Optional: light-touch structural checks
+# light-touch structural checks
 projects_dir = CODE_ROOT / "projects"
 if not projects_dir.exists():
     print(f"Note: projects directory missing at {projects_dir} (may be fine in CI)")
