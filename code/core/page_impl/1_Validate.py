@@ -1,7 +1,6 @@
 # scripts/pages/1_Validate.py
 from __future__ import annotations
 
-import io
 import math
 import hashlib
 import os
@@ -47,25 +46,51 @@ def _best_prob_from_row(row: pd.Series) -> float:
 
 
 def _get_active_dataset_or_load(sources: dict, df_passed: Optional[pd.DataFrame]) -> pd.DataFrame:
-    # Use dataframe passed in by host if available
+    """
+    Resolve the active detections dataframe with the following preference:
+
+    1. Dataframe passed in by host (e.g. Dashboard) this session.
+    2. In-memory session copy (st.session_state["pa_df_det"]).
+    3. If active_dataset_path is set:
+       - if it points to detections_normalised.csv but a detections_validated.csv
+         exists in the same folder, prefer the validated file.
+       - otherwise load active_dataset_path.
+    4. Fallback to project files:
+       - data_normalised/detections_validated.csv if it exists
+       - else data_normalised/detections_normalised.csv
+    """
+    # 1) Host-provided df
     if isinstance(df_passed, pd.DataFrame) and not df_passed.empty:
         return df_passed.copy()
 
-    # Use in-memory session dataset if set on publish
+    # 2) In-memory dets for this session
     if isinstance(st.session_state.get("pa_df_det"), pd.DataFrame) and not st.session_state["pa_df_det"].empty:
         return st.session_state["pa_df_det"].copy()
 
-    # Use active dataset path selected by Dashboard
-    active_path = st.session_state.get("active_dataset_path")
-    if isinstance(active_path, str) and active_path.strip() and Path(active_path).exists():
-        try:
-            return pd.read_csv(active_path)
-        except Exception:
-            pass
-
-    # Fallback to project files: validated then original
     proj_root = Path(sources.get("project") or sources.get("project_root") or ".")
     dn = proj_root / "data_normalised"
+
+    # 3) Active dataset path from session
+    active_path = st.session_state.get("active_dataset_path")
+    if isinstance(active_path, str) and active_path.strip():
+        ap = Path(active_path)
+        if ap.exists():
+            # If active path is still the normalised file but a validated file exists,
+            # silently upgrade to the validated file so we do not lose user work.
+            if ap.name == "detections_normalised.csv":
+                vpath = ap.parent / "detections_validated.csv"
+                if vpath.exists():
+                    try:
+                        return pd.read_csv(vpath)
+                    except Exception:
+                        pass
+            # Otherwise, just use the active path
+            try:
+                return pd.read_csv(ap)
+            except Exception:
+                pass
+
+    # 4) Fallback: prefer validated, else normalised
     for p in [dn / "detections_validated.csv", dn / "detections_normalised.csv"]:
         try:
             if p.exists():
@@ -114,7 +139,7 @@ def _ensure_validation_ready(df_in: pd.DataFrame) -> pd.DataFrame:
     if "detection_probability" not in df.columns:
         df["detection_probability"] = df.apply(_best_prob_from_row, axis=1)
 
-    # Originals for audit/reset
+    # Originals for audit/reset (only create if missing)
     if "species_name_original" not in df.columns:
         df["species_name_original"] = df["species_name"]
     if "presence_label_original" not in df.columns:
@@ -261,7 +286,7 @@ def _user_name() -> str:
     return str(st.session_state.get("user_name") or os.environ.get("USER") or os.environ.get("USERNAME") or "")
 
 
-# in-session overrides
+# in-session overrides & filter state
 
 def _ov_init():
     if "val_overrides" not in st.session_state:
@@ -282,9 +307,63 @@ def _ov_get_state(detection_id: str) -> str:
     return (rec or {}).get("state", "")
 
 
+def _init_filter_state():
+    defaults = {
+        "validate_num_per_page": 10,
+        "validate_cols_per_row": 2,
+        "validate_page": 1,
+        "validate_show_label": "present",
+        "validate_min_prob": 0.0,
+        "validate_sort_by": "probability: high → low",
+        "validate_lock_freq": False,
+        "validate_fmin_khz": 15.0,
+        "validate_fmax_khz": 90.0,
+    }
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
+
+
+def _attach_validation_flags(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Add boolean flags for whether a detection has been reviewed and changed.
+
+    Definitions:
+      - changed_flag  = (species_name / presence_label differ from originals)
+      - reviewed_flag = changed_flag OR validation_state_effective ∈ {correct, incorrect}
+    """
+    df = df.copy()
+
+    # Originals: if missing, fall back to current values
+    orig_sp = df.get("species_name_original", df.get("species_name", ""))
+    orig_pl = df.get("presence_label_original", df.get("presence_label", ""))
+
+    orig_sp = orig_sp.astype(str)
+    orig_pl = orig_pl.astype(str).str.lower()
+
+    cur_sp = df.get("species_name", "").astype(str)
+    cur_pl = df.get("presence_label", "").astype(str).str.lower()
+
+    changed_flag = (cur_sp != orig_sp) | (cur_pl != orig_pl)
+
+    # Effective validation state
+    eff = df.get("validation_state_effective")
+    if eff is None:
+        eff = df.get("validation_state", "")
+    eff = eff.astype(str).str.lower()
+
+    validated_flag = eff.isin(["correct", "incorrect"])
+
+    df["changed_flag"] = changed_flag
+    df["reviewed_flag"] = changed_flag | validated_flag
+
+    return df
+
+
 # page entrypoint
 
 def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None:
+    _init_filter_state()
     st.header("Validation")
 
     # Load the same dataset the Dashboard uses
@@ -297,55 +376,135 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
     df_all = _ensure_validation_ready(df_loaded)
     _ov_init()
 
-    # Layout controls
+    # Layout controls (persist via session_state keys)
     top1, top2, top3 = st.columns([1, 1, 1])
     with top1:
-        NUM_PER_PAGE = st.number_input("Spectrograms per page", min_value=4, max_value=40, value=10, step=2)
+        NUM_PER_PAGE = st.number_input(
+            "Spectrograms per page",
+            min_value=4,
+            max_value=40,
+            step=2,
+            key="validate_num_per_page",
+        )
     with top2:
-        COLS_PER_ROW = st.slider("Columns per row", min_value=2, max_value=5, value=2)
+        COLS_PER_ROW = st.slider(
+            "Columns per row",
+            min_value=2,
+            max_value=5,
+            key="validate_cols_per_row",
+        )
     with top3:
-        PAGE = st.number_input("Page", min_value=1, value=1, step=1)
+        PAGE = st.number_input(
+            "Page",
+            min_value=1,
+            step=1,
+            key="validate_page",
+        )
 
-    # Filters (collapsible)
+    # Filters (collapsible, state persists via keys)
     with st.expander("Advanced filters", expanded=False):
         r1c1, r1c2, r1c3 = st.columns([1, 1, 1])
         with r1c1:
             show_label = st.selectbox(
                 "Show clips labelled",
                 ["present", "absent", "all", "user changed only"],
-                index=0
+                key="validate_show_label",
             )
         with r1c2:
-            min_prob = st.slider("Min detection probability", 0.0, 1.0, 0.0, 0.01)
+            min_prob = st.slider(
+                "Min detection probability",
+                min_value=0.0,
+                max_value=1.0,
+                step=0.01,
+                key="validate_min_prob",
+            )
         with r1c3:
             sort_by = st.selectbox(
                 "Sort by",
                 ["probability: high → low", "probability: low → high", "basename"],
-                index=0
+                key="validate_sort_by",
             )
 
         frow1, frow2, frow3, frow4, frow5 = st.columns([0.9, 0.7, 0.2, 0.9, 2.3])
         with frow1:
-            lock_freq = st.checkbox("Lock frequency (kHz)", value=False)
+            lock_freq = st.checkbox(
+                "Lock frequency (kHz)",
+                key="validate_lock_freq",
+            )
         with frow2:
-            fmin_khz = st.number_input("Min", min_value=0.0, max_value=200.0, value=15.0, step=1.0, disabled=not lock_freq)
+            fmin_khz = st.number_input(
+                "Min",
+                min_value=0.0,
+                max_value=200.0,
+                step=1.0,
+                disabled=not lock_freq,
+                key="validate_fmin_khz",
+            )
         with frow3:
             st.caption("")
         with frow4:
-            fmax_khz = st.number_input("Max", min_value=1.0, max_value=250.0, value=90.0, step=1.0, disabled=not lock_freq)
+            fmax_khz = st.number_input(
+                "Max",
+                min_value=1.0,
+                max_value=250.0,
+                step=1.0,
+                disabled=not lock_freq,
+                key="validate_fmax_khz",
+            )
         with frow5:
             st.caption("")
 
-    # Defaults when collapsed
-    show_label = locals().get("show_label", "present")
-    min_prob   = locals().get("min_prob", 0.0)
-    sort_by    = locals().get("sort_by", "probability: high → low")
-    lock_freq  = locals().get("lock_freq", False)
-    fmin_khz   = locals().get("fmin_khz", 15.0)
-    fmax_khz   = locals().get("fmax_khz", 90.0)
+        # group filter (species / recorder / site / detector)
+        group_candidates = []
+        label_map: Dict[str, str] = {}
+        for label, col in [
+            ("Species", "species_display"),
+            ("Recorder ID", "recorder_id"),
+            ("Site", "site"),
+            ("Detector ID", "detector_id"),
+        ]:
+            if col in df_all.columns:
+                group_candidates.append(label)
+                label_map[label] = col
+
+        if group_candidates:
+            st.markdown("---")
+            st.markdown("**Group filter (optional)**")
+            group_options = ["[none]"] + group_candidates
+            group_label = st.selectbox(
+                "Filter by group",
+                group_options,
+                key="validate_group_label",
+            )
+
+            if group_label != "[none]":
+                group_col = label_map[group_label]
+                all_vals = (
+                    df_all[group_col]
+                    .dropna()
+                    .astype(str)
+                    .sort_values()
+                    .unique()
+                )
+                selected_vals = st.multiselect(
+                    "Only show these values",
+                    options=list(all_vals),
+                    key="validate_group_values",
+                )
+                st.session_state["validate_group_col"] = group_col
+            else:
+                selected_vals = []
+                st.session_state["validate_group_col"] = ""
+        else:
+            # no suitable columns to group on
+            st.session_state["validate_group_col"] = ""
+
+    # Read current group filter from session
+    group_col = st.session_state.get("validate_group_col", "")
+    group_values = st.session_state.get("validate_group_values", [])
 
     # Effective validation state with overrides
-    eff_state = df_all["validation_state"].astype(str).str.lower() if "validation_state" in df_all.columns else pd.Series([""]*len(df_all))
+    eff_state = df_all["validation_state"].astype(str).str.lower() if "validation_state" in df_all.columns else pd.Series([""] * len(df_all))
     if "detection_id" in df_all.columns:
         ov_map = st.session_state["val_overrides"]
         if ov_map:
@@ -355,20 +514,91 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
             )
     df_all = df_all.assign(validation_state_effective=eff_state)
 
+    # Attach reviewed/changed flags (based on originals vs current + validation_state)
+    df_all = _attach_validation_flags(df_all)
+
     # Filtering
     df_view = df_all.copy()
+
+    # Apply group filter first (species / recorder / site / detector)
+    if group_col and group_values:
+        df_view = df_view[df_view[group_col].astype(str).isin(group_values)]
+
+    # Label filter
     if show_label in ("present", "absent"):
         df_view = df_view[df_view["FinalLabelEffective"] == show_label]
     elif show_label == "user changed only":
-        ch = df_view.get("user_changed", "").astype(str).isin(["1"]) | df_view.get("user_changed", "").astype(str).ne("").astype(bool)
-        vset = df_view["validation_state_effective"].isin(["correct", "incorrect"])
-        df_view = df_view[ch | vset]
+        df_view = df_view[df_view["changed_flag"].astype(bool)]
 
+    # Probability filter
     df_view["detection_probability"] = pd.to_numeric(df_view["detection_probability"], errors="coerce").fillna(0.0)
     df_view = df_view[df_view["detection_probability"] >= float(min_prob)]
     if df_view.empty:
         st.info("No clips match the current filters.")
         return
+
+    # Validation progress summary for current filters
+    total_in_scope = len(df_view)
+    reviewed_mask = df_view["reviewed_flag"].astype(bool)
+    changed_mask = df_view["changed_flag"].astype(bool)
+
+    n_reviewed = int(reviewed_mask.sum())
+    n_changed = int(changed_mask.sum())
+    eff_local = df_view.get("validation_state_effective", df_view.get("validation_state", "")).astype(str).str.lower()
+    correct_mask = eff_local.eq("correct")
+    n_correct = int(correct_mask.sum())
+
+    pct_reviewed = (100.0 * n_reviewed / total_in_scope) if total_in_scope else 0.0
+    pct_correct = (100.0 * n_correct / n_reviewed) if n_reviewed else 0.0
+    pct_changed = (100.0 * n_changed / n_reviewed) if n_reviewed else 0.0
+
+    with st.expander("Validation progress (current filters)", expanded=True):
+        m1, m2, m3, m4 = st.columns(4)
+        with m1:
+            st.metric("Detections in scope", total_in_scope)
+        with m2:
+            st.metric("Reviewed", f"{n_reviewed} ({pct_reviewed:.0f}%)")
+        with m3:
+            st.metric("Marked correct", f"{n_correct} ({pct_correct:.0f}%)")
+        with m4:
+            st.metric("Changed of reviewed", f"{n_changed} ({pct_changed:.0f}%)")
+
+        # Per-species breakdown
+        if "species_display" in df_view.columns:
+            if "detection_id" in df_view.columns:
+                grp = (
+                    df_view
+                    .groupby("species_display", dropna=False)
+                    .agg(
+                        detections=("detection_id", "size"),
+                        reviewed_n=("reviewed_flag", "sum"),
+                        changed_n=("changed_flag", "sum"),
+                    )
+                )
+            else:
+                grp = (
+                    df_view
+                    .groupby("species_display", dropna=False)
+                    .agg(
+                        detections=("species_display", "size"),
+                        reviewed_n=("reviewed_flag", "sum"),
+                        changed_n=("changed_flag", "sum"),
+                    )
+                )
+
+            grp["pct_reviewed"] = (100.0 * grp["reviewed_n"] / grp["detections"]).round(1)
+            grp["pct_changed_of_reviewed"] = np.where(
+                grp["reviewed_n"] > 0,
+                (100.0 * grp["changed_n"] / grp["reviewed_n"]).round(1),
+                np.nan,
+            )
+
+            st.dataframe(
+                grp.reset_index().rename(columns={"species_display": "species"}).sort_values(
+                    "pct_reviewed", ascending=False
+                ),
+                use_container_width=True,
+            )
 
     # Grouping like dashboard: (basename, species_display)
     df_view = df_view.sort_values(["basename", "species_display", "start_s"])
@@ -462,6 +692,7 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                 apath = _resolve_audio_path(gdf, df_all)
                 if not (apath and apath.exists()):
                     st.error("Audio not found")
+                    y, sr = np.array([], dtype=np.float32), 1
                 else:
                     try:
                         y, sr = librosa.load(str(apath), sr=None, mono=True)
@@ -549,17 +780,33 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                         for b in boxes:
                             x0, x1 = b["start_s"], b["end_s"]
                             prob = b["prob"]
-                            ax.add_patch(Rectangle((x0, ymin), x1 - x0, ymax - ymin,
-                                                   facecolor=(1, 1, 1, 0.06), edgecolor=(1, 1, 1, 0.12), lw=0.6))
+                            ax.add_patch(
+                                Rectangle(
+                                    (x0, ymin),
+                                    x1 - x0,
+                                    ymax - ymin,
+                                    facecolor=(1, 1, 1, 0.06),
+                                    edgecolor=(1, 1, 1, 0.12),
+                                    linewidth=0.6,
+                                )
+                            )
                             if np.isfinite(prob):
                                 xm = (x0 + x1) * 0.5
                                 ym = ymin + 0.88 * (ymax - ymin)
                                 ax.text(
-                                    xm, ym, f"{prob:.2f}",
-                                    ha="center", va="center",
+                                    xm,
+                                    ym,
+                                    f"{prob:.2f}",
+                                    ha="center",
+                                    va="center",
                                     color="white",
                                     fontsize=9,
-                                    bbox=dict(boxstyle="round,pad=0.18", fc=(0, 0, 0, 0.55), ec=(1, 1, 1, 0.25), lw=0.5)
+                                    bbox=dict(
+                                        boxstyle="round,pad=0.18",
+                                        fc=(0, 0, 0, 0.55),
+                                        ec=(1, 1, 1, 0.25),
+                                        lw=0.5,
+                                    ),
                                 )
 
                         st.pyplot(fig, use_container_width=True, clear_figure=True)
@@ -572,8 +819,8 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                         highs = [b["high_freq"] for b in boxes if np.isfinite(b["high_freq"])]
                         max_high = max(highs) if highs else None
                         te_guard = _choose_te_guard(sr, max_high)
-                        peak_hz  = _estimate_peak_hz_for_group(gdf, sr)
-                        te_peak  = _choose_te_for_peak(peak_hz)
+                        peak_hz = _estimate_peak_hz_for_group(gdf, sr)
+                        te_peak = _choose_te_for_peak(peak_hz)
                         te = max(te_guard, te_peak)
 
                         y_play, psr = _decimate_mean(y, sr, te)
@@ -604,10 +851,10 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                         except ValueError:
                             idx_choice = 0  # "[absent]"
 
-                        eff_state = _ov_get_state(det_id) or str(row.get("validation_state", "")).lower()
+                        eff_state_row = _ov_get_state(det_id) or str(row.get("validation_state", "")).lower()
                         state_opt = ["", "correct", "incorrect"]
                         state_lbl = ["Unknown", "Correct", "Incorrect"]
-                        state_idx = state_opt.index(eff_state) if eff_state in state_opt else 0
+                        state_idx = state_opt.index(eff_state_row) if eff_state_row in state_opt else 0
 
                         cc1, cc2 = st.columns([1.3, 0.9])
                         with cc1:
@@ -618,128 +865,165 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                                 key=f"sp_{base}_{species_line}_{ridx}"
                             )
                         with cc2:
-                            new_state_lbl = st.selectbox("Validation", state_lbl, index=state_idx, key=f"val_{base}_{species_line}_{ridx}")
+                            new_state_lbl = st.selectbox(
+                                "Validation",
+                                state_lbl,
+                                index=state_idx,
+                                key=f"val_{base}_{species_line}_{ridx}"
+                            )
                             new_state = state_opt[state_lbl.index(new_state_lbl)]
 
-                        # Species change capture (convert "[absent]" to canonical fields on write)
-                        # Store target in 'new_species_choice' so write step can set presence/species correctly.
+                        # Species change capture
                         if new_sp_choice != current_species_choice:
                             sp_updates.append({
                                 "detection_id": det_id,
-                                "new_species_choice": new_sp_choice  # either "[absent]" or a species string
+                                "new_species_choice": new_sp_choice
                             })
 
                         # Validation state overrides (in-session)
-                        if new_state != eff_state:
+                        if new_state != eff_state_row:
                             _ov_set_many([det_id], state=new_state)
 
     st.divider()
 
-    #pending changes + save/publish
+    # Pending changes + save
     st.subheader("Pending species changes")
-    if not sp_updates:
-        st.write("No pending changes.")
-    else:
-        # Collapse to last change per detection_id
-        upd_df = pd.DataFrame(sp_updates)
-        upd_df = (upd_df
-                  .groupby("detection_id", as_index=False)
-                  .last())
+
+    if sp_updates:
+        upd_df = (
+            pd.DataFrame(sp_updates)
+            .groupby("detection_id", as_index=False)
+            .last()
+        )
         st.dataframe(upd_df, use_container_width=True)
+    else:
+        upd_df = pd.DataFrame(columns=["detection_id", "new_species_choice"])
+        st.write("No pending species changes.")
 
-        left, mid, right = st.columns([1, 1, 2])
+    left, right = st.columns([1, 3])
 
-        def _apply_updates_and_write(det: pd.DataFrame, out_path: Path) -> int:
-            det = det.copy()
+    def _apply_updates_and_write(det: pd.DataFrame, out_path: Path, upd_df: pd.DataFrame) -> tuple[int, int]:
+        """
+        Apply both:
+          - species / presence changes from upd_df
+          - validation_state = correct / incorrect from val_overrides
 
-            # Ensure expected columns
-            for col in ("species_name", "presence_label", "species_name_original", "presence_label_original",
-                        "user_changed", "user_changed_by", "user_changed_at"):
-                if col not in det.columns:
-                    if col.endswith("_original"):
-                        base = col.replace("_original", "")
-                        det[col] = det.get(base, "")
-                    else:
-                        det[col] = ""
+        Species changes:
+          - update species_name / presence_label
+          - set user_changed, user_changed_by, user_changed_at
+          - DO NOT auto-assign validation_state (user does that explicitly)
 
-            # detection_id -> indices
-            key_to_idx: Dict[str, List[int]] = {}
-            if "detection_id" in det.columns:
-                for i, r in det.iterrows():
-                    did = str(r.get("detection_id"))
-                    if did and did.lower() != "nan":
-                        key_to_idx.setdefault(did, []).append(i)
+        Returns:
+          (n_species_changes, n_validation_flags)
+        """
+        det = det.copy()
 
-            user_id = st.session_state.get("user_id") or st.session_state.get("username") or _user_name()
-            now_iso = _now_iso()
+        # Ensure expected columns exist
+        for col in (
+            "species_name", "presence_label",
+            "species_name_original", "presence_label_original",
+            "user_changed", "user_changed_by", "user_changed_at",
+            "validation_state", "validated_by", "validated_at",
+        ):
+            if col not in det.columns:
+                if col.endswith("_original"):
+                    base = col.replace("_original", "")
+                    det[col] = det.get(base, "")
+                else:
+                    det[col] = ""
 
-            applied = 0
-            for rec in upd_df.to_dict(orient="records"):
-                detid = rec["detection_id"]
-                choice = rec["new_species_choice"]
-                idxs = key_to_idx.get(detid, [])
-                for i in idxs:
-                    # Set originals if blank
-                    if (str(det.at[i, "species_name_original"]).strip() == ""):
-                        det.at[i, "species_name_original"] = det.at[i, "species_name"]
-                    if (str(det.at[i, "presence_label_original"]).strip() == ""):
-                        det.at[i, "presence_label_original"] = det.at[i, "presence_label"]
+        # detection_id -> indices
+        key_to_idx: Dict[str, List[int]] = {}
+        if "detection_id" in det.columns:
+            for i, r in det.iterrows():
+                did = str(r.get("detection_id"))
+                if did and did.lower() != "nan":
+                    key_to_idx.setdefault(did, []).append(i)
 
-                    if choice == "[absent]":
-                        new_species = ""
-                        new_presence = "absent"
-                    else:
-                        new_species = choice
-                        new_presence = "present"
+        user_id = st.session_state.get("user_id") or st.session_state.get("username") or _user_name()
+        now_iso = _now_iso()
 
-                    changed = (str(det.at[i, "species_name"]) != new_species) or (str(det.at[i, "presence_label"]).lower() != new_presence)
+        # Apply species / presence changes from the pending table
+        species_applied = 0
+        for rec in upd_df.to_dict(orient="records"):
+            detid = rec["detection_id"]
+            choice = rec["new_species_choice"]
+            idxs = key_to_idx.get(detid, [])
+            for i in idxs:
+                # Set originals if blank (original classifier output)
+                if str(det.at[i, "species_name_original"]).strip() == "":
+                    det.at[i, "species_name_original"] = det.at[i, "species_name"]
+                if str(det.at[i, "presence_label_original"]).strip() == "":
+                    det.at[i, "presence_label_original"] = det.at[i, "presence_label"]
 
-                    det.at[i, "species_name"] = new_species
-                    det.at[i, "presence_label"] = new_presence
+                if choice == "[absent]":
+                    new_species = ""
+                    new_presence = "absent"
+                else:
+                    new_species = choice
+                    new_presence = "present"
 
-                    if changed:
-                        det.at[i, "user_changed"] = "1" if not user_id else user_id
-                        det.at[i, "user_changed_by"] = user_id
-                        det.at[i, "user_changed_at"] = now_iso
-                        applied += 1
+                prev_sp = str(det.at[i, "species_name"])
+                prev_pl = str(det.at[i, "presence_label"]).lower()
 
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-            det.to_csv(out_path, index=False)
+                changed = (prev_sp != new_species) or (prev_pl != new_presence)
 
-            # Update session so Dashboard uses validated immediately
-            st.session_state["active_dataset_label"] = "validated"
-            st.session_state["active_dataset_path"] = str(out_path)
-            st.session_state["pa_df_det"] = det  # keep in memory for immediate page reload
+                det.at[i, "species_name"] = new_species
+                det.at[i, "presence_label"] = new_presence
 
-            # Clear pending overrides for a clean state after save
-            st.session_state["val_overrides"] = {}
+                if changed:
+                    det.at[i, "user_changed"] = user_id or "1"
+                    det.at[i, "user_changed_by"] = user_id
+                    det.at[i, "user_changed_at"] = now_iso
+                    species_applied += 1
 
-            return applied
+        # Apply validation flags (correct / incorrect) from in-session overrides
+        ov_map: Dict[str, Dict[str, str]] = st.session_state.get("val_overrides", {})
+        validation_applied = 0
 
-        with left:
-            if st.button("Save species changes"):
-                try:
-                    det = df_all.copy()
-                    out = proj_root / "data_normalised" / "detections_validated.csv"
-                    applied = _apply_updates_and_write(det, out)
-                    st.success(f"Applied {applied} change(s). Saved to: {out}")
-                    if hasattr(st, "rerun"):
-                        st.rerun()
-                    elif hasattr(st, "experimental_rerun"):
-                        st.experimental_rerun()
-                except Exception as e:
-                    st.error(f"Failed to save updates: {e}")
+        for detid, ov in ov_map.items():
+            state = str((ov or {}).get("state", "")).lower()
+            if state not in ("correct", "incorrect"):
+                continue
 
-        with mid:
-            if st.button("Save & Publish"):
-                try:
-                    det = df_all.copy()
-                    out = proj_root / "data_normalised" / "detections_validated.csv"
-                    applied = _apply_updates_and_write(det, out)
-                    st.success(f"Applied {applied} change(s). Published validated dataset.")
-                    if hasattr(st, "rerun"):
-                        st.rerun()
-                    elif hasattr(st, "experimental_rerun"):
-                        st.experimental_rerun()
-                except Exception as e:
-                    st.error(f"Failed to publish validated dataset: {e}")
+            idxs = key_to_idx.get(detid, [])
+            for i in idxs:
+                prev = str(det.at[i, "validation_state"]).lower()
+                if prev == state:
+                    continue  # no change
+
+                det.at[i, "validation_state"] = state
+                det.at[i, "validated_by"] = user_id
+                det.at[i, "validated_at"] = now_iso
+                validation_applied += 1
+
+        # Write updated dataframe
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        det.to_csv(out_path, index=False)
+
+        # Update session so Dashboard uses validated immediately
+        st.session_state["active_dataset_label"] = "validated"
+        st.session_state["active_dataset_path"] = str(out_path)
+        st.session_state["pa_df_det"] = det  # keep in memory for immediate page reload
+
+        # Clear pending overrides for a clean state after save
+        st.session_state["val_overrides"] = {}
+
+        return species_applied, validation_applied
+
+    with left:
+        if st.button("Save changes & validations"):
+            try:
+                det = df_all.copy()
+                out = proj_root / "data_normalised" / "detections_validated.csv"
+                n_species, n_val = _apply_updates_and_write(det, out, upd_df)
+                st.success(
+                    f"Applied {n_species} species change(s) and "
+                    f"{n_val} validation flag(s). Saved to: {out}"
+                )
+                if hasattr(st, "rerun"):
+                    st.rerun()
+                elif hasattr(st, "experimental_rerun"):
+                    st.experimental_rerun()
+            except Exception as e:
+                st.error(f"Failed to save updates: {e}")
