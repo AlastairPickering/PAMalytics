@@ -27,7 +27,7 @@ A no-code, classifier-agnostic tool to efficiently review bioacoustic classifier
 
 ### Validate (deep review)
 
-<img width="2687" height="1442" alt="image" src="https://github.com/user-attachments/assets/8ac32ce4-ddc4-4c45-a98d-0b822db9bdd8" /> <br>
+<img width="2946" height="1630" alt="image" src="https://github.com/user-attachments/assets/8c2d4016-a9ad-472f-927e-ba2c85e64597" />
 
 - Sort & filter by clip probability (min-max segment probability per file)
 - High-resolution spectrograms optimised for quick visual check
