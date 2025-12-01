@@ -55,3 +55,6 @@ results/pipeline_status.json
 
 # Local launcher artefacts
 *.pid
+
+# Local auth config
+code/.auth.json
