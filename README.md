@@ -25,7 +25,7 @@ A no-code, classifier-agnostic tool to efficiently review bioacoustic classifier
     - Non-destructive overrides stored in UserLabel (not overwriting FinalLabel)
     - Effective label = UserLabel (if set) else FinalLabel
 
-### Validate (deep review)
+### Validate
 
 <img width="2946" height="1630" alt="image" src="https://github.com/user-attachments/assets/8c2d4016-a9ad-472f-927e-ba2c85e64597" />
 
@@ -33,6 +33,10 @@ A no-code, classifier-agnostic tool to efficiently review bioacoustic classifier
 - High-resolution spectrograms optimised for quick visual check
 - Shows pending changes before saving
 - Saves only UserLabel changes so you always preserve the original predictions
+
+<img width="2915" height="1286" alt="image" src="https://github.com/user-attachments/assets/d26837ee-43d8-45b4-b9eb-b87d80db16df" />
+
+<img width="2876" height="1451" alt="image" src="https://github.com/user-attachments/assets/82fd2b1d-c6a5-48da-946a-b1bf4d0156ea" />
 
 # Quick Start
 Prerequisites: <br>
