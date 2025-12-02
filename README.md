@@ -1,5 +1,5 @@
 # PAMalytics — PAM Validation dashboard
-A no-code, classifier-agnostic tool to efficiently review bioacoustic classifier results. 
+An open source, no-code, classifier-agnostic, interactive dashboard to efficiently review bioacoustic classifier results. 
 
 ### Features
 - Interactive dashboard to summarise, validate and export results
