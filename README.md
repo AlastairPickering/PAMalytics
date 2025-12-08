@@ -44,7 +44,7 @@ Python 3.9 - 3.12 <br>
 macOS or Windows
 
 ### macOS
-Double click MacOS_launcher.command (first run may need permission override in System Settings/Privacy & Security/Security/Allow applications downloaded from App store and identified developers).
+Double click pamalytics_macos_launcher.command (first run may need permission override in System Settings/Privacy & Security/Security/Allow applications downloaded from App store and identified developers).
 
 It will:
 - Create .venv
@@ -53,7 +53,7 @@ It will:
 - The app opens in your browser at http://localhost:8510.
 
 ### Windows
-- Double-click Windows_launcher.bat (or run python scripts\launch_dashboard.py).
+- Double-click pamalytics_windows_launcher.bat (or run python scripts\launch_dashboard.py).
 - Same behaviour: venv + requirements + Streamlit on port 8510.
 
 ### manual launch
