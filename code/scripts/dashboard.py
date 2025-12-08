@@ -1,10 +1,3 @@
-# scripts/dashboard.py
-# Dashboard with canonical-only group-by (species_name, recorder_id if populated),
-# dataset choice limited to Original / Validated (published),
-# detection-level headline stats, gallery with TE playback + top-10 prob labels,
-# and robust lat/lon handling. No Studio/session dataset option left in the selector.
-# Keeps functionality; adds session sync so Validate loads the same dataset.
-
 from __future__ import annotations
 
 import os
@@ -32,18 +25,7 @@ except Exception:
 
 os.environ["STREAMLIT_SERVER_FILEWATCHERTYPE"] = "none"
 
-# -----------------------
-# Legacy config (standalone only)
-# -----------------------
-try:
-    from config import RAW_AUDIO_DIR, RESULTS_DIR
-except Exception:
-    RAW_AUDIO_DIR = Path("./data/audio").resolve()
-    RESULTS_DIR = Path("./results").resolve()
 
-# -----------------------
-# Canonical → legacy shim (ADD-ONLY)
-# -----------------------
 def _apply_canonical_overrides(df_in: pd.DataFrame) -> pd.DataFrame:
     df = df_in.copy()
     num = lambda s: pd.to_numeric(s, errors="coerce")
@@ -75,9 +57,7 @@ def _apply_canonical_overrides(df_in: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
-# -----------------------
-# Label prep
-# -----------------------
+
 def ensure_userlabel(df_in: pd.DataFrame) -> pd.DataFrame:
     df = df_in.copy()
     if "UserLabel" not in df.columns:
@@ -85,6 +65,7 @@ def ensure_userlabel(df_in: pd.DataFrame) -> pd.DataFrame:
     else:
         df["UserLabel"] = df["UserLabel"].fillna("").replace({"nan": ""})
     return df
+
 
 def with_effective_labels(df_in: pd.DataFrame) -> pd.DataFrame:
     df = df_in.copy()
@@ -107,9 +88,7 @@ def with_effective_labels(df_in: pd.DataFrame) -> pd.DataFrame:
     df["Changed"] = (u != "") & (u != m)
     return df
 
-# -----------------------
-# Datetime helpers
-# -----------------------
+
 def parse_dt_col(s: pd.Series) -> pd.Series:
     ss = s.astype(str).str.replace(r"\D", "", regex=True)
     dt14 = pd.to_datetime(ss.str.slice(0, 14), format="%Y%m%d%H%M%S", errors="coerce")
@@ -118,6 +97,7 @@ def parse_dt_col(s: pd.Series) -> pd.Series:
         dt8 = pd.to_datetime(ss.str.slice(0, 8), format="%Y%m%d", errors="coerce")
         dt14[mask] = dt8[mask]
     return dt14.dt.normalize()
+
 
 def parse_dt_full(s: pd.Series) -> pd.Series:
     ss = s.astype(str).str.replace(r"\D", "", regex=True)
@@ -128,9 +108,7 @@ def parse_dt_full(s: pd.Series) -> pd.Series:
         dt[missing] = dt8[missing]
     return dt
 
-# -----------------------
-# Lat/Lon helpers (UTM -> WGS84)
-# -----------------------
+
 def _ensure_latlon(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return df
@@ -161,6 +139,7 @@ def _ensure_latlon(df: pd.DataFrame) -> pd.DataFrame:
             return out
     return out
 
+
 def _build_latlon_lookup(df_all: pd.DataFrame) -> Dict[str, pd.DataFrame]:
     res: Dict[str, pd.DataFrame] = {}
     if df_all is None or df_all.empty:
@@ -181,6 +160,7 @@ def _build_latlon_lookup(df_all: pd.DataFrame) -> Dict[str, pd.DataFrame]:
         if not by_rec.empty:
             res["by_recorder"] = by_rec
     return res
+
 
 def _attach_latlon_from_glob(df_page: pd.DataFrame, df_all: pd.DataFrame) -> pd.DataFrame:
     if df_page is None or df_page.empty:
@@ -212,9 +192,7 @@ def _attach_latlon_from_glob(df_page: pd.DataFrame, df_all: pd.DataFrame) -> pd.
 
     return out
 
-# -----------------------
-# Probability overlays (top 10)
-# -----------------------
+
 def _extract_prob(row: pd.Series) -> float:
     for key in ("detection_probability", "class_prob", "probability", "score"):
         if key in row and pd.notna(row[key]):
@@ -223,6 +201,7 @@ def _extract_prob(row: pd.Series) -> float:
             except Exception:
                 continue
     return float("nan")
+
 
 def _collect_boxes_and_probs(gdf: pd.DataFrame):
     mids, lows, highs, ps = [], [], [], []
@@ -235,7 +214,10 @@ def _collect_boxes_and_probs(gdf: pd.DataFrame):
             lf = float(row.get("low_freq",  np.nan))
             hf = float(row.get("high_freq", np.nan))
             p  = _extract_prob(row)
-            mids.append(0.5 * (sx + ex)); lows.append(lf); highs.append(hf); ps.append(float(np.clip(p, 0.0, 1.0)))
+            mids.append(0.5 * (sx + ex))
+            lows.append(lf)
+            highs.append(hf)
+            ps.append(float(np.clip(p, 0.0, 1.0)))
         except Exception:
             continue
     if not mids:
@@ -244,6 +226,7 @@ def _collect_boxes_and_probs(gdf: pd.DataFrame):
             np.asarray(lows, dtype=float),
             np.asarray(highs, dtype=float),
             np.asarray(ps, dtype=float))
+
 
 def _draw_prob_labels_inline(ax, gdf: pd.DataFrame, xmin: float, xmax: float, ymin: float, ymax: float) -> None:
     mids, lows, highs, ps = _collect_boxes_and_probs(gdf)
@@ -264,19 +247,32 @@ def _draw_prob_labels_inline(ax, gdf: pd.DataFrame, xmin: float, xmax: float, ym
 
     for i, (x, lf, hf, p) in enumerate(zip(mids, lows, highs, ps)):
         label = f"{p:.2f}"
-        has_lf = np.isfinite(lf); has_hf = np.isfinite(hf)
+        has_lf = np.isfinite(lf)
+        has_hf = np.isfinite(hf)
         if has_lf and has_hf:
             y_raw = (hf + vpad) if (i % 2 == 0) else (lf - vpad)
             va = "bottom" if (i % 2 == 0) else "top"
         else:
-            y_raw = fixed_high; va = "center"
+            y_raw = fixed_high
+            va = "center"
         y_clamped = float(np.clip(y_raw, ymin + vpad, ymax - vpad))
-        ax.text(x, y_clamped, label, ha="center", va=va, fontsize=9, color="white",
-                bbox=dict(boxstyle="round,pad=0.18", fc=(0, 0, 0, 0.55), ec=(1, 1, 1, 0.25), lw=0.5))
+        ax.text(
+            x,
+            y_clamped,
+            label,
+            ha="center",
+            va=va,
+            fontsize=9,
+            color="white",
+            bbox=dict(
+                boxstyle="round,pad=0.18",
+                fc=(0, 0, 0, 0.55),
+                ec=(1, 1, 1, 0.25),
+                lw=0.5,
+            ),
+        )
 
-# -----------------------
-# Audio playback helpers
-# -----------------------
+
 def _num(x) -> float:
     try:
         v = float(x)
@@ -284,48 +280,49 @@ def _num(x) -> float:
     except Exception:
         return np.nan
 
-def _choose_te_guard(sr: int, high_hz: Optional[float]) -> int:
-    if high_hz is None or not np.isfinite(high_hz) or high_hz <= 0:
-        return 1
-    nyq = 0.5 * sr
-    limit = 0.9 * nyq
-    if high_hz <= limit:
-        return 1
-    return int(max(1, math.ceil(high_hz / limit)))
 
-def _estimate_peak_hz_for_group(gdf: pd.DataFrame, sr: int) -> Optional[float]:
-    if "detection_probability" not in gdf.columns:
-        gdf = gdf.assign(detection_probability=gdf.apply(_extract_prob, axis=1))
-    try:
-        idx = int(gdf["detection_probability"].astype(float).fillna(-1.0).idxmax())
-        row = gdf.loc[idx]
-    except Exception:
-        row = gdf.iloc[0]
-    lf = _num(row.get("low_freq")); hf = _num(row.get("high_freq"))
-    if np.isfinite(lf) and np.isfinite(hf) and hf > lf:
-        return 0.5 * (lf + hf)
-    nyq = 0.5 * sr
-    return min(12_000.0, 0.45 * nyq)
+def _estimate_low_edge_hz_for_group(gdf: pd.DataFrame) -> Optional[float]:
+    vals: List[float] = []
+    for _, row in gdf.iterrows():
+        lf = _num(row.get("low_freq"))
+        hf = _num(row.get("high_freq"))
+        if np.isfinite(lf) and np.isfinite(hf) and hf > lf:
+            vals.append(lf)
+    if not vals:
+        return None
+    arr = np.asarray(vals, dtype=float)
+    return float(np.nanmedian(arr))
 
-def _choose_te_for_peak(peak_hz: float) -> int:
-    if not (isinstance(peak_hz, (int, float)) and np.isfinite(peak_hz) and peak_hz > 0):
+
+def _choose_te_for_group(low_edge_hz: Optional[float], sr: int) -> int:
+    if not isinstance(sr, (int, float)) or not np.isfinite(sr):
         return 1
-    te = int(max(1, round(peak_hz / 11_000.0)))
-    return min(te, 16)
+    if sr < 96_000:
+        return 1
+    if not (isinstance(low_edge_hz, (int, float)) and np.isfinite(low_edge_hz)):
+        return 1
+    if low_edge_hz <= 20_000:
+        return 1
+    return 10
 
-def _decimate_mean(y: np.ndarray, sr: int, te: int) -> Tuple[np.ndarray, int]:
+
+def _apply_time_expansion_for_playback(y: np.ndarray, sr: int, te: int) -> Tuple[np.ndarray, int]:
     te = max(1, int(te))
-    if te == 1 or y.size == 0:
-        return y.astype(np.float32, copy=False), int(sr)
-    n = (y.size // te) * te
-    if n <= 0:
-        return y.astype(np.float32, copy=False), int(sr)
-    yy = y[:n].reshape(-1, te).mean(axis=1)
-    return yy.astype(np.float32, copy=False), int(sr // te)
+    y_out = y.astype(np.float32, copy=False)
+    if y_out.size == 0:
+        return y_out, int(sr)
 
-# -----------------------
-# Examples/gallery
-# -----------------------
+    peak = float(np.max(np.abs(y_out)))
+    if peak > 0:
+        y_out = (y_out / peak * 0.98).astype(np.float32, copy=False)
+
+    if te == 1:
+        return y_out, int(sr)
+
+    psr = max(1, int(sr // te))
+    return y_out, psr
+
+
 def show_detection_examples(df_page: pd.DataFrame, df_all: pd.DataFrame):
     st.header("Detection examples")
 
@@ -361,7 +358,7 @@ def show_detection_examples(df_page: pd.DataFrame, df_all: pd.DataFrame):
     grouped = df_det.groupby(["basename", "species_display"], dropna=False)
     keys: List[Tuple[str, str]] = list(grouped.indices.keys())
 
-    per_group_max = {}
+    per_group_max: Dict[Tuple[str, str], float] = {}
     try:
         tmp = df_det.assign(_p=df_det.apply(_extract_prob, axis=1))
         per_group_max = tmp.groupby(["basename", "species_display"])["_p"].max(numeric_only=True).to_dict()
@@ -377,7 +374,7 @@ def show_detection_examples(df_page: pd.DataFrame, df_all: pd.DataFrame):
 
     total_cards = len(keys)
     start_idx = (int(PAGE) - 1) * int(NUM_PER_PAGE)
-    end_idx   = min(total_cards, start_idx + int(NUM_PER_PAGE))
+    end_idx = min(total_cards, start_idx + int(NUM_PER_PAGE))
     page_keys = keys[start_idx:end_idx]
     st.caption(f"Showing {len(page_keys)} of {total_cards} Spectrograms (page {PAGE})")
 
@@ -458,18 +455,22 @@ def show_detection_examples(df_page: pd.DataFrame, df_all: pd.DataFrame):
                 for _, row in gdf.iterrows():
                     b = {
                         "start_s": _num(row.get("start_s", row.get("detection_start_s"))),
-                        "end_s":   _num(row.get("end_s",   row.get("detection_end_s"))),
-                        "low_freq":_num(row.get("low_freq")),
-                        "high_freq":_num(row.get("high_freq")),
-                        "prob":    _num(_extract_prob(row)),
+                        "end_s": _num(row.get("end_s", row.get("detection_end_s"))),
+                        "low_freq": _num(row.get("low_freq")),
+                        "high_freq": _num(row.get("high_freq")),
+                        "prob": _num(_extract_prob(row)),
                     }
                     if (np.isfinite(b["start_s"]) and np.isfinite(b["end_s"]) and b["end_s"] > b["start_s"]):
                         boxes.append(b)
                 if boxes:
-                    boxes = sorted(boxes, key=lambda b: (b["prob"] if np.isfinite(b["prob"]) else -1.0), reverse=True)[:10]
+                    boxes = sorted(
+                        boxes,
+                        key=lambda b: (b["prob"] if np.isfinite(b["prob"]) else -1.0),
+                        reverse=True,
+                    )[:10]
 
                 highs = [b["high_freq"] for b in boxes if np.isfinite(b["high_freq"])]
-                lows  = [b["low_freq"]  for b in boxes if np.isfinite(b["low_freq"])]
+                lows = [b["low_freq"] for b in boxes if np.isfinite(b["low_freq"])]
                 if highs and lows and max(highs) > min(lows):
                     fmin, fmax = min(lows), max(highs)
                 else:
@@ -511,11 +512,19 @@ def show_detection_examples(df_page: pd.DataFrame, df_all: pd.DataFrame):
                     ax.set_ylim(ymin, ymax)
                     ax.set_xlabel("Time (s)")
                     ax.set_ylabel("Frequency (kHz)")
-                    ax.yaxis.set_major_formatter(FuncFormatter(lambda ytick, pos: f"{ytick/1000:.0f}"))
+                    ax.yaxis.set_major_formatter(FuncFormatter(lambda ytick, pos: f"{ytick / 1000:.0f}"))
                     for b in boxes:
                         x0, x1 = b["start_s"], b["end_s"]
-                        ax.add_patch(Rectangle((x0, ymin), x1 - x0, ymax - ymin,
-                                               facecolor=(1, 1, 1, 0.06), edgecolor=(1, 1, 1, 0.12), lw=0.6))
+                        ax.add_patch(
+                            Rectangle(
+                                (x0, ymin),
+                                x1 - x0,
+                                ymax - ymin,
+                                facecolor=(1, 1, 1, 0.06),
+                                edgecolor=(1, 1, 1, 0.12),
+                                lw=0.6,
+                            )
+                        )
                     _draw_prob_labels_inline(ax, gdf, xmin, xmax, ymin, ymax)
                     st.pyplot(fig, use_container_width=True, clear_figure=True)
                     plt.close(fig)
@@ -523,14 +532,29 @@ def show_detection_examples(df_page: pd.DataFrame, df_all: pd.DataFrame):
                     st.error(f"Spectrogram error: {e}")
 
                 try:
-                    max_high = max(highs) if highs else None
-                    te_guard = _choose_te_guard(sr, max_high)
-                    peak_hz  = _estimate_peak_hz_for_group(gdf, sr)
-                    te = max(te_guard, _choose_te_for_peak(peak_hz))
-                    y_play, psr = _decimate_mean(y, sr, te)
-                    peak = float(np.max(np.abs(y_play))) if y_play.size else 0.0
-                    if peak > 0:
-                        y_play = (y_play / peak * 0.98).astype(np.float32)
+                    if "start_s" in gdf.columns and "end_s" in gdf.columns:
+                        times_df = gdf[["start_s", "end_s"]].applymap(_num)
+                        s_min = float(times_df["start_s"].min())
+                        s_max = float(times_df["end_s"].max())
+                        if np.isfinite(s_min) and np.isfinite(s_max) and s_max > s_min:
+                            margin = 0.01
+                            t0 = max(0.0, s_min - margin)
+                            t1 = min(len(y) / sr, s_max + margin)
+                            i0 = int(max(0, round(t0 * sr)))
+                            i1 = int(min(len(y), round(t1 * sr)))
+                            if i1 > i0:
+                                y_seg = y[i0:i1]
+                            else:
+                                y_seg = y
+                        else:
+                            y_seg = y
+                    else:
+                        y_seg = y
+
+                    low_edge = _estimate_low_edge_hz_for_group(gdf)
+                    te = _choose_te_for_group(low_edge, sr)
+                    y_play, psr = _apply_time_expansion_for_playback(y_seg, sr, te)
+
                     abuf = io.BytesIO()
                     sf.write(abuf, y_play, psr, format="WAV")
                     abuf.seek(0)
@@ -540,9 +564,7 @@ def show_detection_examples(df_page: pd.DataFrame, df_all: pd.DataFrame):
 
     st.caption("")
 
-# -----------------------
-# Studio integration helpers
-# -----------------------
+
 def _augment_grouping_fields_class(df_in: pd.DataFrame) -> pd.DataFrame:
     df = df_in.copy()
     if "basename" not in df.columns:
@@ -568,9 +590,7 @@ def _augment_grouping_fields_class(df_in: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
-# -----------------------
-# Dataset loading/selection (Original / Validated only)
-# -----------------------
+
 def _load_csv_safe(p: Path) -> Optional[pd.DataFrame]:
     try:
         if p.exists():
@@ -584,12 +604,13 @@ def _load_csv_safe(p: Path) -> Optional[pd.DataFrame]:
         return None
     return None
 
+
 def _dataset_choice(sources: Dict[str, str]) -> Tuple[pd.DataFrame, str, Dict[str, pd.DataFrame], Dict[str, Path]]:
     proj_root = Path(sources.get("project") or sources.get("project_root") or ".")
-    data_dir  = proj_root / "data_normalised"
+    data_dir = proj_root / "data_normalised"
     data_dir.mkdir(parents=True, exist_ok=True)
 
-    p_original  = data_dir / "detections_normalised.csv"
+    p_original = data_dir / "detections_normalised.csv"
     p_valid_pub = data_dir / "detections_validated.csv"
 
     choices: Dict[str, pd.DataFrame] = {}
@@ -616,6 +637,7 @@ def _dataset_choice(sources: Dict[str, str]) -> Tuple[pd.DataFrame, str, Dict[st
 
     return choices[default_label].copy(), default_label, choices, path_map
 
+
 def _has_data(df: pd.DataFrame, col: str) -> bool:
     if col not in df.columns:
         return False
@@ -623,9 +645,7 @@ def _has_data(df: pd.DataFrame, col: str) -> bool:
     s = s.replace({"": np.nan, "nan": np.nan, "None": np.nan})
     return s.notna().any()
 
-# -----------------------
-# Main renderer
-# -----------------------
+
 def render_dashboard(df: Optional[pd.DataFrame], sources: Dict[str, str], page: str = "Dashboard", use_internal_nav: Optional[bool] = None):
     st.title("Detection Dashboard")
 
@@ -639,7 +659,6 @@ def render_dashboard(df: Optional[pd.DataFrame], sources: Dict[str, str], page: 
             pages = ["Dashboard"]
             _ = st.radio("Navigate", pages, index=0, key="dashboard_nav_radio")
 
-    # ---- Dataset: ONLY Original / Validated (published)
     df_default, ds_label, ds_choices, ds_paths = _dataset_choice(sources)
     if ds_label == "None" or df_default.empty:
         st.error("No dataset found in this project. Ingest data first.")
@@ -648,7 +667,6 @@ def render_dashboard(df: Optional[pd.DataFrame], sources: Dict[str, str], page: 
     ds_labels = list(ds_choices.keys())
     ds_index = ds_labels.index(ds_label) if ds_label in ds_labels else 0
 
-    # Date bounds from selected dataset
     df_dt_probe = df_default.copy()
     if "date_time" not in df_dt_probe.columns and "recording_dt" in df_dt_probe.columns:
         df_dt_probe["date_time"] = df_dt_probe["recording_dt"].astype(str)
@@ -663,7 +681,6 @@ def render_dashboard(df: Optional[pd.DataFrame], sources: Dict[str, str], page: 
         today = pd.Timestamp.utcnow().normalize()
         min_dt = max_dt = today
 
-    # Build canonical group-by candidates ONLY when they have real data
     group_candidates: List[str] = []
     if _has_data(df_default, "species_name"):
         group_candidates.append("species_name")
@@ -671,11 +688,15 @@ def render_dashboard(df: Optional[pd.DataFrame], sources: Dict[str, str], page: 
         group_candidates.append("recorder_id")
     if not group_candidates:
         group_candidates = ["species_name"]
-    default_group = "species_name" if ("species_name" in group_candidates and
-                                       df_default["species_name"].astype(str).replace({"": np.nan, "nan": np.nan}).nunique() > 1) else (
-                        "recorder_id" if "recorder_id" in group_candidates else group_candidates[0])
+    default_group = (
+        "species_name"
+        if (
+            "species_name" in group_candidates
+            and df_default["species_name"].astype(str).replace({"": np.nan, "nan": np.nan}).nunique() > 1
+        )
+        else ("recorder_id" if "recorder_id" in group_candidates else group_candidates[0])
+    )
 
-    # Top row controls (same line)
     c0, c1, c2, c3 = st.columns([1.3, 1.2, 1.0, 0.7])
     with c0:
         dataset_label = st.selectbox("Dataset", ds_labels, index=ds_index, key="dataset_selector")
@@ -687,12 +708,15 @@ def render_dashboard(df: Optional[pd.DataFrame], sources: Dict[str, str], page: 
             min_value=default_range[0],
             max_value=default_range[1],
             disabled=no_dates,
-            key=f"date_range_{dataset_label}"
+            key=f"date_range_{dataset_label}",
         )
     with c2:
-        group_key = st.selectbox("Group by", options=group_candidates,
-                                 index=group_candidates.index(default_group),
-                                 key=f"group_key_{dataset_label}")
+        group_key = st.selectbox(
+            "Group by",
+            options=group_candidates,
+            index=group_candidates.index(default_group),
+            key=f"group_key_{dataset_label}",
+        )
     with c3:
         st.markdown("<div style='height:1.95em'></div>", unsafe_allow_html=True)
         if st.button("Clear filters", use_container_width=True):
@@ -702,24 +726,19 @@ def render_dashboard(df: Optional[pd.DataFrame], sources: Dict[str, str], page: 
             if hasattr(st, "rerun"):
                 st.rerun()
 
-    # If the user changed the dataset, swap and update session state
     if dataset_label != ds_label:
         df_default = ds_choices[dataset_label].copy()
         st.session_state["active_dataset_label"] = dataset_label
-        st.session_state["active_dataset_path"]  = str(ds_paths.get(dataset_label, ""))
-        st.session_state["pa_df_det"]            = df_default.copy()
-
-    # Also ensure we set these on first load so Validate can read them
+        st.session_state["active_dataset_path"] = str(ds_paths.get(dataset_label, ""))
+        st.session_state["pa_df_det"] = df_default.copy()
     st.session_state.setdefault("active_dataset_label", dataset_label)
-    st.session_state.setdefault("active_dataset_path",  str(ds_paths.get(dataset_label, "")))
+    st.session_state.setdefault("active_dataset_path", str(ds_paths.get(dataset_label, "")))
     st.session_state["pa_df_det"] = df_default.copy()
 
-    # Canonical → legacy, normalise, coords
     df_raw = _apply_canonical_overrides(df_default)
     df_all = _augment_grouping_fields_class(df_raw)
     df_all = _ensure_latlon(df_all)
 
-    # Apply date filter
     df_dt = df_all.copy()
     if "date_time" not in df_dt.columns and "recording_dt" in df_dt.columns:
         df_dt["date_time"] = df_dt["recording_dt"].astype(str)
@@ -741,8 +760,7 @@ def render_dashboard(df: Optional[pd.DataFrame], sources: Dict[str, str], page: 
     if "class" not in df_page.columns and "species_name" in df_page.columns:
         df_page["class"] = df_page["species_name"].astype(str)
 
-    # ---------- Headline metrics: detection-level ----------
-    total_dets   = int(len(df_page))
+    total_dets = int(len(df_page))
     present_dets = int((df_page["FinalLabelEffective"].astype(str).str.lower() == "present").sum())
     det_rate_pct = (100.0 * present_dets / total_dets) if total_dets else 0.0
 
@@ -751,26 +769,25 @@ def render_dashboard(df: Optional[pd.DataFrame], sources: Dict[str, str], page: 
     m2.metric("Total detections", f"{total_dets:,}")
     m3.metric("Detection rate", f"{det_rate_pct:.1f}%")
 
-    # ---------- Group table (detections) ----------
     grp = (
         df_page.assign(_present=(df_page["FinalLabelEffective"].str.lower() == "present"))
-              .groupby(group_key, dropna=False)["_present"]
-              .agg(present_detections="sum", total_detections="count")
-              .reset_index()
+        .groupby(group_key, dropna=False)["_present"]
+        .agg(present_detections="sum", total_detections="count")
+        .reset_index()
     )
     grp["detection_rate"] = grp["present_detections"] / grp["total_detections"]
     grp = grp.sort_values("present_detections", ascending=False)
 
-    pretty = grp.rename(columns={
-        group_key: ("Species" if group_key == "species_name" else "Recorder"),
-        "present_detections": "Present Detections",
-        "total_detections": "Total Detections",
-        "detection_rate": "Detection Rate (%)",
-    })
+    pretty = grp.rename(
+        columns={
+            group_key: ("Species" if group_key == "species_name" else "Recorder"),
+            "present_detections": "Present Detections",
+            "total_detections": "Total Detections",
+            "detection_rate": "Detection Rate (%)",
+        }
+    )
     try:
-        styled = (pretty.style
-                  .format({"Detection Rate (%)": "{:.1%}"})
-                  .set_properties(**{"text-align": "center"}))
+        styled = pretty.style.format({"Detection Rate (%)": "{:.1%}"}).set_properties(**{"text-align": "center"})
         if hasattr(styled, "hide_index"):
             styled = styled.hide_index()
         st.write(styled)
@@ -780,7 +797,6 @@ def render_dashboard(df: Optional[pd.DataFrame], sources: Dict[str, str], page: 
             tmp["Detection Rate (%)"] = (tmp["Detection Rate (%)"] * 100).round(1).astype(str) + "%"
         st.dataframe(tmp, use_container_width=True)
 
-    # ---------- Map ----------
     df_page = _ensure_latlon(df_page)
     need_latlon = df_page[["lat", "lon"]].dropna().empty
     if need_latlon:
@@ -788,12 +804,12 @@ def render_dashboard(df: Optional[pd.DataFrame], sources: Dict[str, str], page: 
 
     present_by_group = (
         df_page.assign(_present=(df_page["FinalLabelEffective"].str.lower() == "present"))
-               .groupby([group_key, "basename"], dropna=False)["_present"]
-               .max()
-               .reset_index()
-               .groupby(group_key, dropna=False)["_present"]
-               .sum()
-               .reset_index(name="present_files")
+        .groupby([group_key, "basename"], dropna=False)["_present"]
+        .max()
+        .reset_index()
+        .groupby(group_key, dropna=False)["_present"]
+        .sum()
+        .reset_index(name="present_files")
     )
 
     if "lat" in df_page.columns and "lon" in df_page.columns:
@@ -801,8 +817,8 @@ def render_dashboard(df: Optional[pd.DataFrame], sources: Dict[str, str], page: 
         if not latlon_source.empty:
             latlon_by_group = (
                 latlon_source.groupby(group_key, dropna=False)[["lat", "lon"]]
-                             .mean()
-                             .reset_index()
+                .mean()
+                .reset_index()
             )
         else:
             latlon_by_group = pd.DataFrame(columns=[group_key, "lat", "lon"])
@@ -810,7 +826,7 @@ def render_dashboard(df: Optional[pd.DataFrame], sources: Dict[str, str], page: 
         latlon_by_group = pd.DataFrame(columns=[group_key, "lat", "lon"])
 
     present_by_group[group_key] = present_by_group[group_key].astype(str)
-    latlon_by_group[group_key]  = latlon_by_group[group_key].astype(str)
+    latlon_by_group[group_key] = latlon_by_group[group_key].astype(str)
     location_stats_p = present_by_group.merge(latlon_by_group, on=group_key, how="left")
 
     plot_df = location_stats_p.dropna(subset=["lat", "lon"])
@@ -851,32 +867,33 @@ def render_dashboard(df: Optional[pd.DataFrame], sources: Dict[str, str], page: 
         deck = pdk.Deck(
             layers=[layer_scatter, layer_text],
             initial_view_state=view_state,
-            tooltip={"text": f"{'Species' if group_key=='species_name' else 'Recorder'}: {{{group_key}}}\nPresent files: {{present_files}}"}
+            tooltip={
+                "text": f"{'Species' if group_key=='species_name' else 'Recorder'}: {{{group_key}}}\nPresent files: {{present_files}}"
+            },
         )
         st.pydeck_chart(deck, height=800)
     else:
         st.info("Map not shown (no valid lat/lon in the selected filters).")
 
-    # ---------- Detections over time ----------
     st.header(f"Detections Over Time (by {('Species' if group_key=='species_name' else 'Recorder')})")
     if "date_time" in df_page.columns and not df_page.empty and not df_dt["dt"].dropna().empty:
         dfc = df_page.copy()
         dfc["date"] = parse_dt_col(dfc["date_time"])
 
-        unique_dates  = pd.DataFrame({"date": pd.to_datetime(sorted(dfc["date"].dropna().unique()))})
-        unique_group  = pd.DataFrame({group_key: dfc[group_key].dropna().unique()})
+        unique_dates = pd.DataFrame({"date": pd.to_datetime(sorted(dfc["date"].dropna().unique()))})
+        unique_group = pd.DataFrame({group_key: dfc[group_key].dropna().unique()})
 
         if not unique_dates.empty and not unique_group.empty:
             all_combinations = unique_dates.merge(unique_group, how="cross")
 
             counts = (
                 dfc.assign(_present=(dfc["FinalLabelEffective"].str.lower() == "present"))
-                   .groupby(["date", group_key, "basename"], dropna=False)["_present"]
-                   .max()
-                   .reset_index()
-                   .groupby(["date", group_key], dropna=False)["_present"]
-                   .sum()
-                   .reset_index(name="present_files")
+                .groupby(["date", group_key, "basename"], dropna=False)["_present"]
+                .max()
+                .reset_index()
+                .groupby(["date", group_key], dropna=False)["_present"]
+                .sum()
+                .reset_index(name="present_files")
             )
 
             df_time = all_combinations.merge(counts, on=["date", group_key], how="left").fillna({"present_files": 0})
@@ -887,10 +904,10 @@ def render_dashboard(df: Optional[pd.DataFrame], sources: Dict[str, str], page: 
                 .encode(
                     x=alt.X("date:T", title="Date", axis=alt.Axis(format="%d-%m-%y")),
                     y=alt.Y("present_files:Q", title="Present Files", axis=alt.Axis(format="d", tickMinStep=1)),
-                    color=alt.Color(f"{group_key}:N", title=("Species" if group_key=="species_name" else "Recorder")),
+                    color=alt.Color(f"{group_key}:N", title=("Species" if group_key == "species_name" else "Recorder")),
                     tooltip=[
                         alt.Tooltip("date:T", title="Date", format="%d-%m-%y"),
-                        alt.Tooltip(f"{group_key}:N", title=("Species" if group_key=='species_name' else 'Recorder')),
+                        alt.Tooltip(f"{group_key}:N", title=("Species" if group_key == "species_name" else "Recorder")),
                         alt.Tooltip("present_files:Q", title="Present Files", format="d"),
                     ],
                 )
@@ -902,7 +919,6 @@ def render_dashboard(df: Optional[pd.DataFrame], sources: Dict[str, str], page: 
     else:
         st.write("No data for the selected filters.")
 
-    # ---------- Time of day ----------
     st.header(f"Detections by Time of Day (by {('Species' if group_key=='species_name' else 'Recorder')})")
     if "date_time" in df_page.columns and not df_page.empty:
         dft = df_page.copy()
@@ -911,12 +927,12 @@ def render_dashboard(df: Optional[pd.DataFrame], sources: Dict[str, str], page: 
 
         tod = (
             dft.assign(_present=(dft["FinalLabelEffective"].str.lower() == "present"))
-               .groupby([group_key, "basename", "time_of_day"], dropna=False)["_present"]
-               .max()
-               .reset_index()
-               .groupby([group_key, "time_of_day"], dropna=False)["_present"]
-               .sum()
-               .reset_index(name="present_files")
+            .groupby([group_key, "basename", "time_of_day"], dropna=False)["_present"]
+            .max()
+            .reset_index()
+            .groupby([group_key, "time_of_day"], dropna=False)["_present"]
+            .sum()
+            .reset_index(name="present_files")
         )
         tod["tod_ts"] = pd.to_datetime(tod["time_of_day"].astype(str), format="%H:%M:%S", errors="coerce")
 
@@ -927,9 +943,9 @@ def render_dashboard(df: Optional[pd.DataFrame], sources: Dict[str, str], page: 
                 .encode(
                     x=alt.X("tod_ts:T", title="Time of Day", axis=alt.Axis(format="%H:%M")),
                     y=alt.Y("present_files:Q", title="Present Files", axis=alt.Axis(format="d", tickMinStep=1)),
-                    color=alt.Color(f"{group_key}:N", title=("Species" if group_key=="species_name" else "Recorder")),
+                    color=alt.Color(f"{group_key}:N", title=("Species" if group_key == "species_name" else "Recorder")),
                     tooltip=[
-                        alt.Tooltip(f"{group_key}:N", title=("Species" if group_key=="species_name" else "Recorder")),
+                        alt.Tooltip(f"{group_key}:N", title=("Species" if group_key == "species_name" else "Recorder")),
                         alt.Tooltip("tod_ts:T", title="Time", format="%H:%M"),
                         alt.Tooltip("present_files:Q", title="Present Files", format="d"),
                     ],
@@ -942,16 +958,8 @@ def render_dashboard(df: Optional[pd.DataFrame], sources: Dict[str, str], page: 
     else:
         st.write("No data for the selected filters.")
 
-    # ---------- Examples + Data Table ----------
     show_detection_examples(df_page, df_all)
 
     st.header("Full Data Table")
     if st.checkbox("Show full detection-level data"):
         st.dataframe(df_page, use_container_width=True)
-
-# -----------------------
-# Standalone entry
-# -----------------------
-if __name__ == "__main__":
-    st.warning("Running dashboard in standalone mode.")
-    render_dashboard(df=None, sources={"project": str(RESULTS_DIR)}, page="Dashboard", use_internal_nav=True)
