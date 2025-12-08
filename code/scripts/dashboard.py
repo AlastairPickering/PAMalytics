@@ -531,25 +531,9 @@ def show_detection_examples(df_page: pd.DataFrame, df_all: pd.DataFrame):
                 except Exception as e:
                     st.error(f"Spectrogram error: {e}")
 
+                # Playback – full clip, TE applied if needed
                 try:
-                    if "start_s" in gdf.columns and "end_s" in gdf.columns:
-                        times_df = gdf[["start_s", "end_s"]].applymap(_num)
-                        s_min = float(times_df["start_s"].min())
-                        s_max = float(times_df["end_s"].max())
-                        if np.isfinite(s_min) and np.isfinite(s_max) and s_max > s_min:
-                            margin = 0.01
-                            t0 = max(0.0, s_min - margin)
-                            t1 = min(len(y) / sr, s_max + margin)
-                            i0 = int(max(0, round(t0 * sr)))
-                            i1 = int(min(len(y), round(t1 * sr)))
-                            if i1 > i0:
-                                y_seg = y[i0:i1]
-                            else:
-                                y_seg = y
-                        else:
-                            y_seg = y
-                    else:
-                        y_seg = y
+                    y_seg = y
 
                     low_edge = _estimate_low_edge_hz_for_group(gdf)
                     te = _choose_te_for_group(low_edge, sr)
@@ -872,10 +856,8 @@ def render_dashboard(df: Optional[pd.DataFrame], sources: Dict[str, str], page: 
             },
         )
         st.pydeck_chart(deck, height=800)
-    else:
-        st.info("Map not shown (no valid lat/lon in the selected filters).")
 
-    st.header(f"Detections Over Time (by {('Species' if group_key=='species_name' else 'Recorder')})")
+    # Detections over time
     if "date_time" in df_page.columns and not df_page.empty and not df_dt["dt"].dropna().empty:
         dfc = df_page.copy()
         dfc["date"] = parse_dt_col(dfc["date_time"])
@@ -898,28 +880,27 @@ def render_dashboard(df: Optional[pd.DataFrame], sources: Dict[str, str], page: 
 
             df_time = all_combinations.merge(counts, on=["date", group_key], how="left").fillna({"present_files": 0})
 
-            date_chart = (
-                alt.Chart(df_time)
-                .mark_bar()
-                .encode(
-                    x=alt.X("date:T", title="Date", axis=alt.Axis(format="%d-%m-%y")),
-                    y=alt.Y("present_files:Q", title="Present Files", axis=alt.Axis(format="d", tickMinStep=1)),
-                    color=alt.Color(f"{group_key}:N", title=("Species" if group_key == "species_name" else "Recorder")),
-                    tooltip=[
-                        alt.Tooltip("date:T", title="Date", format="%d-%m-%y"),
-                        alt.Tooltip(f"{group_key}:N", title=("Species" if group_key == "species_name" else "Recorder")),
-                        alt.Tooltip("present_files:Q", title="Present Files", format="d"),
-                    ],
+            # Only show the chart if there is at least one non-zero value
+            if (df_time["present_files"] > 0).any():
+                st.header(f"Detections Over Time (by {('Species' if group_key=='species_name' else 'Recorder')})")
+                date_chart = (
+                    alt.Chart(df_time)
+                    .mark_bar()
+                    .encode(
+                        x=alt.X("date:T", title="Date", axis=alt.Axis(format="%d-%m-%y")),
+                        y=alt.Y("present_files:Q", title="Present Files", axis=alt.Axis(format="d", tickMinStep=1)),
+                        color=alt.Color(f"{group_key}:N", title=("Species" if group_key == "species_name" else "Recorder")),
+                        tooltip=[
+                            alt.Tooltip("date:T", title="Date", format="%d-%m-%y"),
+                            alt.Tooltip(f"{group_key}:N", title=("Species" if group_key == "species_name" else "Recorder")),
+                            alt.Tooltip("present_files:Q", title="Present Files", format="d"),
+                        ],
+                    )
+                    .interactive()
                 )
-                .interactive()
-            )
-            st.altair_chart(date_chart, use_container_width=True)
-        else:
-            st.write("No data for the selected filters.")
-    else:
-        st.write("No data for the selected filters.")
+                st.altair_chart(date_chart, use_container_width=True)
 
-    st.header(f"Detections by Time of Day (by {('Species' if group_key=='species_name' else 'Recorder')})")
+    # Detections by time of day
     if "date_time" in df_page.columns and not df_page.empty:
         dft = df_page.copy()
         dft["dt"] = parse_dt_full(dft["date_time"])
@@ -937,26 +918,27 @@ def render_dashboard(df: Optional[pd.DataFrame], sources: Dict[str, str], page: 
         tod["tod_ts"] = pd.to_datetime(tod["time_of_day"].astype(str), format="%H:%M:%S", errors="coerce")
 
         if not tod.empty:
-            tod_chart = (
-                alt.Chart(tod.dropna(subset=["tod_ts"]))
-                .mark_bar()
-                .encode(
-                    x=alt.X("tod_ts:T", title="Time of Day", axis=alt.Axis(format="%H:%M")),
-                    y=alt.Y("present_files:Q", title="Present Files", axis=alt.Axis(format="d", tickMinStep=1)),
-                    color=alt.Color(f"{group_key}:N", title=("Species" if group_key == "species_name" else "Recorder")),
-                    tooltip=[
-                        alt.Tooltip(f"{group_key}:N", title=("Species" if group_key == "species_name" else "Recorder")),
-                        alt.Tooltip("tod_ts:T", title="Time", format="%H:%M"),
-                        alt.Tooltip("present_files:Q", title="Present Files", format="d"),
-                    ],
+            tod_nonzero = tod.dropna(subset=["tod_ts"])
+            tod_nonzero = tod_nonzero[tod_nonzero["present_files"] > 0]
+
+            if not tod_nonzero.empty:
+                st.header(f"Detections by Time of Day (by {('Species' if group_key=='species_name' else 'Recorder')})")
+                tod_chart = (
+                    alt.Chart(tod_nonzero)
+                    .mark_bar()
+                    .encode(
+                        x=alt.X("tod_ts:T", title="Time of Day", axis=alt.Axis(format="%H:%M")),
+                        y=alt.Y("present_files:Q", title="Present Files", axis=alt.Axis(format="d", tickMinStep=1)),
+                        color=alt.Color(f"{group_key}:N", title=("Species" if group_key == "species_name" else "Recorder")),
+                        tooltip=[
+                            alt.Tooltip(f"{group_key}:N", title=("Species" if group_key == "species_name" else "Recorder")),
+                            alt.Tooltip("tod_ts:T", title="Time", format="%H:%M"),
+                            alt.Tooltip("present_files:Q", title="Present Files", format="d"),
+                        ],
+                    )
+                    .interactive()
                 )
-                .interactive()
-            )
-            st.altair_chart(tod_chart, use_container_width=True)
-        else:
-            st.write("No data for the selected filters.")
-    else:
-        st.write("No data for the selected filters.")
+                st.altair_chart(tod_chart, use_container_width=True)
 
     show_detection_examples(df_page, df_all)
 

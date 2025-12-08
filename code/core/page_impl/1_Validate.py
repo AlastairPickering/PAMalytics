@@ -22,9 +22,7 @@ except Exception:
     pass
 
 
-# ----------------------
 # Generic utilities
-# ----------------------
 
 def _num(x) -> float:
     try:
@@ -63,9 +61,7 @@ def _user_name() -> str:
     )
 
 
-# ----------------------
 # Dataset loading
-# ----------------------
 
 def _load_csv_safe(p: Path) -> Optional[pd.DataFrame]:
     try:
@@ -114,9 +110,7 @@ def _dataset_choice_validate(sources: dict) -> Tuple[pd.DataFrame, str, Dict[str
     return choices[default_label].copy(), default_label, choices, path_map
 
 
-# ----------------------
 # Canonical validation prep
-# ----------------------
 
 def _ensure_validation_ready(df_in: pd.DataFrame) -> pd.DataFrame:
     df = df_in.copy()
@@ -194,9 +188,7 @@ def _ensure_validation_ready(df_in: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-# ----------------------
 # Audio path + TE helpers
-# ----------------------
 
 def _resolve_audio_path(row_or_df, df_all: pd.DataFrame) -> Optional[Path]:
     if isinstance(row_or_df, pd.Series):
@@ -292,9 +284,7 @@ def _tmp_audio_path(proj_root: Path, base: str, species_line: str, te: int, sr: 
     return ws / f"play_{h}.wav"
 
 
-# ----------------------
 # Filter + UI state
-# ----------------------
 
 def _init_filter_state():
     defaults = {
@@ -367,9 +357,7 @@ def _render_pills(gdf: pd.DataFrame):
     st.markdown(pills_html, unsafe_allow_html=True)
 
 
-# ----------------------
 # Card commit logic
-# ----------------------
 
 def _commit_card(
     proj_root: Path,
@@ -455,9 +443,7 @@ def _commit_card(
     return det, int(changed_mask.sum()), total_cnt
 
 
-# ----------------------
 # Page entrypoint
-# ----------------------
 
 def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None:
     _init_filter_state()
@@ -926,26 +912,9 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                     except Exception as e:
                         st.error(f"Spectrogram error: {e}")
 
-                    # Playback with TE
+                    # Playback with TE – always use full clip (no cropping)
                     try:
-                        if "start_s" in gdf.columns and "end_s" in gdf.columns:
-                            times_df = gdf[["start_s", "end_s"]].applymap(_num)
-                            s_min = float(times_df["start_s"].min())
-                            s_max = float(times_df["end_s"].max())
-                            if np.isfinite(s_min) and np.isfinite(s_max) and s_max > s_min:
-                                margin = 0.01
-                                t0 = max(0.0, s_min - margin)
-                                t1 = min(len(y) / sr, s_max + margin)
-                                i0 = int(max(0, round(t0 * sr)))
-                                i1 = int(min(len(y), round(t1 * sr)))
-                                if i1 > i0:
-                                    y_seg = y[i0:i1]
-                                else:
-                                    y_seg = y
-                            else:
-                                y_seg = y
-                        else:
-                            y_seg = y
+                        y_seg = y  # full recording
 
                         low_edge = _estimate_low_edge_hz_for_group(gdf)
                         te_auto = _choose_te_for_group(low_edge, sr)
@@ -991,9 +960,7 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
     # Update in-memory copy for other pages
     st.session_state["pa_df_det"] = df_all.copy()
 
-    # ----------------------
     # Pending changes table
-    # ----------------------
     st.divider()
     st.subheader("Tracked species changes (saved)")
 
