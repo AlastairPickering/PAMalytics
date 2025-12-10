@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 import io
 import math
+import re
+from datetime import datetime
 from pathlib import Path
 from typing import Optional, Tuple, Dict, List
 
@@ -24,6 +26,20 @@ except Exception:
     pass
 
 os.environ["STREAMLIT_SERVER_FILEWATCHERTYPE"] = "none"
+
+
+def _slugify(s: str) -> str:
+    s = (s or "").strip().lower()
+    s = re.sub(r"[^a-z0-9]+", "-", s)
+    s = s.strip("-")
+    return s or "unnamed"
+
+
+def _make_export_filename(project_root: Path, user: str | None = None) -> str:
+    project_slug = _slugify(project_root.name)
+    user_slug = _slugify(user or "reviewer")
+    ts = datetime.utcnow().strftime("%Y%m%d_%H%M")
+    return f"pamalytics_{project_slug}_{user_slug}_{ts}_validated.csv"
 
 
 def _apply_canonical_overrides(df_in: pd.DataFrame) -> pd.DataFrame:
@@ -942,33 +958,29 @@ def render_dashboard(df: Optional[pd.DataFrame], sources: Dict[str, str], page: 
 
     show_detection_examples(df_page, df_all)
 
-    st.header("Download validated CSV")
+    # Download validated data as separately named file
+    st.subheader("Download validated data")
+    st.write(
+        "Download the currently selected dataset as a CSV file. "
+        "If a validated dataset exists and is selected above, that will be exported; "
+        "otherwise the original detections are exported."
+    )
 
-    # Prefer the validated/published dataset if it exists; otherwise fall back to Original.
-    export_df: Optional[pd.DataFrame] = None
-    export_kind = ""
+    proj_root = Path(sources.get("project") or sources.get("project_root") or ".")
+    user_name = (
+        str(st.session_state.get("auth_user") or st.session_state.get("user_name") or "")
+        or os.environ.get("USER")
+        or os.environ.get("USERNAME")
+        or "reviewer"
+    )
+    export_filename = _make_export_filename(proj_root, user_name)
 
-    if "Validated (published)" in ds_choices:
-        export_df = ds_choices["Validated (published)"].copy()
-        export_kind = "validated"
-    elif "Original" in ds_choices:
-        export_df = ds_choices["Original"].copy()
-        export_kind = "original"
+    export_df = df_all.copy()
+    csv_bytes = export_df.to_csv(index=False).encode("utf-8")
 
-    if export_df is not None and not export_df.empty:
-        csv_bytes = export_df.to_csv(index=False).encode("utf-8")
-        default_name = f"detections_{export_kind}.csv"
-
-        if export_kind == "validated":
-            st.write("Download the validated detections for this project.")
-        else:
-            st.write("No validated dataset found yet, downloading the original detections.")
-
-        st.download_button(
-            "Download CSV",
-            data=csv_bytes,
-            file_name=default_name,
-            mime="text/csv",
-        )
-    else:
-        st.info("No dataset is available to download yet. Ingest data first.")
+    st.download_button(
+        "Download CSV",
+        data=csv_bytes,
+        file_name=export_filename,
+        mime="text/csv",
+    )
