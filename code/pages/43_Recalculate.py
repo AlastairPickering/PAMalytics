@@ -2,13 +2,48 @@
 from __future__ import annotations
 from pathlib import Path
 import importlib.util
+import json
+
 import streamlit as st
 
 st.set_page_config(
-    page_title="PAMalytics — Recalculate",
+    page_title="PAMalytics - Recalculate",
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+HERE = Path(__file__).resolve()
+STUDIO_ROOT = HERE.parents[1]         
+AUTH_FILE = STUDIO_ROOT / ".auth.json"
+
+
+def sidebar_signout_button(label: str = "Sign out") -> None:
+    """
+    Show a sign-out button in the sidebar and log the user out when clicked.
+    """
+    with st.sidebar:
+        st.markdown("---")
+        if st.button(label, key="pa_signout_sidebar_recalc"):
+            # Clear auth- and project-related session state
+            for k in list(st.session_state.keys()):
+                if str(k) in {"auth_user", "route", "current_project", "pa_page"} or str(k).startswith((
+                    "bd2_", "manual_", "import_", "audio_", "metadata_", "ds_", "dataset_",
+                    "val_", "filters_", "pa_"
+                )):
+                    st.session_state.pop(k, None)
+
+            # Clear "remember me" file
+            try:
+                AUTH_FILE.write_text(
+                    json.dumps({"remember": False, "user": ""}),
+                    encoding="utf-8",
+                )
+            except Exception:
+                pass
+
+            # Route back to main entrypoint
+            st.session_state["route"] = "login"
+            st.switch_page("Home.py")
 
 
 def _load_recalc_renderer():
@@ -39,6 +74,9 @@ def _load_recalc_renderer():
         f"{page_path} does not define render_recalculate() or render_settings()"
     )
 
+
+# Sidebar logout
+sidebar_signout_button()
 
 # require an active project & prepared dataset
 proj = st.session_state.get("current_project")

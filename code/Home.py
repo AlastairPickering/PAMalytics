@@ -881,7 +881,7 @@ def path_picker(label: str, state_key: str) -> Optional[_P]:
 # Views
 def view_login() -> None:
     hide_chrome(True, True)
-    st.title("Login")
+
     default_user = ""
     if AUTH_FILE.exists():
         try:
@@ -889,22 +889,47 @@ def view_login() -> None:
             default_user = prev.get("user", "")
         except Exception:
             pass
-    with st.form("login_form", clear_on_submit=False):
-        user = st.text_input("Username", value=default_user)
-        pin = st.text_input("PIN (optional)", type="password")
-        remember = st.checkbox("Remember me", value=True)
-        submit = st.form_submit_button("Sign in")
+
+    # Centre the login card using columns
+    left, centre, right = st.columns([2, 1, 2])
+    with centre:
+        # Vertical spacer to nudge the card down a bit
+        st.markdown("<div style='height:10vh'></div>", unsafe_allow_html=True)
+
+        # centred heading
+        st.markdown(
+            "<h2 style='text-align:center; margin-bottom:0.5rem;'>Login</h2>",
+            unsafe_allow_html=True,
+        )
+
+        st.markdown(
+            "<p style='text-align:center; color:#9ca3af; margin-bottom:1.5rem;'>PAMalytics</p>",
+            unsafe_allow_html=True,
+        )
+
+        with st.form("login_form", clear_on_submit=False):
+            user = st.text_input("Username", value=default_user, key="login_user")
+            pin = st.text_input("PIN (optional)", type="password", key="login_pin")
+            remember = st.checkbox("Remember me", value=True, key="login_remember")
+            submit = st.form_submit_button("Sign in", use_container_width=True)
+
     if submit:
         if not user.strip():
             st.error("Please enter a username.")
         else:
             st.session_state.auth_user = user.strip()
             try:
-                AUTH_FILE.write_text(json.dumps({"remember": bool(remember), "user": st.session_state.auth_user}), encoding="utf-8")
+                AUTH_FILE.write_text(
+                    json.dumps(
+                        {"remember": bool(remember), "user": st.session_state.auth_user}
+                    ),
+                    encoding="utf-8",
+                )
             except Exception:
                 pass
             st.session_state.route = "hub"
             st.rerun()
+
 
 def view_hub() -> None:
     """
@@ -1138,7 +1163,7 @@ def view_import_results() -> None:
         st.session_state.route = "hub"; st.rerun()
 
     proj_path = Path(st.session_state.current_project)
-    st.title("Import results — Data mapping")
+    st.title("Import results - Data mapping")
     back_to_hub_bar("import_top")
 
     st.caption("Choose a classifier type to ingest detections, or use manual column mapping.")

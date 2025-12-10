@@ -16,7 +16,7 @@ import librosa
 import soundfile as sf
 from matplotlib.ticker import FuncFormatter
 from matplotlib.patches import Rectangle
-from pyproj import Transformer  # UTM->WGS84 (EPSG:32648)
+from pyproj import Transformer  
 
 try:
     st.set_page_config(layout="wide", page_title="Dashboard")
@@ -942,6 +942,33 @@ def render_dashboard(df: Optional[pd.DataFrame], sources: Dict[str, str], page: 
 
     show_detection_examples(df_page, df_all)
 
-    st.header("Full Data Table")
-    if st.checkbox("Show full detection-level data"):
-        st.dataframe(df_page, use_container_width=True)
+    st.header("Download validated CSV")
+
+    # Prefer the validated/published dataset if it exists; otherwise fall back to Original.
+    export_df: Optional[pd.DataFrame] = None
+    export_kind = ""
+
+    if "Validated (published)" in ds_choices:
+        export_df = ds_choices["Validated (published)"].copy()
+        export_kind = "validated"
+    elif "Original" in ds_choices:
+        export_df = ds_choices["Original"].copy()
+        export_kind = "original"
+
+    if export_df is not None and not export_df.empty:
+        csv_bytes = export_df.to_csv(index=False).encode("utf-8")
+        default_name = f"detections_{export_kind}.csv"
+
+        if export_kind == "validated":
+            st.write("Download the validated detections for this project.")
+        else:
+            st.write("No validated dataset found yet, downloading the original detections.")
+
+        st.download_button(
+            "Download CSV",
+            data=csv_bytes,
+            file_name=default_name,
+            mime="text/csv",
+        )
+    else:
+        st.info("No dataset is available to download yet. Ingest data first.")

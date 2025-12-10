@@ -7,7 +7,7 @@ if [ ! -d ".venv" ]; then
 fi
 source .venv/bin/activate
 
-python -m pip install --upgrade pip
-python -m pip install streamlit pydantic python-dateutil streamlit-extras
+python3 -m pip install --upgrade pip
+python3 -m pip install streamlit pydantic python-dateutil streamlit-extras
 
-python -m streamlit run code/Home.py --server.port 8510
+python3 -m streamlit run code/Home.py --server.port 8510
