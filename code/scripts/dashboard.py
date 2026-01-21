@@ -958,6 +958,15 @@ def render_dashboard(df: Optional[pd.DataFrame], sources: Dict[str, str], page: 
 
     show_detection_examples(df_page, df_all)
 
+    # Columns used for calculations but not wanted in the exported CSV
+    UNWANTED = [
+        "validation_method","user_changed","user_changed_by","user_changed_at",
+        "FinalLabelEffective","species_display","species_display_original",
+        "changed_flag","reviewed_flag","source_file","FinalLabel","class",
+        "class_prob","UserLabel","is_present","Changed","lat","lon","filename_stem",
+        "dt","time_of_day","tod_ts"
+    ]
+
     # Download validated data as separately named file
     st.subheader("Download validated data")
     st.write(
@@ -976,6 +985,10 @@ def render_dashboard(df: Optional[pd.DataFrame], sources: Dict[str, str], page: 
     export_filename = _make_export_filename(proj_root, user_name)
 
     export_df = df_all.copy()
+
+    # Remove helper/working columns right before export
+    export_df = export_df.drop(columns=UNWANTED, errors="ignore")
+
     csv_bytes = export_df.to_csv(index=False).encode("utf-8")
 
     st.download_button(
