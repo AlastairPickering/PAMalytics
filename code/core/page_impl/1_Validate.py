@@ -22,9 +22,7 @@ except Exception:
     pass
 
 
-# ----------------------------
 # Generic utilities
-# ----------------------------
 
 def _num(x) -> float:
     try:
@@ -75,9 +73,7 @@ def _make_export_filename(proj_root: Path, user_name: str) -> str:
     return f"{proj}_validated_{safe_user}_{ts}.csv"
 
 
-# ----------------------------
 # Dataset loading
-# ----------------------------
 
 def _load_csv_safe(p: Path) -> Optional[pd.DataFrame]:
     try:
@@ -126,9 +122,7 @@ def _dataset_choice_validate(sources: dict) -> Tuple[pd.DataFrame, str, Dict[str
     return choices[default_label].copy(), default_label, choices, path_map
 
 
-# ----------------------------
 # Canonical validation prep
-# ----------------------------
 
 def _ensure_validation_ready(df_in: pd.DataFrame) -> pd.DataFrame:
     df = df_in.copy()
@@ -206,9 +200,7 @@ def _ensure_validation_ready(df_in: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-# ----------------------------
 # Audio path + TE helpers
-# ----------------------------
 
 def _resolve_audio_path(row_or_df, df_all: pd.DataFrame) -> Optional[Path]:
     if isinstance(row_or_df, pd.Series):
@@ -304,9 +296,7 @@ def _tmp_audio_path(proj_root: Path, base: str, species_line: str, te: int, sr: 
     return ws / f"play_{h}.wav"
 
 
-# ----------------------------
 # Filter + UI state
-# ----------------------------
 
 def _init_filter_state():
     defaults = {
@@ -379,9 +369,7 @@ def _render_pills(gdf: pd.DataFrame):
     st.markdown(pills_html, unsafe_allow_html=True)
 
 
-# ----------------------------
 # Card commit logic
-# ----------------------------
 
 def _commit_card(
     proj_root: Path,
@@ -472,9 +460,7 @@ def _commit_card(
     return det, int(changed_mask.sum()), total_cnt
 
 
-# ----------------------------
 # Page entrypoint
-# ----------------------------
 
 def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None:
     _init_filter_state()
@@ -806,7 +792,7 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                         out = proj_root / "data_normalised" / "detections_validated.csv"
                         out.parent.mkdir(parents=True, exist_ok=True)
 
-                        # IMPORTANT: save the full dataset (do not drop helper/original columns here)
+                        # save the full dataset
                         updated_df.to_csv(out, index=False)
 
                         st.session_state["active_dataset_label"] = "Validated (published)"
@@ -944,7 +930,7 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                     except Exception as e:
                         st.error(f"Spectrogram error: {e}")
 
-                    # Playback with TE – always use full clip (no cropping)
+                    # Playback with TE
                     try:
                         y_seg = y  # full recording
 
@@ -1020,10 +1006,9 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
     else:
         st.write("No saved species changes yet.")
 
-    # ----------------------------
     # Download export (cleaned)
-    # ----------------------------
 
+    # list of columns not to be included in the final export 
     UNWANTED = [
         "validation_method", "user_changed", "user_changed_by", "user_changed_at",
         "FinalLabelEffective", "species_display", "species_display_original",
@@ -1050,12 +1035,12 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
 
     export_df = df_all.copy()
 
-    # Ensure the 5 validation fields exist (export keeps these; drops other validation/admin helpers)
+    # Ensure the validation fields exist 
     for c in ["validation_state", "validation_label", "validation_species", "validated_by", "validated_at"]:
         if c not in export_df.columns:
             export_df[c] = ""
 
-    # Drop only at export time
+    # Drop unwanted columns at export time
     export_df = export_df.drop(columns=UNWANTED, errors="ignore")
 
     csv_bytes = export_df.to_csv(index=False).encode("utf-8")
