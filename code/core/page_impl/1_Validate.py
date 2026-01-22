@@ -22,6 +22,111 @@ except Exception:
     pass
 
 
+# Export hygiene
+
+# Keep validation in the dataset, but export only the clean 5 validation fields
+# (validation_state, validation_label, validation_species, validated_by, validated_at)
+EXPORT_DROP_COLS = [
+    # audit/originals
+    "species_name_original",
+    "presence_label_original",
+    # derived/helper UI columns
+    "FinalLabelEffective",
+    "species_display",
+    "species_display_original",
+    "changed_flag",
+    "reviewed_flag",
+    "filename_stem",
+    # other legacy / contradictory fields
+    "validation_method",
+    "user_changed",
+    "user_changed_by",
+    "user_changed_at",
+    "source_file",
+    "FinalLabel",
+    "class",
+    "class_prob",
+    "UserLabel",
+    "is_present",
+    "Changed",
+    "lat",
+    "lon",
+    "dt",
+    "time_of_day",
+    "tod_ts",
+]
+
+
+def _make_export_filename(proj_root: Path, user_name: str) -> str:
+    try:
+        from datetime import datetime, timezone
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    except Exception:
+        ts = "export"
+    safe_user = "".join(ch for ch in str(user_name or "reviewer") if ch.isalnum() or ch in ("-", "_")).strip("_-")
+    safe_user = safe_user or "reviewer"
+    proj = proj_root.name or "project"
+    return f"{proj}_validated_{safe_user}_{ts}.csv"
+
+
+def _sync_validation_fields(df_in: pd.DataFrame) -> pd.DataFrame:
+    """
+    Keep ONLY the 5 validation export fields consistent and non-contradictory.
+
+    Fields:
+      - validation_state
+      - validation_label
+      - validation_species
+      - validated_by
+      - validated_at
+
+    Rules:
+      - Reviewed = validation_state not blank.
+      - validation_label derived from presence_label (present/absent).
+      - validation_species mirrors species_name when present, else blank.
+      - If not reviewed, validation_label/species remain blank.
+    """
+    df = df_in.copy()
+
+    if "validation_state" not in df.columns:
+        df["validation_state"] = ""
+    if "validated_by" not in df.columns:
+        df["validated_by"] = ""
+    if "validated_at" not in df.columns:
+        df["validated_at"] = ""
+    if "validation_label" not in df.columns:
+        df["validation_label"] = ""
+    if "validation_species" not in df.columns:
+        df["validation_species"] = ""
+
+    reviewed = df["validation_state"].astype(str).str.strip().ne("")
+
+    pl = df.get("presence_label", pd.Series("", index=df.index)).astype(str).str.strip().str.lower()
+    vl = np.where(pl.eq("present"), "present", "absent")
+
+    sp = df.get("species_name", pd.Series("", index=df.index)).astype(str).fillna("").str.strip()
+    vs = np.where(vl == "present", sp, "")
+
+    df.loc[reviewed, "validation_label"] = vl[reviewed.to_numpy()]
+    df.loc[reviewed, "validation_species"] = vs[reviewed.to_numpy()]
+
+    df.loc[~reviewed, "validation_label"] = ""
+    df.loc[~reviewed, "validation_species"] = ""
+
+    return df
+
+
+def _clean_for_export(df_in: pd.DataFrame) -> pd.DataFrame:
+    """
+    Return a clean dataframe for writing CSV:
+      - synced validation fields
+      - helper/contradictory columns removed
+    """
+    df = _sync_validation_fields(df_in)
+    df = df.drop(columns=EXPORT_DROP_COLS, errors="ignore")
+    return df
+
+
 # Generic utilities
 
 def _num(x) -> float:
@@ -149,26 +254,28 @@ def _ensure_validation_ready(df_in: pd.DataFrame) -> pd.DataFrame:
     if "detection_probability" not in df.columns:
         df["detection_probability"] = df.apply(_best_prob_from_row, axis=1)
 
-    # Originals for audit/reset
+    # Originals for audit/reset (internal only; removed at export)
     if "species_name_original" not in df.columns:
         df["species_name_original"] = df["species_name"]
     if "presence_label_original" not in df.columns:
         df["presence_label_original"] = df["presence_label"]
 
-    # Validation/admin fields
+    # Validation fields (the only 5 that matter for output)
     for c, default in [
-        ("validation_state", ""), ("validation_label", ""), ("validation_species", ""),
-        ("validated_by", ""), ("validated_at", ""), ("validation_method", ""),
-        ("user_changed", ""), ("user_changed_by", ""), ("user_changed_at", "")
+        ("validation_state", ""),      # "correct"/"incorrect"/blank
+        ("validation_label", ""),      # "present"/"absent"/blank if not reviewed
+        ("validation_species", ""),    # species_name when present, else blank
+        ("validated_by", ""),
+        ("validated_at", ""),
     ]:
         if c not in df.columns:
             df[c] = default
 
-    # Effective present/absent from presence_label
+    # Effective present/absent from presence_label 
     pleff = df["presence_label"].astype(str).str.strip().str.lower()
     df["FinalLabelEffective"] = np.where(pleff == "present", "present", "absent")
 
-    # Species display current
+    # Species display current 
     sp = df["species_name"].astype(str)
     df["species_display"] = np.where(
         (df["FinalLabelEffective"] != "present") | (sp.str.strip() == ""),
@@ -176,7 +283,7 @@ def _ensure_validation_ready(df_in: pd.DataFrame) -> pd.DataFrame:
         sp
     )
 
-    # Species display original (card key)
+    # Species display original
     sp0 = df["species_name_original"].astype(str)
     pl0 = df["presence_label_original"].astype(str).str.strip().str.lower()
     df["species_display_original"] = np.where(
@@ -184,6 +291,9 @@ def _ensure_validation_ready(df_in: pd.DataFrame) -> pd.DataFrame:
         "[absent]",
         sp0
     )
+
+    # Normalise validation fields 
+    df = _sync_validation_fields(df)
 
     return df
 
@@ -367,9 +477,7 @@ def _commit_card(
 ) -> Tuple[pd.DataFrame, int, int]:
     """
     Apply species/presence changes for a single card and derive validation_state.
-
-    Returns:
-      updated_df, (n_changed_in_card, n_total_in_card)
+    Writes the clean validation fields for reviewed rows.
     """
     det = df_all.copy()
 
@@ -389,7 +497,6 @@ def _commit_card(
     user_id = st.session_state.get("user_id") or st.session_state.get("username") or _user_name()
     now_iso = _now_iso()
 
-    changed_cnt = 0
     total_cnt = len(rgdf)
 
     for ridx, row in rgdf.iterrows():
@@ -397,7 +504,7 @@ def _commit_card(
         key = f"sp_{base}_{species_orig}_{ridx}"
         choice = st.session_state.get(key, None)
 
-        # If widget not created (never opened expander), we treat as no change.
+        # If widget not created (expander not opened), treat as no change.
         if choice is None:
             continue
 
@@ -419,14 +526,7 @@ def _commit_card(
         det.at[idx, "species_name"] = new_species
         det.at[idx, "presence_label"] = new_presence
 
-        changed_here = (prev_sp != new_species) or (prev_pl != new_presence)
-        if changed_here:
-            changed_cnt += 1
-            det.at[idx, "user_changed"] = user_id or "1"
-            det.at[idx, "user_changed_by"] = user_id
-            det.at[idx, "user_changed_at"] = now_iso
-
-    # After species/presence updates, recompute validation_state for card rows
+    # After updates, recompute validation_state for card rows
     card_rows_updated = det.loc[mask_card].copy()
     card_rows_updated = card_rows_updated.sort_values("start_s")
     cur_sp = card_rows_updated["species_name"].astype(str)
@@ -439,6 +539,16 @@ def _commit_card(
         det.at[i, "validation_state"] = "incorrect" if changed_here else "correct"
         det.at[i, "validated_by"] = user_id
         det.at[i, "validated_at"] = now_iso
+
+        pl = str(det.at[i, "presence_label"]).strip().lower()
+        det.at[i, "validation_label"] = "present" if pl == "present" else "absent"
+
+        if det.at[i, "validation_label"] == "present":
+            det.at[i, "validation_species"] = str(det.at[i, "species_name"] or "").strip()
+        else:
+            det.at[i, "validation_species"] = ""
+
+    det = _sync_validation_fields(det)
 
     return det, int(changed_mask.sum()), total_cnt
 
@@ -759,7 +869,7 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
             title_html += "</div>"
 
             with cols[c]:
-                # Header + pills + mark-reviewed button in top-right column
+                # Header + pills + mark-reviewed button
                 h1, h2 = st.columns([2.0, 1.0])
                 with h1:
                     st.markdown(title_html, unsafe_allow_html=True)
@@ -772,13 +882,16 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                         use_container_width=True,
                     ):
                         updated_df, _, _ = _commit_card(proj_root, df_all, base, species_orig)
+
+                        # Save a clean published validated file (no helper/admin columns)
                         out = proj_root / "data_normalised" / "detections_validated.csv"
                         out.parent.mkdir(parents=True, exist_ok=True)
-                        updated_df.to_csv(out, index=False)
+                        published_df = _clean_for_export(updated_df)
+                        published_df.to_csv(out, index=False)
 
                         st.session_state["active_dataset_label"] = "Validated (published)"
                         st.session_state["active_dataset_path"] = str(out)
-                        st.session_state["pa_df_det"] = updated_df
+                        st.session_state["pa_df_det"] = published_df
 
                         if hasattr(st, "rerun"):
                             st.rerun()
@@ -802,9 +915,9 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                     b = {
                         "start_s": _num(row.get("start_s", row.get("detection_start_s"))),
                         "end_s":   _num(row.get("end_s",   row.get("detection_end_s"))),
-                        "low_freq":_num(row.get("low_freq")),
-                        "high_freq":_num(row.get("high_freq")),
-                        "prob":    _num(row.get("detection_probability")),
+                        "low_freq": _num(row.get("low_freq")),
+                        "high_freq": _num(row.get("high_freq")),
+                        "prob":     _num(row.get("detection_probability")),
                     }
                     if (np.isfinite(b["start_s"]) and np.isfinite(b["end_s"]) and b["end_s"] > b["start_s"]):
                         boxes.append(b)
@@ -825,7 +938,7 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                         ymax = min(ymax, nyq)
                     else:
                         highs = [b["high_freq"] for b in boxes if np.isfinite(b["high_freq"])]
-                        lows  = [b["low_freq"]  for b in boxes if np.isfinite(b["low_freq"])]
+                        lows = [b["low_freq"] for b in boxes if np.isfinite(b["low_freq"])]
                         if highs and lows and max(highs) > min(lows):
                             fmin, fmax = min(lows), max(highs)
                         else:
@@ -855,7 +968,6 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                         freqs_hz = np.arange(2)
                         S_dB = np.zeros((2, 2))
                         xmin, xmax = 0, 1
-                        ymin, ymax = 0, 1
 
                     try:
                         fig, ax = plt.subplots(figsize=(8.6, 5.2), dpi=280, constrained_layout=False)
@@ -912,7 +1024,7 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                     except Exception as e:
                         st.error(f"Spectrogram error: {e}")
 
-                    # Playback with TE – always use full clip (no cropping)
+                    # Playback with TE
                     try:
                         y_seg = y  # full recording
 
@@ -987,3 +1099,30 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
             st.write("No saved species changes yet.")
     else:
         st.write("No saved species changes yet.")
+
+    # Export
+    st.divider()
+    st.subheader("Download validated data")
+    st.write(
+        "Download the currently selected dataset as a CSV file. "
+        "If a validated dataset exists and is selected above, that will be exported; "
+        "otherwise the current in-memory detections are exported."
+    )
+
+    user_name = (
+        str(st.session_state.get("auth_user") or st.session_state.get("user_name") or "")
+        or os.environ.get("USER")
+        or os.environ.get("USERNAME")
+        or "reviewer"
+    )
+    export_filename = _make_export_filename(proj_root, user_name)
+
+    export_df = _clean_for_export(df_all)
+    csv_bytes = export_df.to_csv(index=False).encode("utf-8")
+
+    st.download_button(
+        "Download CSV",
+        data=csv_bytes,
+        file_name=export_filename,
+        mime="text/csv",
+    )
