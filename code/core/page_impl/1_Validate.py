@@ -22,112 +22,9 @@ except Exception:
     pass
 
 
-# Export hygiene
-
-# Keep validation in the dataset, but export only the clean 5 validation fields
-# (validation_state, validation_label, validation_species, validated_by, validated_at)
-EXPORT_DROP_COLS = [
-    # audit/originals
-    "species_name_original",
-    "presence_label_original",
-    # derived/helper UI columns
-    "FinalLabelEffective",
-    "species_display",
-    "species_display_original",
-    "changed_flag",
-    "reviewed_flag",
-    "filename_stem",
-    # other legacy / contradictory fields
-    "validation_method",
-    "user_changed",
-    "user_changed_by",
-    "user_changed_at",
-    "source_file",
-    "FinalLabel",
-    "class",
-    "class_prob",
-    "UserLabel",
-    "is_present",
-    "Changed",
-    "lat",
-    "lon",
-    "dt",
-    "time_of_day",
-    "tod_ts",
-]
-
-
-def _make_export_filename(proj_root: Path, user_name: str) -> str:
-    try:
-        from datetime import datetime, timezone
-        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    except Exception:
-        ts = "export"
-    safe_user = "".join(ch for ch in str(user_name or "reviewer") if ch.isalnum() or ch in ("-", "_")).strip("_-")
-    safe_user = safe_user or "reviewer"
-    proj = proj_root.name or "project"
-    return f"{proj}_validated_{safe_user}_{ts}.csv"
-
-
-def _sync_validation_fields(df_in: pd.DataFrame) -> pd.DataFrame:
-    """
-    Keep ONLY the 5 validation export fields consistent and non-contradictory.
-
-    Fields:
-      - validation_state
-      - validation_label
-      - validation_species
-      - validated_by
-      - validated_at
-
-    Rules:
-      - Reviewed = validation_state not blank.
-      - validation_label derived from presence_label (present/absent).
-      - validation_species mirrors species_name when present, else blank.
-      - If not reviewed, validation_label/species remain blank.
-    """
-    df = df_in.copy()
-
-    if "validation_state" not in df.columns:
-        df["validation_state"] = ""
-    if "validated_by" not in df.columns:
-        df["validated_by"] = ""
-    if "validated_at" not in df.columns:
-        df["validated_at"] = ""
-    if "validation_label" not in df.columns:
-        df["validation_label"] = ""
-    if "validation_species" not in df.columns:
-        df["validation_species"] = ""
-
-    reviewed = df["validation_state"].astype(str).str.strip().ne("")
-
-    pl = df.get("presence_label", pd.Series("", index=df.index)).astype(str).str.strip().str.lower()
-    vl = np.where(pl.eq("present"), "present", "absent")
-
-    sp = df.get("species_name", pd.Series("", index=df.index)).astype(str).fillna("").str.strip()
-    vs = np.where(vl == "present", sp, "")
-
-    df.loc[reviewed, "validation_label"] = vl[reviewed.to_numpy()]
-    df.loc[reviewed, "validation_species"] = vs[reviewed.to_numpy()]
-
-    df.loc[~reviewed, "validation_label"] = ""
-    df.loc[~reviewed, "validation_species"] = ""
-
-    return df
-
-
-def _clean_for_export(df_in: pd.DataFrame) -> pd.DataFrame:
-    """
-    Return a clean dataframe for writing CSV:
-      - synced validation fields
-      - helper/contradictory columns removed
-    """
-    df = _sync_validation_fields(df_in)
-    df = df.drop(columns=EXPORT_DROP_COLS, errors="ignore")
-    return df
-
-
+# ----------------------------
 # Generic utilities
+# ----------------------------
 
 def _num(x) -> float:
     try:
@@ -166,7 +63,21 @@ def _user_name() -> str:
     )
 
 
+def _make_export_filename(proj_root: Path, user_name: str) -> str:
+    try:
+        from datetime import datetime, timezone
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    except Exception:
+        ts = "export"
+    safe_user = "".join(ch for ch in str(user_name or "reviewer") if ch.isalnum() or ch in ("-", "_")).strip("_-")
+    safe_user = safe_user or "reviewer"
+    proj = proj_root.name or "project"
+    return f"{proj}_validated_{safe_user}_{ts}.csv"
+
+
+# ----------------------------
 # Dataset loading
+# ----------------------------
 
 def _load_csv_safe(p: Path) -> Optional[pd.DataFrame]:
     try:
@@ -215,7 +126,9 @@ def _dataset_choice_validate(sources: dict) -> Tuple[pd.DataFrame, str, Dict[str
     return choices[default_label].copy(), default_label, choices, path_map
 
 
+# ----------------------------
 # Canonical validation prep
+# ----------------------------
 
 def _ensure_validation_ready(df_in: pd.DataFrame) -> pd.DataFrame:
     df = df_in.copy()
@@ -254,28 +167,26 @@ def _ensure_validation_ready(df_in: pd.DataFrame) -> pd.DataFrame:
     if "detection_probability" not in df.columns:
         df["detection_probability"] = df.apply(_best_prob_from_row, axis=1)
 
-    # Originals for audit/reset (internal only; removed at export)
+    # Originals for audit/reset (required for stable card keys + change tracking)
     if "species_name_original" not in df.columns:
         df["species_name_original"] = df["species_name"]
     if "presence_label_original" not in df.columns:
         df["presence_label_original"] = df["presence_label"]
 
-    # Validation fields (the only 5 that matter for output)
+    # Validation/admin fields (keep in saved validated file; export can drop extras)
     for c, default in [
-        ("validation_state", ""),      # "correct"/"incorrect"/blank
-        ("validation_label", ""),      # "present"/"absent"/blank if not reviewed
-        ("validation_species", ""),    # species_name when present, else blank
-        ("validated_by", ""),
-        ("validated_at", ""),
+        ("validation_state", ""), ("validation_label", ""), ("validation_species", ""),
+        ("validated_by", ""), ("validated_at", ""), ("validation_method", ""),
+        ("user_changed", ""), ("user_changed_by", ""), ("user_changed_at", "")
     ]:
         if c not in df.columns:
             df[c] = default
 
-    # Effective present/absent from presence_label 
+    # Effective present/absent from presence_label (helper)
     pleff = df["presence_label"].astype(str).str.strip().str.lower()
     df["FinalLabelEffective"] = np.where(pleff == "present", "present", "absent")
 
-    # Species display current 
+    # Species display current (helper)
     sp = df["species_name"].astype(str)
     df["species_display"] = np.where(
         (df["FinalLabelEffective"] != "present") | (sp.str.strip() == ""),
@@ -283,7 +194,7 @@ def _ensure_validation_ready(df_in: pd.DataFrame) -> pd.DataFrame:
         sp
     )
 
-    # Species display original
+    # Species display original (card key)
     sp0 = df["species_name_original"].astype(str)
     pl0 = df["presence_label_original"].astype(str).str.strip().str.lower()
     df["species_display_original"] = np.where(
@@ -292,13 +203,12 @@ def _ensure_validation_ready(df_in: pd.DataFrame) -> pd.DataFrame:
         sp0
     )
 
-    # Normalise validation fields 
-    df = _sync_validation_fields(df)
-
     return df
 
 
+# ----------------------------
 # Audio path + TE helpers
+# ----------------------------
 
 def _resolve_audio_path(row_or_df, df_all: pd.DataFrame) -> Optional[Path]:
     if isinstance(row_or_df, pd.Series):
@@ -394,7 +304,9 @@ def _tmp_audio_path(proj_root: Path, base: str, species_line: str, te: int, sr: 
     return ws / f"play_{h}.wav"
 
 
+# ----------------------------
 # Filter + UI state
+# ----------------------------
 
 def _init_filter_state():
     defaults = {
@@ -467,7 +379,9 @@ def _render_pills(gdf: pd.DataFrame):
     st.markdown(pills_html, unsafe_allow_html=True)
 
 
+# ----------------------------
 # Card commit logic
+# ----------------------------
 
 def _commit_card(
     proj_root: Path,
@@ -477,7 +391,7 @@ def _commit_card(
 ) -> Tuple[pd.DataFrame, int, int]:
     """
     Apply species/presence changes for a single card and derive validation_state.
-    Writes the clean validation fields for reviewed rows.
+    Also populate validation_label and validation_species for reviewed rows.
     """
     det = df_all.copy()
 
@@ -499,12 +413,13 @@ def _commit_card(
 
     total_cnt = len(rgdf)
 
+    # Apply selections to species_name / presence_label
     for ridx, row in rgdf.iterrows():
         idx = int(row["__orig_index"])
         key = f"sp_{base}_{species_orig}_{ridx}"
         choice = st.session_state.get(key, None)
 
-        # If widget not created (expander not opened), treat as no change.
+        # If widget not created (expander never opened), treat as no change.
         if choice is None:
             continue
 
@@ -526,7 +441,13 @@ def _commit_card(
         det.at[idx, "species_name"] = new_species
         det.at[idx, "presence_label"] = new_presence
 
-    # After updates, recompute validation_state for card rows
+        changed_here = (prev_sp != new_species) or (prev_pl != new_presence)
+        if changed_here:
+            det.at[idx, "user_changed"] = user_id or "1"
+            det.at[idx, "user_changed_by"] = user_id
+            det.at[idx, "user_changed_at"] = now_iso
+
+    # Recompute validation_state and set validated_by/at + validation_label/species
     card_rows_updated = det.loc[mask_card].copy()
     card_rows_updated = card_rows_updated.sort_values("start_s")
     cur_sp = card_rows_updated["species_name"].astype(str)
@@ -548,12 +469,12 @@ def _commit_card(
         else:
             det.at[i, "validation_species"] = ""
 
-    det = _sync_validation_fields(det)
-
     return det, int(changed_mask.sum()), total_cnt
 
 
+# ----------------------------
 # Page entrypoint
+# ----------------------------
 
 def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None:
     _init_filter_state()
@@ -869,7 +790,7 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
             title_html += "</div>"
 
             with cols[c]:
-                # Header + pills + mark-reviewed button
+                # Header + pills + mark-reviewed button in top-right column
                 h1, h2 = st.columns([2.0, 1.0])
                 with h1:
                     st.markdown(title_html, unsafe_allow_html=True)
@@ -882,16 +803,15 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                         use_container_width=True,
                     ):
                         updated_df, _, _ = _commit_card(proj_root, df_all, base, species_orig)
-
-                        # Save a clean published validated file (no helper/admin columns)
                         out = proj_root / "data_normalised" / "detections_validated.csv"
                         out.parent.mkdir(parents=True, exist_ok=True)
-                        published_df = _clean_for_export(updated_df)
-                        published_df.to_csv(out, index=False)
+
+                        # IMPORTANT: save the full dataset (do not drop helper/original columns here)
+                        updated_df.to_csv(out, index=False)
 
                         st.session_state["active_dataset_label"] = "Validated (published)"
                         st.session_state["active_dataset_path"] = str(out)
-                        st.session_state["pa_df_det"] = published_df
+                        st.session_state["pa_df_det"] = updated_df
 
                         if hasattr(st, "rerun"):
                             st.rerun()
@@ -938,7 +858,7 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                         ymax = min(ymax, nyq)
                     else:
                         highs = [b["high_freq"] for b in boxes if np.isfinite(b["high_freq"])]
-                        lows = [b["low_freq"] for b in boxes if np.isfinite(b["low_freq"])]
+                        lows  = [b["low_freq"]  for b in boxes if np.isfinite(b["low_freq"])]
                         if highs and lows and max(highs) > min(lows):
                             fmin, fmax = min(lows), max(highs)
                         else:
@@ -1024,7 +944,7 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                     except Exception as e:
                         st.error(f"Spectrogram error: {e}")
 
-                    # Playback with TE
+                    # Playback with TE – always use full clip (no cropping)
                     try:
                         y_seg = y  # full recording
 
@@ -1100,7 +1020,18 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
     else:
         st.write("No saved species changes yet.")
 
-    # Export
+    # ----------------------------
+    # Download export (cleaned)
+    # ----------------------------
+
+    UNWANTED = [
+        "validation_method", "user_changed", "user_changed_by", "user_changed_at",
+        "FinalLabelEffective", "species_display", "species_display_original",
+        "changed_flag", "reviewed_flag", "source_file", "FinalLabel", "class",
+        "class_prob", "UserLabel", "is_present", "Changed", "lat", "lon",
+        "filename_stem", "dt", "time_of_day", "tod_ts",
+    ]
+
     st.divider()
     st.subheader("Download validated data")
     st.write(
@@ -1117,7 +1048,16 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
     )
     export_filename = _make_export_filename(proj_root, user_name)
 
-    export_df = _clean_for_export(df_all)
+    export_df = df_all.copy()
+
+    # Ensure the 5 validation fields exist (export keeps these; drops other validation/admin helpers)
+    for c in ["validation_state", "validation_label", "validation_species", "validated_by", "validated_at"]:
+        if c not in export_df.columns:
+            export_df[c] = ""
+
+    # Drop only at export time
+    export_df = export_df.drop(columns=UNWANTED, errors="ignore")
+
     csv_bytes = export_df.to_csv(index=False).encode("utf-8")
 
     st.download_button(
