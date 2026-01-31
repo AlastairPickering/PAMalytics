@@ -4,6 +4,8 @@ repo_name: AlastairPickering/PAMalytics
 
 theme:
   name: material
+  logo: assets/brand/pamalytics-logo.svg
+
   features:
     - navigation.instant
     - navigation.sections
