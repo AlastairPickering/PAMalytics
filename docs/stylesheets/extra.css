@@ -20,7 +20,7 @@
   box-shadow: 0 10px 30px rgba(0,0,0,.12);
 }
 
-/* Slightly larger body text for readability */
+/* Slightly smaller overall typography */
 .md-typeset {
-  font-size: 0.95rem;
+  font-size: 0.90rem;
 }
