@@ -2,27 +2,27 @@
 
 ## Prerequisites
 
-Python 3.9–3.12, macOS or Windows. :contentReference[oaicite:4]{index=4}
+Python 3.9–3.12, macOS or Windows.
 
 ## macOS
 
 Double-click `pamalytics_macos_launcher.command`.
 
 On first run you may need to allow it in:
-System Settings → Privacy & Security → Security → “Allow applications downloaded from App Store and identified developers”. :contentReference[oaicite:5]{index=5}
+System Settings → Privacy & Security → Security → “Allow applications downloaded from App Store and identified developers”.
 
 It will:
 - create `.venv`
 - install `requirements.txt`
 - launch Streamlit on port 8510
-- open the app at `http://localhost:8510` :contentReference[oaicite:6]{index=6}
+- open the app at `http://localhost:8510`
 
 ## Windows
 
 Double-click `pamalytics_windows_launcher.bat`
 (or run `python scripts\launch_dashboard.py`).
 
-Same behaviour: venv + requirements + Streamlit on port 8510. :contentReference[oaicite:7]{index=7}
+Same behaviour: venv + requirements + Streamlit on port 8510.
 
 ## Manual launch
 

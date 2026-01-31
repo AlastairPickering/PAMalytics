@@ -8,4 +8,4 @@ PAMalytics provides:
 - location stats table (counts & rates)
 - interactive map (pydeck) sized by detections per recorder
 - detections over time and by time of day
-- validation grid: spectrogram thumbnails + audio playback :contentReference[oaicite:9]{index=9}
+- validation grid: spectrogram thumbnails + audio playback 

@@ -2,12 +2,11 @@
 
 ## The app doesn’t open
 
-You should see Streamlit running locally and the browser opening at `http://localhost:8510`. :contentReference[oaicite:11]{index=11}
-
+You should see Streamlit running locally and the browser opening at `http://localhost:8510`. 
 ## First run blocked on macOS
 
 Allow the launcher in:
-System Settings → Privacy & Security → Security → “Allow … identified developers”. :contentReference[oaicite:12]{index=12}
+System Settings → Privacy & Security → Security → “Allow … identified developers”.
 
 ## Docs preview doesn’t work
 
