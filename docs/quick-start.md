@@ -4,6 +4,18 @@
 
 Python 3.9–3.12, macOS or Windows.
 
+## Getting started video
+
+<div class="video-wrapper">
+  <iframe
+    src="https://www.youtube.com/embed/lZZuCw-uo2o"
+    title="PAMalytics getting started"
+    frameborder="0"
+    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+    allowfullscreen>
+  </iframe>
+</div>
+
 ## macOS
 
 Double-click `pamalytics_macos_launcher.command`.
@@ -31,15 +43,3 @@ python -m venv .venv
 .venv\Scripts\activate        # Windows
 pip install -r requirements.txt
 streamlit run scripts/Dashboard.py --server.port 8503
-
-## Getting started video
-
-<div class="video-wrapper">
-  <iframe
-    src="https://www.youtube.com/embed/lZZuCw-uo2o"
-    title="PAMalytics getting started"
-    frameborder="0"
-    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-    allowfullscreen>
-  </iframe>
-</div>
