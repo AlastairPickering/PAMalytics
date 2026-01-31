@@ -15,3 +15,4 @@ Install Material for MkDocs and run the dev server:
 ```bash
 pip install mkdocs-material
 mkdocs serve
+```
