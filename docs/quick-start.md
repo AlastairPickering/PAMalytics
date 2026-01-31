@@ -39,8 +39,9 @@ Same behaviour: venv + requirements + Streamlit on port 8510.
 
 ## Manual launch
 
+```bash
 python -m venv .venv
 . .venv/bin/activate          # macOS
 .venv\Scripts\activate        # Windows
 pip install -r requirements.txt
-streamlit run scripts/Dashboard.py --server.port 8503
+streamlit run scripts/Dashboard.py --server.port 8510
