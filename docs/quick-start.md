@@ -20,14 +20,15 @@ Python 3.9–3.12, macOS or Windows.
 
 Double-click `pamalytics_macos_launcher.command`.
 
-On first run you may need to allow it in:
-System Settings → Privacy & Security → Security → “Allow applications downloaded from App Store and identified developers”.
-
 It will:
+
 - create `.venv`
 - install `requirements.txt`
 - launch Streamlit on port 8510
 - open the app at `http://localhost:8510`
+
+On the first run Mac security settings will likely block launch. You'll need to navigate to
+System Settings → Privacy & Security → Security → “Allow applications downloaded from App Store and identified developers”.
 
 ## Windows
 
