@@ -26,8 +26,10 @@ jobs:
 
       - uses: actions/configure-pages@v5
 
-      - run: pip install mkdocs-material
-      - run: mkdocs build --strict
+      - run: pip install mkdocs-material pymdown-extensions
+      - run: mkdocs build -v --strict
+      - run: touch site/.nojekyll
+      - run: ls -la site
 
       - uses: actions/upload-pages-artifact@v3
         with:
