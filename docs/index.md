@@ -17,7 +17,7 @@ PAMalytics lets you:
 
 Choose what you want to do:
 
-- Set up your first project: [Set up your first project](projects/first-project.md)
+- Set up your first project: [Set up your first project](first-project.md)
 - Explore detections: [Dashboard](dashboard.md)
 - Validate detections: [Validate](validate.md)
 - Model threshold impacts: [Recalculate](recalculate.md)
