@@ -1,11 +1,13 @@
-An open source, no-code, classifier-agnostic, interactive dashboard to efficiently review bioacoustic classifier results.
+# PAMalytics
 
-[GitHub repository](https://github.com/AlastairPickering/PAMalytics)
+[Open the GitHub repository](https://github.com/AlastairPickering/PAMalytics){ .md-button .md-button--primary }
+[Quick start](quick-start.md){ .md-button }
 
 ## What it does
 
 PAMalytics lets you:
-- summarise detections across recorders and time
-- validate and correct detections quickly using spectrograms and audio
-- keep the original classifier output intact while storing your edits
-- export a validated CSV ready for downstream analysis
+
+- Summarise detections across recorders and time
+- Validate and correct detections quickly using spectrograms and audio
+- Keep the original classifier output intact while storing your edits
+- Export a validated CSV ready for downstream analysis
