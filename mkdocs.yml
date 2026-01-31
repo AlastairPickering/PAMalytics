@@ -37,6 +37,9 @@ plugins:
 nav:
   - Home: index.md
   - Quick start: quick-start.md
+  - Projects:
+      - Set up your first project: projects/first-project.md
   - Dashboard: dashboard.md
   - Validate: validate.md
   - Troubleshooting: troubleshooting.md
+
