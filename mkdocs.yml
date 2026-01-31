@@ -1,4 +1,3 @@
-# mkdocs.yml
 site_name: PAMalytics
 repo_url: https://github.com/AlastairPickering/PAMalytics
 repo_name: AlastairPickering/PAMalytics
@@ -27,6 +26,15 @@ theme:
       toggle:
         icon: material/weather-sunny
         name: Light mode
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
 
 extra_css:
   - stylesheets/extra.css
