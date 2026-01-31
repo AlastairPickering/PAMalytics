@@ -1,0 +1,32 @@
+# mkdocs.yml
+site_name: PAMalytics
+repo_url: https://github.com/AlastairPickering/PAMalytics
+repo_name: AlastairPickering/PAMalytics
+
+theme:
+  name: material
+  features:
+    - navigation.instant
+    - navigation.sections
+    - navigation.top
+    - search.suggest
+    - content.code.copy
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+
+plugins:
+  - search
+
+nav:
+  - Home: index.md
+  - Quick start: quick-start.md
+  - Dashboard: dashboard.md
+  - Validate: validate.md
+  - Troubleshooting: troubleshooting.md
