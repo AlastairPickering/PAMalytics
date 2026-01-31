@@ -1,3 +1,22 @@
+<div class="home-hero">
+  <img
+    class="home-hero__logo"
+    src="assets/brand/pamalytics-logo.png"
+    alt="PAMalytics logo"
+  />
+  <div class="home-hero__text">
+    <h1>PAMalytics</h1>
+    <p>
+      No-code validation and analytics for bioacoustic classifier outputs.
+    </p>
+    <p class="home-hero__links">
+      <a href="quick-start/">Quick start</a> ·
+      <a href="projects/first-project/">Set up your first project</a> ·
+      <a href="validate/">Validate</a>
+    </p>
+  </div>
+</div>
+
 # PAMalytics
 
 [Open the GitHub repository](https://github.com/AlastairPickering/PAMalytics){ .md-button .md-button--primary }
