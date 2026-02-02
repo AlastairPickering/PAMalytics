@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 
 # Single source of truth
-from schema import CORE_COLUMNS as PAMA_CORE, LEGACY_MAP, normalise_schema, drop_mapped_columns
+from pamalytics.scripts.schema import CORE_COLUMNS as PAMA_CORE, LEGACY_MAP, normalise_schema, drop_mapped_columns
 
 
 RECOMMENDED: List[str] = ["recorder_id", "date_time"]

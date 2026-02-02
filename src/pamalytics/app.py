@@ -16,14 +16,10 @@ STUDIO_ROOT = Path(__file__).resolve().parent      # code/
 REPO_ROOT   = STUDIO_ROOT.parent                   # repo root
 SCRIPTS_DIR = STUDIO_ROOT / "scripts"              # code/scripts
 
-# Ensure scripts/ is importable
-if str(SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPTS_DIR))
-    sys.path.insert(0, str(REPO_ROOT))
 
 # schema: import central normaliser
 try:
-    from code.scripts.schema import normalise_schema  # code/scripts/schema.py
+    from pamalytics.scripts.schema import normalise_schema  # code/scripts/schema.py
 except Exception:
     normalise_schema = None  # type: ignore
 
@@ -1040,7 +1036,7 @@ def _auto_guess(colnames: List[str], candidates: List[str]) -> Optional[str]:
 def view_import_results() -> None:
     import pandas as pd
     from pathlib import Path as _P
-    from schema import drop_mapped_columns
+    from pamalytics.scripts.schema import drop_mapped_columns
 
     def _path_picker(label: str, state_key: str) -> Optional[_P]:
         st.session_state.setdefault(state_key, "")
@@ -1049,7 +1045,7 @@ def view_import_results() -> None:
         widget_key = f"{state_key}__widget"
         current_val = st.session_state[state_key]
         new_val = c_txt.text_input(
-            "", value=current_val, key=widget_key,
+            "path", value=current_val, key=widget_key,
             label_visibility="collapsed", placeholder="/path/to/folder"
         )
         if new_val != current_val:
@@ -1105,7 +1101,7 @@ def view_import_results() -> None:
 
     # PATH A: BATDETECT2 ADAPTER
     if classifier_type == "batdetect2":
-        from adapters.batdetect2 import ingest_batdetect2
+        from pamalytics.scripts.adapters.batdetect2 import ingest_batdetect2
 
         bd2_csv_root = _path_picker("Classification results folder", "bd2_csv_root")
         audio_base   = _path_picker("Audio folder", "bd2_audio_base")
@@ -1208,7 +1204,7 @@ def view_import_results() -> None:
 
     # PATH B: BIRDNET ADAPTER
     if classifier_type == "birdnet":
-        from adapters.birdnet import ingest_birdnet
+        from pamalytics.scripts.adapters.birdnet import ingest_birdnet
 
         bn_csv_root = _path_picker("BirdNET results folder or CSV", "bn_csv_root")
         audio_base   = _path_picker("Audio folder", "bn_audio_base")
@@ -1303,7 +1299,7 @@ def view_import_results() -> None:
         widget_key = f"{state_key}__widget"
         current_val = st.session_state[state_key]
         new_text = c_txt.text_input(
-            "", value=current_val, key=widget_key,
+            "path", value=current_val, key=widget_key,
             label_visibility="collapsed",
             placeholder="/path/to/results.(csv|tsv|parquet)"
         )

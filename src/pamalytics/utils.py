@@ -2,7 +2,7 @@
 from pathlib import Path
 import pandas as pd
 import json, os
-from code.scripts.schema import normalise_schema  # scripts/schema.py, path already added by the launcher
+from pamalytics.scripts.schema import normalise_schema  # scripts/schema.py, path already added by the launcher
 
 
 def project_path(folder: Path, *keys: str) -> Path:

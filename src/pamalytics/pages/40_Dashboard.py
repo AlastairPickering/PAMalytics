@@ -3,7 +3,7 @@ from pathlib import Path
 import json
 
 import streamlit as st
-from scripts.dashboard import render_dashboard
+from pamalytics.scripts.dashboard import render_dashboard
 
 st.set_page_config(
     page_title="PAMalytics — Dashboard",
@@ -11,7 +11,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-from code.utils import build_analysis_dataset as build_ds, project_path as project_path_func
+from pamalytics.utils import build_analysis_dataset as build_ds, project_path as project_path_func
 
 # Paths for auth file
 THIS_FILE = Path(__file__).resolve()
@@ -45,7 +45,7 @@ def sidebar_signout_button(label: str = "Sign out") -> None:
                 pass
 
             st.session_state["route"] = "login"
-            st.switch_page("Home.py")
+            st.switch_page("app.py")
 
 
 # Page start

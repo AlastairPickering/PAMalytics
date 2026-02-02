@@ -5,8 +5,8 @@ import sys
 
 # environment bootstrap
 import os as _os
-from code.setup import check_environment, _needs_bootstrap, _PY_EXE, _STUDIO_FILE
-from code.app import *
+from pamalytics.setup import check_environment, _needs_bootstrap, _PY_EXE, _STUDIO_FILE
+from pamalytics.app import *
 
 # Paths
 STUDIO_ROOT = Path(__file__).resolve().parent      # code/
