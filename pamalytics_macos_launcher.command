@@ -1,13 +1,23 @@
 #!/usr/bin/env bash
 set -e
+
 cd "$(dirname "$0")"
 
-if [ ! -d ".venv" ]; then
-  python3 -m venv .venv
+# Install uv if not installed
+if ! command -v uv &>/dev/null; then
+    echo "uv not found. Installing..."
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+
+    # Add uv to PATH for the current session
+    if [ -f "$HOME/.cargo/env" ]; then
+        source "$HOME/.cargo/env"
+    elif [ -d "$HOME/.local/bin" ]; then
+        export PATH="$HOME/.local/bin:$PATH"
+    fi
 fi
-source .venv/bin/activate
 
-python3 -m pip install --upgrade pip
-python3 -m pip install streamlit pydantic python-dateutil streamlit-extras
+# Install dependencies
+uv sync
 
-python3 -m streamlit run code/Home.py --server.port 8510
+# Run the app
+uv run streamlit run src/pamalytics/app.py --server.port 8510
