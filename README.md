@@ -1,7 +1,12 @@
 # PAMalytics — PAM Classifier Validation dashboard
 [![CI (macOS & Windows)](https://github.com/AlastairPickering/PAMalytics/actions/workflows/ci.yaml/badge.svg)](https://github.com/AlastairPickering/PAMalytics/actions/workflows/ci.yaml)
 
-An open source, no-code, classifier-agnostic, interactive dashboard to efficiently review bioacoustic classifier results. 
+An open source, no-code, classifier-agnostic, interactive dashboard to efficiently review bioacoustic classifier results.
+
+<img width="256" height="256" alt="image" src="https://github.com/user-attachments/assets/93c1b4ad-ea2d-41ef-a417-dc4b55ddf34d" />
+
+
+User guide: https://alastairpickering.github.io/PAMalytics/
 
 ### Features
 - Interactive dashboard to summarise, validate and export results
