@@ -64,11 +64,12 @@ It will:
 - Same behaviour: venv + requirements + Streamlit on port 8510.
 
 ### manual launch
-python -m venv .venv <br>
+```bash
+python -m venv .venv
 . .venv/bin/activate  # Mac        
-.venv\Scripts\activate # Windows <br>
-pip install -r requirements.txt <br>
-streamlit run scripts/Dashboard.py --server.port 8503 <br>
-
+.venv\Scripts\activate # Windows
+pip install -r requirements.txt
+streamlit run scripts/Dashboard.py --server.port 8503
+```
 </details>
 
