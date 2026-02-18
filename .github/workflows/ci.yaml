@@ -9,15 +9,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest]
-        python: ["3.9", "3.10", "3.11", "3.12"]
+        os: [macos-latest, windows-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
 
     steps:
       - name: Check out code
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Run launcher
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}

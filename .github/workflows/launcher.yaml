@@ -1,0 +1,37 @@
+name: Smoke Test Launcher
+
+on:
+  push:
+    branches: [ main, dev ]
+  pull_request:
+    branches: [ main, dev ]
+
+jobs:
+  test-unix:
+    name: Test on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Smoke Test
+        shell: bash
+        env:
+          STREAMLIT_SERVER_HEADLESS: "true"
+          STREAMLIT_BROWSER_GATHER_USAGE_STATS: "false"
+        run: |
+          chmod +x scripts/smoke_test.sh
+          ./scripts/smoke_test.sh
+
+  test-windows:
+    name: Test on Windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Smoke Test
+        shell: pwsh
+        env:
+          STREAMLIT_SERVER_HEADLESS: "true"
+          STREAMLIT_BROWSER_GATHER_USAGE_STATS: "false"
+        run: ./scripts/smoke_test.bat
