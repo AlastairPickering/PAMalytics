@@ -4,17 +4,21 @@ setlocal enabledelayedexpansion
 rem Change to the directory of this script
 cd /d "%~dp0"
 
-rem Create virtual environment if it does not exist
-if not exist ".venv" (
-    python -m venv .venv
+rem Check if uv is installed
+where uv >nul 2>nul
+if %errorlevel% neq 0 (
+    powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+
+    rem Add uv to PATH for the current session
+    if exist "%LOCALAPPDATA%\uv\uv.exe" (
+        set "PATH=%LOCALAPPDATA%\uv;%PATH%"
+    ) else if exist "%USERPROFILE%\.cargo\bin\uv.exe" (
+        set "PATH=%USERPROFILE%\.cargo\bin;%PATH%"
+    )
 )
 
-rem Activate virtual environment
-call ".venv\Scripts\activate.bat"
+rem Install dependencies
+uv sync
 
-rem Upgrade pip and install dependencies
-python -m pip install --upgrade pip
-python -m pip install streamlit pydantic python-dateutil streamlit-extras
-
-rem Launch Streamlit app
-python -m streamlit run code/Home.py --server.port 8510
+rem Run the app
+uv run streamlit run src/pamalytics/app.py --server.port 8510

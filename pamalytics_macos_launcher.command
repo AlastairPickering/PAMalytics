@@ -5,7 +5,6 @@ cd "$(dirname "$0")"
 
 # Install uv if not installed
 if ! command -v uv &>/dev/null; then
-    echo "uv not found. Installing..."
     curl -LsSf https://astral.sh/uv/install.sh | sh
 
     # Add uv to PATH for the current session
@@ -16,7 +15,7 @@ if ! command -v uv &>/dev/null; then
     fi
 fi
 
-# Install dependencies
+# Install dependencies (would be replaced later on with uv add pamalytics)
 uv sync
 
 # Run the app
