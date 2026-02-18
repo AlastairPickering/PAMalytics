@@ -58,3 +58,5 @@ results/pipeline_status.json
 
 # Local auth config
 code/.auth.json
+.trash
+src/pamalytics/projects
