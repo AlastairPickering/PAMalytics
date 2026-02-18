@@ -1,8 +1,5 @@
 #!/bin/bash
 
-# Get current directory
-echo "ℹ️ Current directory: $(pwd)"
-
 bash pamalytics_macos_launcher.command >output.log 2>&1 &
 PID=$!
 

@@ -1,35 +1,34 @@
-$OutputFile = "windows_output.log"
+@echo off
+setlocal
 
-# Start the process
-$Process = Start-Process -FilePath "pamalytics_windows_launcher.bat" -RedirectStandardOutput $OutputFile -RedirectStandardError "error.log" -PassThru
+:: Move to root directory
+pushd "%~dp0\.."
 
-$Found = $false
-$TimeoutSeconds = 60
-$StartTime = Get-Date
+:: Start the launcher
+start /b pamalytics_windows_launcher.bat > scripts\smoke_output.log 2>&1
 
-try {
-    while ((Get-Date) -lt $StartTime.AddSeconds($TimeoutSeconds)) {
-        if (Test-Path $OutputFile) {
-            $Content = Get-Content $OutputFile -Raw
-            if ($Content -match "You can now view your Streamlit app in your browser.") {
-                Write-Host "✅ Success message detected!"
-                $Found = $true
-                break
-            }
-        }
-        Start-Sleep -Seconds 1
-    }
-}
-finally {
-    Write-Host "Manually stopping Streamlit process..."
-    Stop-Process -Id $Process.Id -Force -ErrorAction SilentlyContinue
-    # Also kill any orphaned python processes spawned by the batch file
-    Get-Process python -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-}
+echo Waiting for Streamlit to initialize...
+set "SUCCESS=false"
 
-if (-not $Found) {
-    Write-Host "❌ ERROR: Success message not found. Dumping logs..."
-    Get-Content $OutputFile -ErrorAction SilentlyContinue
-    Get-Content "error.log" -ErrorAction SilentlyContinue
-    exit 1
-}
+for /L %%i in (1,1,60) do (
+    findstr /C:"You can now view your Streamlit app in your browser." scripts\smoke_output.log >nul
+    if %errorlevel%==0 (
+        echo ✅ Streamlit started successfully!
+        set "SUCCESS=true"
+        goto :cleanup
+    )
+    timeout /t 1 >nul
+)
+
+:cleanup
+:: Kill Python processes to stop the server
+taskkill /F /IM python.exe /T >nul 2>&1
+popd
+
+if "%SUCCESS%"=="false" (
+    echo ❌ ERROR: Timeout reached. Full logs below:
+    type scripts\smoke_output.log
+    exit /b 1
+)
+
+exit /b 0
