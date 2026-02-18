@@ -3,7 +3,7 @@ name = "pamalytics"
 version = "0.1.0"
 description = "An open source, no-code, classifier-agnostic, interactive dashboard to efficiently review bioacoustic classifier results."
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.13"
 authors = [{ name = "Alastair Pickering" }]
 dependencies = [
   "altair>=5.0",
