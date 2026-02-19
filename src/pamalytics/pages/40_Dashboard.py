@@ -4,6 +4,7 @@ import json
 
 import streamlit as st
 from pamalytics.scripts.dashboard import render_dashboard
+from pamalytics.utils import build_analysis_dataset as build_ds
 
 st.set_page_config(
     page_title="PAMalytics — Dashboard",
@@ -11,7 +12,6 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-from pamalytics.utils import build_analysis_dataset as build_ds, project_path as project_path_func
 
 # Paths for auth file
 THIS_FILE = Path(__file__).resolve()

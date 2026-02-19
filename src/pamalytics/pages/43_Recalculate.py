@@ -1,10 +1,10 @@
 # studio/pages/43_Calculate.py
 from __future__ import annotations
 from pathlib import Path
-import importlib.util
 import json
 
 import streamlit as st
+from pamalytics.core.page_impl.Recalculate import render_recalculate
 
 st.set_page_config(
     page_title="PAMalytics - Recalculate",
@@ -46,35 +46,6 @@ def sidebar_signout_button(label: str = "Sign out") -> None:
             st.switch_page("Home.py")
 
 
-def _load_recalc_renderer():
-    """
-    Load the recalculate page implementation from code/core/page_impl/5_Recalculate.py.
-    Returns a callable: render_recalculate(df, sources) or render_settings(df, sources).
-    """
-    here = Path(__file__).resolve()          # .../code/pages/43_Recalculate.py
-    studio_root = here.parents[1]            # .../code
-    page_path = studio_root / "core" / "page_impl" / "5_Recalculate.py"
-
-    if not page_path.exists():
-        raise FileNotFoundError(f"Recalculate page not found at {page_path}")
-
-    spec = importlib.util.spec_from_file_location("page_impl_recalculate", str(page_path))
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Could not load module from {page_path}")
-
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)  # type: ignore[attr-defined]
-
-    if hasattr(mod, "render_recalculate"):
-        return getattr(mod, "render_recalculate")
-    if hasattr(mod, "render_settings"):
-        return getattr(mod, "render_settings")
-
-    raise ImportError(
-        f"{page_path} does not define render_recalculate() or render_settings()"
-    )
-
-
 # Sidebar logout
 sidebar_signout_button()
 
@@ -103,11 +74,5 @@ with tb_l:
         st.session_state["route"] = "overview" 
         st.rerun()
 
-# hand off to recalc page
-try:
-    render_page = _load_recalc_renderer()
-except Exception as e:
-    st.error(f"Failed to load recalculate page: {e}")
-    st.stop()
 
-render_page(df_det, sources)
+render_recalculate(df_det, sources)  # type: ignore
