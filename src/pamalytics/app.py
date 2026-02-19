@@ -1,15 +1,28 @@
 # code/Home.py
 
+import importlib, importlib.util
 import json
 from dataclasses import dataclass, asdict, field
 from datetime import datetime, timezone as dt_timezone
 from pathlib import Path
-from typing import Optional, List, Dict, Any, Tuple, NamedTuple
+from typing import Optional, List, Dict, Any, NamedTuple
 import uuid
 import os
 import platform
+import pandas as pd
+from pamalytics.scripts.schema import drop_mapped_columns
+
 import subprocess
-import sys
+from pamalytics.scripts.adapters.birdnet import ingest_birdnet
+from pamalytics.scripts.schema import normalise_schema  # code/scripts/schema.py
+from pamalytics.scripts.adapters.batdetect2 import ingest_batdetect2
+import soundfile as sf
+import numpy as np
+import tkinter as tk
+from tkinter import filedialog
+
+# Streamlit / UI
+import streamlit as st
 
 # Paths
 STUDIO_ROOT = Path(__file__).resolve().parent      # code/
@@ -17,14 +30,6 @@ REPO_ROOT   = STUDIO_ROOT.parent                   # repo root
 SCRIPTS_DIR = STUDIO_ROOT / "scripts"              # code/scripts
 
 
-# schema: import central normaliser
-try:
-    from pamalytics.scripts.schema import normalise_schema  # code/scripts/schema.py
-except Exception:
-    normalise_schema = None  # type: ignore
-
-# Streamlit / UI
-import streamlit as st  # noqa 
 
 def hide_chrome(hide_sidebar: bool = True, hide_header: bool = True) -> None:
     css = ["<style id='pa-chrome'>"]
@@ -283,7 +288,6 @@ class Coverage(NamedTuple):
     total_unique_files: int
 
 def analysis_keys(df, col="source_file"):
-    import pandas as pd, os
     out = df.copy()
     out["_basename"] = out[col].astype(str).apply(lambda p: os.path.basename(p).strip())
     out["_name_lower"] = out["_basename"].str.lower()
@@ -291,7 +295,6 @@ def analysis_keys(df, col="source_file"):
     return out
 
 def compute_audio_coverage(detections_csv: Path, mapping: Any, use_stem_fallback: bool = True) -> Coverage:
-    import pandas as pd
     det = pd.read_csv(detections_csv)
     if det.empty or "source_file" not in det.columns: return Coverage(0,0,0,0)
     det = analysis_keys(det)
@@ -344,7 +347,6 @@ def compute_import_stats(
     meta_csv: Optional[Path],
     use_stem_fallback: bool = True,
 ) -> Dict[str, Any]:
-    import pandas as pd, os
 
     stats = {
         "detections_rows": 0,
@@ -450,7 +452,6 @@ def render_norm_preview(norm_csv: Path, heading: str = "Preview mapped detection
     """
     if not norm_csv.exists():
         return
-    import pandas as pd
     with st.expander(heading, expanded=False):
         try:
             df_prev = pd.read_csv(norm_csv, low_memory=False)
@@ -460,12 +461,11 @@ def render_norm_preview(norm_csv: Path, heading: str = "Preview mapped detection
             st.error(f"Could not read normalised data: {e}")
 
 # Safe delete / move-to-trash
-from datetime import datetime as _dt
 TRASH_DIR = PROJECTS_ROOT / ".trash"
 TRASH_DIR.mkdir(parents=True, exist_ok=True)
 
 def _trash_target_name(p: Path) -> Path:
-    ts = _dt.utcnow().strftime("%Y%m%d-%H%M%S")
+    ts = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
     return TRASH_DIR / f"{p.name}__{ts}"
 
 def move_project_to_trash(project_folder: Path) -> Path:
@@ -494,7 +494,6 @@ def _mk_detection_id(file_id: str, start: float, end: float) -> str:
         return f"{str(file_id)}:{start}-{end}"
 
 def _to_canonical_names(df_in: "object") -> "object":
-    import pandas as pd
     df = df_in.copy()
     if "file_id" not in df.columns:
         if "source_file" in df.columns:
@@ -545,8 +544,6 @@ def build_analysis_dataset(proj_path: Path, use_stem_fallback: bool = True):
     """
     Returns (df, notes) where df contains all original columns plus the canonical PAMalytics columns.
     """
-    import pandas as pd
-
     def _first(df, *cands):
         for c in cands:
             if c in df.columns:
@@ -669,9 +666,6 @@ def ensure_detection_clips(proj_path: Path, detections_df, audio_map_df):
     write a WAV clip [start_s, end_s] with no cap. Returns DataFrame:
     filename, clip_path, start_s, end_s, duration_s.
     """
-    import soundfile as sf
-    import numpy as np
-    import pandas as pd
 
     mp = audio_map_df.copy()
     mp["_filename"] = mp["filename"].astype(str).str.strip().str.lower()
@@ -733,7 +727,6 @@ def ensure_detection_clips(proj_path: Path, detections_df, audio_map_df):
         except Exception:
             continue
 
-    import pandas as pd
     return pd.DataFrame(rows)
 
 # Buttons / pickers
@@ -745,16 +738,13 @@ def pick_folder_dialog() -> Optional[str]:
             res = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
             path = res.stdout.strip(); return path or None
         else:
-            import tkinter as tk
-            from tkinter import filedialog
             root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
             folder = filedialog.askdirectory(title="Select a folder")
             root.destroy(); return folder or None
     except Exception:
         return None
 
-from pathlib import Path as _P
-def path_picker(label: str, state_key: str) -> Optional[_P]:
+def path_picker(label: str, state_key: str) -> Optional[Path]:
     """
     One-row [text][Browse…] picker with aligned button.
     Stores value in st.session_state[state_key].
@@ -777,7 +767,7 @@ def path_picker(label: str, state_key: str) -> Optional[_P]:
             st.session_state[state_key] = chosen
             st.rerun()
     val = st.session_state[state_key].strip()
-    return _P(val) if val else None
+    return Path(val) if val else None
 
 # Views
 def view_login() -> None:
@@ -1034,11 +1024,7 @@ def _auto_guess(colnames: List[str], candidates: List[str]) -> Optional[str]:
     return None
 
 def view_import_results() -> None:
-    import pandas as pd
-    from pathlib import Path as _P
-    from pamalytics.scripts.schema import drop_mapped_columns
-
-    def _path_picker(label: str, state_key: str) -> Optional[_P]:
+    def _path_picker(label: str, state_key: str) -> Optional[Path]:
         st.session_state.setdefault(state_key, "")
         st.markdown(f"**{label}**")
         c_txt, c_btn = st.columns([9, 1])
@@ -1056,7 +1042,7 @@ def view_import_results() -> None:
                 st.session_state[state_key] = chosen
                 st.rerun()
         v = st.session_state[state_key].strip()
-        return _P(v) if v else None
+        return Path(v) if v else None
 
     if not st.session_state.get("auth_user"):
         st.session_state.route = "login"; st.rerun()
@@ -1101,8 +1087,6 @@ def view_import_results() -> None:
 
     # PATH A: BATDETECT2 ADAPTER
     if classifier_type == "batdetect2":
-        from pamalytics.scripts.adapters.batdetect2 import ingest_batdetect2
-
         bd2_csv_root = _path_picker("Classification results folder", "bd2_csv_root")
         audio_base   = _path_picker("Audio folder", "bd2_audio_base")
 
@@ -1204,7 +1188,6 @@ def view_import_results() -> None:
 
     # PATH B: BIRDNET ADAPTER
     if classifier_type == "birdnet":
-        from pamalytics.scripts.adapters.birdnet import ingest_birdnet
 
         bn_csv_root = _path_picker("BirdNET results folder or CSV", "bn_csv_root")
         audio_base   = _path_picker("Audio folder", "bn_audio_base")
@@ -1292,7 +1275,7 @@ def view_import_results() -> None:
 
     # PATH C: MANUAL MAPPING
 
-    def _file_picker(label: str, state_key: str) -> Optional[_P]:
+    def _file_picker(label: str, state_key: str) -> Optional[Path]:
         st.session_state.setdefault(state_key, "")
         st.markdown(f"**{label}**")
         c_txt, c_btn = st.columns([9, 1])
@@ -1314,8 +1297,6 @@ def view_import_results() -> None:
                     res = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
                     chosen = res.stdout.strip()
                 else:
-                    import tkinter as tk
-                    from tkinter import filedialog
                     root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
                     chosen = filedialog.askopenfilename(
                         title="Select a results file",
@@ -1328,7 +1309,7 @@ def view_import_results() -> None:
             except Exception:
                 pass
         v = st.session_state[state_key].strip()
-        return _P(v) if v else None
+        return Path(v) if v else None
 
     results_path = _file_picker("Classifier results file", "manual_results_file")
     audio_base   = _path_picker("Audio folder", "manual_audio_base")
@@ -1414,11 +1395,10 @@ def view_import_results() -> None:
         st.error("No `.wav` files found in the selected audio folder.")
         return
 
-    import os as _os
     df_link = df.copy()
 
     vals       = df_link[audio_col].astype(str)
-    basenames  = vals.apply(lambda s: _os.path.basename(s).strip().lower())
+    basenames  = vals.apply(lambda s: os.path.basename(s).strip().lower())
     stems      = basenames.str.replace(r"\.[^.]+$", "", regex=True)
 
     name_to_path = dict(zip(wav_index["basename_lc"], wav_index["path"]))
@@ -1587,7 +1567,6 @@ def view_import_results() -> None:
             present_value_for_existing=st.session_state.import_params.get("present_value_for_existing","1"),
         )
 
-        import numpy as _np
 
         if norm is None or norm.empty:
             st.warning("No rows after your label filter/mapping. Adjust your presence mapping or disable 'keep only present'.")
@@ -1635,7 +1614,7 @@ def view_import_results() -> None:
                 f = str(row.get("file_id", ""))
                 try:
                     s = float(row.get("detection_start_s")); e = float(row.get("detection_end_s"))
-                    if not (_np.isfinite(s) and _np.isfinite(e)): return f"{f}:nan-nan"
+                    if not (np.isfinite(s) and np.isfinite(e)): return f"{f}:nan-nan"
                     return f"{f}:{s:.3f}-{e:.3f}"
                 except Exception:
                     return f"{f}:nan-nan"
@@ -1859,9 +1838,6 @@ def _build_normalised_table(
     keep_only_present: bool, label_col: Optional[str], canonicalise_existing: bool,
     present_value_for_existing: str,
 ):
-    import pandas as pd
-    from datetime import datetime as _dt
-
     def to_seconds(series):
         s = pd.to_numeric(series, errors="coerce")
         if convert_ms: s = s / 1000.0
@@ -1918,9 +1894,9 @@ def _build_normalised_table(
                 x = x.strip()
                 try:
                     if len(x) == 15 and x[8] == "_" and x[:8].isdigit() and x[9:].isdigit():
-                        return _dt.strptime(x, "%Y%m%d_%H%M%S")
+                        return datetime.strptime(x, "%Y%m%d_%H%M%S")
                     if len(x) == 14 and x.isdigit():
-                        return _dt.strptime(x, "%Y%m%d%H%M%S")
+                        return datetime.strptime(x, "%Y%m%d%H%M%S")
                 except Exception:
                     return None
                 return None
@@ -1950,7 +1926,6 @@ def _build_normalised_table(
 # Metadata join (Metadata mapping)
 def view_metadata() -> None:
     hide_chrome(True, True)
-    import pandas as pd, os
     if not st.session_state.get("auth_user"): st.session_state.route = "login"; st.rerun()
     if not st.session_state.get("current_project"): st.session_state.route = "hub"; st.rerun()
 
@@ -2019,8 +1994,6 @@ def _load_renderer(module_stem: str, func_name: str):
       3) load case-insensitive from scripts/pages/
     Return callable or None.
     """
-    import importlib, importlib.util
-
     for cand in {module_stem, module_stem.capitalize()}:
         try:
             mod = importlib.import_module(cand)
@@ -2051,8 +2024,6 @@ def _load_renderer(module_stem: str, func_name: str):
 
 def view_dashboard() -> None:
     hide_chrome(hide_sidebar=False, hide_header=True)
-
-    import pandas as pd
 
     if not st.session_state.get("auth_user"):
         st.session_state.route = "login"; st.rerun()

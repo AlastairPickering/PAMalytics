@@ -5,6 +5,7 @@ import hashlib
 import os
 from pathlib import Path
 from typing import Optional, Tuple, Dict, List
+from datetime import datetime, timezone
 
 import numpy as np
 import pandas as pd
@@ -46,7 +47,6 @@ def _best_prob_from_row(row: pd.Series) -> float:
 
 def _now_iso() -> str:
     try:
-        from datetime import datetime, timezone
         return datetime.now(timezone.utc).isoformat()
     except Exception:
         return ""
@@ -63,7 +63,6 @@ def _user_name() -> str:
 
 def _make_export_filename(proj_root: Path, user_name: str) -> str:
     try:
-        from datetime import datetime, timezone
         ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     except Exception:
         ts = "export"

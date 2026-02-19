@@ -32,8 +32,6 @@ def build_analysis_dataset(proj_path: Path, use_stem_fallback: bool = True):
     """
     Returns (df, notes) where df contains *all* original columns PLUS the canonical PAMalytics columns.
     """
-    import pandas as pd
-
     def _first(df, *cands):
         for c in cands:
             if c in df.columns:
