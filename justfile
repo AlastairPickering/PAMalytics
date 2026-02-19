@@ -6,3 +6,6 @@ dev:
 
 install:
     uv sync
+
+run:
+    uv run pamalytics
