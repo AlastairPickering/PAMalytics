@@ -5,6 +5,7 @@ import sys as _sys
 import venv as _venv
 from pathlib import Path
 from pathlib import Path as _Path
+import importlib.util as _iu
 
 # Paths
 STUDIO_ROOT = Path(__file__).resolve().parent  # code/
@@ -86,7 +87,6 @@ def _install_torch(py_exe: str):
 def _needs_bootstrap() -> bool:
     in_managed = _sys.executable and str(_sys.executable).startswith(str(_VENV_DIR))
     try:
-        import importlib.util as _iu
 
         have_librosa = _iu.find_spec("librosa") is not None
         have_streamlit = _iu.find_spec("streamlit") is not None

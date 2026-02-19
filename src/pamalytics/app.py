@@ -1,6 +1,5 @@
 # code/Home.py
 
-import importlib, importlib.util
 import json
 from dataclasses import dataclass, asdict, field
 from datetime import datetime, timezone as dt_timezone
@@ -16,6 +15,9 @@ import subprocess
 from pamalytics.scripts.adapters.birdnet import ingest_birdnet
 from pamalytics.scripts.schema import normalise_schema  # code/scripts/schema.py
 from pamalytics.scripts.adapters.batdetect2 import ingest_batdetect2
+from pamalytics.scripts.dashboard import render_dashboard
+from pamalytics.core.page_impl.Validate import render_validation
+from pamalytics.core.page_impl.Recalculate import render_settings
 import soundfile as sf
 import numpy as np
 import tkinter as tk
@@ -1986,42 +1988,6 @@ def view_metadata() -> None:
         nav_row("Back to Overview", "overview", "Launch dashboard", "dashboard", key_prefix="meta_after_save")
 
 # Dashboard
-def _load_renderer(module_stem: str, func_name: str):
-    """
-    Try, in order:
-      1) import as a top-level module on sys.path
-      2) load case-insensitive from scripts/
-      3) load case-insensitive from scripts/pages/
-    Return callable or None.
-    """
-    for cand in {module_stem, module_stem.capitalize()}:
-        try:
-            mod = importlib.import_module(cand)
-            fn = getattr(mod, func_name, None)
-            if callable(fn): return fn
-        except ModuleNotFoundError:
-            pass
-
-    def _scan_and_load(folder: Path, stem: str):
-        for p in folder.glob("*.py"):
-            if p.stem.lower() == stem.lower() or stem.lower() in p.stem.lower():
-                spec = importlib.util.spec_from_file_location(p.stem, p)
-                if spec and spec.loader:
-                    mod = importlib.util.module_from_spec(spec)
-                    spec.loader.exec_module(mod)  # type: ignore
-                    fn = getattr(mod, func_name, None)
-                    if callable(fn):
-                        return fn
-        return None
-
-    fn = _scan_and_load(SCRIPTS_DIR, module_stem)
-    if fn: return fn
-    pages_dir = SCRIPTS_DIR / "pages"
-    if pages_dir.exists():
-        fn = _scan_and_load(pages_dir, module_stem)
-        if fn: return fn
-    return None
-
 def view_dashboard() -> None:
     hide_chrome(hide_sidebar=False, hide_header=True)
 
@@ -2066,26 +2032,14 @@ def view_dashboard() -> None:
                 except Exception as e:
                     st.error(f"Export failed: {e}")
 
-    def _render(page_key: str, func_name: str):
-        fn = _load_renderer(page_key, func_name)
-        if not fn:
-            st.error(f"Could not find a renderer for '{page_key}' in {SCRIPTS_DIR} or {SCRIPTS_DIR/'pages'}.")
-            return
-        try:
-            fn(df_det, sources)
-        except TypeError as e:
-            st.error(f"Dashboard entrypoint {func_name}() failed: {e}")
-        except Exception as e:
-            st.error(f"Error in {page_key}: {e}")
-
     if page == "Dashboard":
-        _render("dashboard", "render_dashboard")
+        render_dashboard(df_det, sources)
     elif page == "Validation":
-        _render("validation", "render_validation")
+        render_validation(df_det, sources)
     elif page == "Settings":
-        _render("settings", "render_settings")
-    elif page == "Occupancy":
-        _render("occupancy", "render_occupancy")
+        render_settings(df_det, sources)
+    # elif page == "Occupancy":
+    #     _render("occupancy", "render_occupancy")
 
     nav_row("Back to Overview", "overview", key_prefix="pa_bottom")
 
