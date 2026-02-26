@@ -24,7 +24,7 @@ if not exist "%UV_EXE%" (
 if exist "%UV_EXE_ALT%" set "UV_EXE=%UV_EXE_ALT%"
 
 if not exist "%UV_EXE%" (
-  echo Error: uv did not install correctly (expected: %UV_EXE%).
+  echo "Error: uv did not install correctly (expected: %UV_EXE%)."
   exit /b 1
 )
 
