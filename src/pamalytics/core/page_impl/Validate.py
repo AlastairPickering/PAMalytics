@@ -16,12 +16,6 @@ import soundfile as sf
 from matplotlib.ticker import FuncFormatter
 from matplotlib.patches import Rectangle
 
-# Page config
-try:
-    st.set_page_config(layout="wide", page_title="Validate")
-except Exception:
-    pass
-
 
 # Generic utilities
 
@@ -462,6 +456,12 @@ def _commit_card(
 # Page entrypoint
 
 def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None:
+   # Page config
+    try:
+        st.set_page_config(layout="wide", page_title="Validate")
+    except Exception:
+        pass
+
     _init_filter_state()
     st.header("Validation")
 
