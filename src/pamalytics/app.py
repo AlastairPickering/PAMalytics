@@ -1027,22 +1027,25 @@ def _auto_guess(colnames: List[str], candidates: List[str]) -> Optional[str]:
 
 def view_import_results() -> None:
     def _path_picker(label: str, state_key: str) -> Optional[Path]:
-        st.session_state.setdefault(state_key, "")
         st.markdown(f"**{label}**")
         c_txt, c_btn = st.columns([9, 1])
-        widget_key = f"{state_key}__widget"
-        current_val = st.session_state[state_key]
-        new_val = c_txt.text_input(
-            "path", value=current_val, key=widget_key,
-            label_visibility="collapsed", placeholder="/path/to/folder"
-        )
-        if new_val != current_val:
-            st.session_state[state_key] = new_val
+
+        if state_key not in st.session_state:
+            st.session_state[state_key] = ""
+
         if c_btn.button("Browse…", key=f"{state_key}__browse"):
             chosen = pick_folder_dialog()
             if chosen:
                 st.session_state[state_key] = chosen
                 st.rerun()
+
+        c_txt.text_input(
+            "path", 
+            key=state_key,
+            label_visibility="collapsed", 
+            placeholder="/path/to/folder"
+        )
+
         v = st.session_state[state_key].strip()
         return Path(v) if v else None
 
@@ -1278,18 +1281,11 @@ def view_import_results() -> None:
     # PATH C: MANUAL MAPPING
 
     def _file_picker(label: str, state_key: str) -> Optional[Path]:
-        st.session_state.setdefault(state_key, "")
         st.markdown(f"**{label}**")
         c_txt, c_btn = st.columns([9, 1])
-        widget_key = f"{state_key}__widget"
-        current_val = st.session_state[state_key]
-        new_text = c_txt.text_input(
-            "path", value=current_val, key=widget_key,
-            label_visibility="collapsed",
-            placeholder="/path/to/results.(csv|tsv|parquet)"
-        )
-        if new_text != current_val:
-            st.session_state[state_key] = new_text
+
+        if state_key not in st.session_state:
+            st.session_state[state_key] = ""
 
         if c_btn.button("Browse…", key=f"{state_key}__browse"):
             try:
@@ -1310,6 +1306,13 @@ def view_import_results() -> None:
                     st.rerun()
             except Exception:
                 pass
+
+        c_txt.text_input(
+            "path",
+            key=state_key,
+            label_visibility="collapsed",
+            placeholder="/path/to/results.(csv|tsv|parquet)"
+        )
         v = st.session_state[state_key].strip()
         return Path(v) if v else None
 
