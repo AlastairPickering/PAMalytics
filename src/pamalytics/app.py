@@ -20,8 +20,6 @@ from pamalytics.core.page_impl.Validate import render_validation
 from pamalytics.core.page_impl.Recalculate import render_settings
 import soundfile as sf
 import numpy as np
-import tkinter as tk
-from tkinter import filedialog
 
 # Streamlit / UI
 import streamlit as st
@@ -740,6 +738,8 @@ def pick_folder_dialog() -> Optional[str]:
             res = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
             path = res.stdout.strip(); return path or None
         else:
+            import tkinter as tk
+            from tkinter import filedialog
             root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
             folder = filedialog.askdirectory(title="Select a folder")
             root.destroy(); return folder or None
@@ -1295,6 +1295,8 @@ def view_import_results() -> None:
                     res = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
                     chosen = res.stdout.strip()
                 else:
+                    import tkinter as tk
+                    from tkinter import filedialog
                     root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
                     chosen = filedialog.askopenfilename(
                         title="Select a results file",
