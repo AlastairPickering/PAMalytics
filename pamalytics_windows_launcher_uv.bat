@@ -31,6 +31,13 @@ if not exist "%UV_EXE%" (
 set "VENV_DIR=%cd%\.venv"
 set "PY_EXE=%VENV_DIR%\Scripts\python.exe"
 
+if exist "%VENV_DIR%" (
+  if not exist "%PY_EXE%" (
+    set "VENV_DIR=%cd%\.venv-win"
+    set "PY_EXE=%VENV_DIR%\Scripts\python.exe"
+  )
+)
+
 rem If venv exists, ensure it's a supported Python (3.9-3.12); otherwise recreate
 if exist "%PY_EXE%" (
   for /f "usebackq delims=" %%V in (`"%PY_EXE%" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2^>nul`) do set "PY_MINOR=%%V"
@@ -69,6 +76,10 @@ if exist "requirements.txt" (
   "%UV_EXE%" pip install --python "%PY_EXE%" -r requirements.txt
 ) else (
   "%UV_EXE%" pip install --python "%PY_EXE%" streamlit pydantic python-dateutil streamlit-extras
+)
+
+if exist "%cd%\VC_redist.x64.exe" (
+  start /wait "" "%cd%\VC_redist.x64.exe" /install /passive /norestart
 )
 
 rem Launch Streamlit app

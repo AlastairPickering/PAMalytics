@@ -73,6 +73,12 @@ def _make_export_filename(proj_root: Path, user_name: str) -> str:
     return f"{proj}_validated_{safe_user}_{ts}.csv"
 
 
+def _safe_widget_key(prefix: str, *parts: object) -> str:
+    s = prefix + "|" + "|".join(str(p) for p in parts)
+    h = hashlib.md5(s.encode("utf-8")).hexdigest()[:16]
+    return f"{prefix}_{h}"
+
+
 # Dataset loading
 
 def _load_csv_safe(p: Path) -> Optional[pd.DataFrame]:
@@ -377,10 +383,6 @@ def _commit_card(
     base: str,
     species_orig: str,
 ) -> Tuple[pd.DataFrame, int, int]:
-    """
-    Apply species/presence changes for a single card and derive validation_state.
-    Also populate validation_label and validation_species for reviewed rows.
-    """
     det = df_all.copy()
 
     mask_card = (
@@ -391,7 +393,6 @@ def _commit_card(
     if card_rows.empty:
         return det, 0, 0
 
-    # Stable ordering for mapping to widget keys
     card_rows = card_rows.sort_values("start_s")
     card_rows["__orig_index"] = card_rows.index
     rgdf = card_rows.reset_index(drop=True)
@@ -401,13 +402,11 @@ def _commit_card(
 
     total_cnt = len(rgdf)
 
-    # Apply selections to species_name / presence_label
     for ridx, row in rgdf.iterrows():
         idx = int(row["__orig_index"])
         key = f"sp_{base}_{species_orig}_{ridx}"
         choice = st.session_state.get(key, None)
 
-        # If widget not created (expander never opened), treat as no change.
         if choice is None:
             continue
 
@@ -435,7 +434,6 @@ def _commit_card(
             det.at[idx, "user_changed_by"] = user_id
             det.at[idx, "user_changed_at"] = now_iso
 
-    # Recompute validation_state and set validated_by/at + validation_label/species
     card_rows_updated = det.loc[mask_card].copy()
     card_rows_updated = card_rows_updated.sort_values("start_s")
     cur_sp = card_rows_updated["species_name"].astype(str)
@@ -468,7 +466,6 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
 
     proj_root = Path(sources.get("project") or sources.get("project_root") or ".")
 
-    # Dataset selection (Original vs Validated)
     df_default, ds_label, ds_choices, ds_paths = _dataset_choice_validate(sources)
     if ds_label == "None" or df_default.empty:
         st.warning("Validation cannot start because the analysis dataset is not initialised. Ingest data first.")
@@ -476,6 +473,10 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
 
     ds_labels = list(ds_choices.keys())
     ds_index = ds_labels.index(ds_label) if ds_label in ds_labels else 0
+
+    forced = st.session_state.pop("_force_validate_dataset", None)
+    if forced in ds_labels:
+        st.session_state["validate_dataset_selector"] = forced
 
     ds_col, _ = st.columns([1.4, 3])
     with ds_col:
@@ -490,7 +491,6 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
 
     df_all = _ensure_validation_ready(df_default)
 
-    # Layout controls
     top1, top2, top3 = st.columns([1, 1, 1])
     with top1:
         NUM_PER_PAGE = st.number_input(
@@ -515,7 +515,6 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
             key="validate_page",
         )
 
-    # Advanced filters
     with st.expander("Advanced filters", expanded=False):
         r1c1, r1c2, r1c3 = st.columns([1, 1, 1])
         with r1c1:
@@ -578,7 +577,6 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                 disabled=not use_te_override,
             )
 
-        # Group filter
         group_candidates = []
         label_map: Dict[str, str] = {}
         for label, col in [
@@ -625,7 +623,6 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
     group_col = st.session_state.get("validate_group_col", "")
     group_values = st.session_state.get("validate_group_values", [])
 
-    # Changed/reviewed flags
     orig_sp_all = df_all.get("species_name_original", df_all.get("species_name", "")).astype(str)
     orig_pl_all = df_all.get("presence_label_original", df_all.get("presence_label", "")).astype(str).str.lower()
     cur_sp_all = df_all.get("species_name", "").astype(str)
@@ -635,7 +632,6 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
     val_state_all = df_all.get("validation_state", pd.Series([""] * len(df_all))).astype(str).str.lower()
     df_all["reviewed_flag"] = val_state_all.replace({"nan": ""}).ne("")
 
-    # Apply filters
     df_view = df_all.copy()
 
     if group_col and group_values:
@@ -656,7 +652,6 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
         st.session_state["pa_df_det"] = df_all.copy()
         return
 
-    # Summary metrics (detection-level)
     total_in_scope = len(df_view)
     reviewed_mask = df_view["reviewed_flag"].astype(bool)
     changed_mask = df_view["changed_flag"].astype(bool) & reviewed_mask
@@ -719,7 +714,6 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                 use_container_width=True,
             )
 
-    # Grouping: (basename, species_display_original)
     df_view = df_view.sort_values(["basename", "species_display_original", "start_s"])
     grouped = df_view.groupby(["basename", "species_display_original"], dropna=False)
     groups: List[tuple[str, str]] = list(grouped.indices.keys())
@@ -737,7 +731,6 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
     page_keys = groups[start_idx:end_idx]
     st.caption(f"Showing {len(page_keys)} of {total_cards} spectrograms (page {PAGE})")
 
-    # Species dropdown choices (for editing)
     species_choices = sorted(
         pd.unique(
             pd.concat([
@@ -749,7 +742,6 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
     species_choices = [s for s in species_choices if s and s.lower() not in ("nan", "[absent]")]
     species_choices.insert(0, "[absent]")
 
-    # Spectrogram grid
     n_rows = math.ceil(len(page_keys) / int(COLS_PER_ROW))
     for r in range(n_rows):
         cols = st.columns(int(COLS_PER_ROW))
@@ -776,7 +768,6 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
             title_html += "</div>"
 
             with cols[c]:
-                # Header + pills + mark-reviewed button in top-right column
                 h1, h2 = st.columns([2.0, 1.0])
                 with h1:
                     st.markdown(title_html, unsafe_allow_html=True)
@@ -785,16 +776,15 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                     st.markdown("<div style='height:0.4rem'></div>", unsafe_allow_html=True)
                     if st.button(
                         "Mark card as reviewed",
-                        key=f"mark_reviewed_{hash((base, species_orig))}",
+                        key=_safe_widget_key("mark_reviewed", base, species_orig),
                         use_container_width=True,
                     ):
                         updated_df, _, _ = _commit_card(proj_root, df_all, base, species_orig)
                         out = proj_root / "data_normalised" / "detections_validated.csv"
                         out.parent.mkdir(parents=True, exist_ok=True)
-
-                        # save the full dataset
                         updated_df.to_csv(out, index=False)
 
+                        st.session_state["_force_validate_dataset"] = "Validated (published)"
                         st.session_state["active_dataset_label"] = "Validated (published)"
                         st.session_state["active_dataset_path"] = str(out)
                         st.session_state["pa_df_det"] = updated_df
@@ -804,7 +794,6 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                         elif hasattr(st, "experimental_rerun"):
                             st.experimental_rerun()
 
-                # Audio and spectrogram
                 apath = _resolve_audio_path(gdf, df_all)
                 if not (apath and apath.exists()):
                     st.error("Audio not found")
@@ -836,7 +825,6 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                     )[:10]
 
                 if apath and y.size > 0:
-                    # Frequency window
                     if lock_freq and (fmax_khz > fmin_khz):
                         ymin = max(0.0, float(fmin_khz) * 1000.0)
                         ymax = float(fmax_khz) * 1000.0
@@ -855,7 +843,6 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                         ymin = max(0.0, fmin - pad)
                         ymax = min(nyq, fmax + pad)
 
-                    # Spectrogram
                     try:
                         n_fft = 8192 if sr > 48_000 else 4096
                         hop = n_fft // 8
@@ -930,9 +917,8 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                     except Exception as e:
                         st.error(f"Spectrogram error: {e}")
 
-                    # Playback with TE
                     try:
-                        y_seg = y  # full recording
+                        y_seg = y
 
                         low_edge = _estimate_low_edge_hz_for_group(gdf)
                         te_auto = _choose_te_for_group(low_edge, sr)
@@ -950,7 +936,6 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                     except Exception as e:
                         st.error(f"Playback error: {e}")
 
-                # In-place species editor
                 with st.expander("Edit detections (species)"):
                     gdf_with_idx = gdf.copy()
                     gdf_with_idx["__orig_index"] = gdf_with_idx.index
@@ -975,10 +960,8 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                             key=f"sp_{base}_{species_orig}_{ridx}",
                         )
 
-    # Update in-memory copy for other pages
     st.session_state["pa_df_det"] = df_all.copy()
 
-    # Pending changes table
     st.divider()
     st.subheader("Tracked species changes (saved)")
 
@@ -1006,9 +989,6 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
     else:
         st.write("No saved species changes yet.")
 
-    # Download export (cleaned)
-
-    # list of columns not to be included in the final export 
     UNWANTED = [
         "validation_method", "user_changed", "user_changed_by", "user_changed_at",
         "FinalLabelEffective", "species_display", "species_display_original",
@@ -1035,12 +1015,10 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
 
     export_df = df_all.copy()
 
-    # Ensure the validation fields exist 
     for c in ["validation_state", "validation_label", "validation_species", "validated_by", "validated_at"]:
         if c not in export_df.columns:
             export_df[c] = ""
 
-    # Drop unwanted columns at export time
     export_df = export_df.drop(columns=UNWANTED, errors="ignore")
 
     csv_bytes = export_df.to_csv(index=False).encode("utf-8")

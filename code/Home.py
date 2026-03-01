@@ -853,29 +853,45 @@ def pick_folder_dialog() -> Optional[str]:
         return None
 
 from pathlib import Path as _P
+import os as _os
+
+def _clean_dialog_path(p: str) -> str:
+    p = (p or "").strip().strip('"').strip("'")
+    if not p:
+        return ""  # avoid normpath("") -> "."
+    if p.startswith("{") and p.endswith("}"):  # occasional tkinter oddity
+        p = p[1:-1]
+    if p.startswith("\\\\?\\"):
+        p = p[4:]
+    return _os.path.normpath(p)
+
+def _browse_into(state_key: str) -> None:
+    chosen = pick_folder_dialog()
+    if chosen:
+        st.session_state[state_key] = _clean_dialog_path(chosen)
+
 def path_picker(label: str, state_key: str) -> Optional[_P]:
-    """
-    One-row [text][Browse…] picker with aligned button.
-    Stores value in st.session_state[state_key].
-    """
     st.session_state.setdefault(state_key, "")
+
     st.markdown(f"**{label}**")
     c_txt, c_btn = st.columns([9, 1])
-    widget_key = f"{state_key}__widget"
-    current_val = st.session_state[state_key]
-    new_text = c_txt.text_input(
-        "", value=current_val, key=widget_key,
+
+    c_txt.text_input(
+        "",
+        key=state_key,
         label_visibility="collapsed",
-        placeholder="/path/to/folder"
+        placeholder=(r"C:\path\to\folder" if _os.name == "nt" else "/path/to/folder"),
     )
-    if new_text != current_val:
-        st.session_state[state_key] = new_text
-    if c_btn.button("Browse…", key=f"{state_key}__browse"):
-        chosen = pick_folder_dialog()
-        if chosen:
-            st.session_state[state_key] = chosen
-            st.rerun()
-    val = st.session_state[state_key].strip()
+
+    # set session_state[state_key] safely
+    c_btn.button(
+        "Browse…",
+        key=f"{state_key}__browse",
+        on_click=_browse_into,
+        args=(state_key,),
+    )
+
+    val = _clean_dialog_path(str(st.session_state.get(state_key, "")))
     return _P(val) if val else None
 
 # Views
@@ -1136,27 +1152,6 @@ def view_import_results() -> None:
     import pandas as pd
     from pathlib import Path as _P
     from schema import drop_mapped_columns
-
-    def _path_picker(label: str, state_key: str) -> Optional[_P]:
-        st.session_state.setdefault(state_key, "")
-        st.markdown(f"**{label}**")
-        c_txt, c_btn = st.columns([9, 1])
-        widget_key = f"{state_key}__widget"
-        current_val = st.session_state[state_key]
-        new_val = c_txt.text_input(
-            "", value=current_val, key=widget_key,
-            label_visibility="collapsed", placeholder="/path/to/folder"
-        )
-        if new_val != current_val:
-            st.session_state[state_key] = new_val
-        if c_btn.button("Browse…", key=f"{state_key}__browse"):
-            chosen = pick_folder_dialog()
-            if chosen:
-                st.session_state[state_key] = chosen
-                st.rerun()
-        v = st.session_state[state_key].strip()
-        return _P(v) if v else None
-
     if not st.session_state.get("auth_user"):
         st.session_state.route = "login"; st.rerun()
     if not st.session_state.get("current_project"):
@@ -1202,8 +1197,8 @@ def view_import_results() -> None:
     if classifier_type == "batdetect2":
         from adapters.batdetect2 import ingest_batdetect2
 
-        bd2_csv_root = _path_picker("Classification results folder", "bd2_csv_root")
-        audio_base   = _path_picker("Audio folder", "bd2_audio_base")
+        bd2_csv_root = path_picker("Classification results folder", "bd2_csv_root")
+        audio_base   = path_picker("Audio folder", "bd2_audio_base")
 
         st.session_state.import_params["bd2_csv_root"] = str(bd2_csv_root) if bd2_csv_root else ""
         st.session_state.import_params["audio_base"]   = str(audio_base)   if audio_base   else ""
@@ -1305,8 +1300,8 @@ def view_import_results() -> None:
     if classifier_type == "birdnet":
         from adapters.birdnet import ingest_birdnet
 
-        bn_csv_root = _path_picker("BirdNET results folder or CSV", "bn_csv_root")
-        audio_base   = _path_picker("Audio folder", "bn_audio_base")
+        bn_csv_root = path_picker("BirdNET results folder or CSV", "bn_csv_root")
+        audio_base   = path_picker("Audio folder", "bn_audio_base")
 
         st.session_state.import_params["bn_csv_root"] = str(bn_csv_root) if bn_csv_root else ""
         st.session_state.import_params["audio_base"]  = str(audio_base)  if audio_base  else ""
@@ -1430,7 +1425,7 @@ def view_import_results() -> None:
         return _P(v) if v else None
 
     results_path = _file_picker("Classifier results file", "manual_results_file")
-    audio_base   = _path_picker("Audio folder", "manual_audio_base")
+    audio_base   = path_picker("Audio folder", "manual_audio_base")
 
     st.session_state.import_params["results_file"] = str(results_path) if results_path else ""
     if audio_base:
