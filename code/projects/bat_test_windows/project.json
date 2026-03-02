@@ -1,13 +1,13 @@
 {
-  "project_id": "fecb9fae-4349-4882-8417-4aa5826c08e7",
+  "project_id": "f1de0770-b0fb-4369-9e49-a72e1ffeabb6",
   "name": "bat_test_windows",
   "use_case": "external_results",
   "tz": "UTC",
   "created_by": "alastair",
-  "created_at": "2026-03-02T01:25:34.264820+00:00",
-  "last_opened": "2026-03-02T01:25:34.283657+00:00",
+  "created_at": "2026-03-02T04:07:26.094749+00:00",
+  "last_opened": "2026-03-02T14:58:11.171159+00:00",
   "paths": {
-    "root": "C:\\Users\\alast\\Documents\\PAMalytics-main\\code\\projects\\bat_test_windows",
+    "root": ".",
     "data_raw": "data_raw/",
     "data_normalised": "data_normalised/",
     "metadata": "metadata/",
