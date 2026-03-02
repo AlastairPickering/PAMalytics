@@ -208,19 +208,62 @@ def _ensure_validation_ready(df_in: pd.DataFrame) -> pd.DataFrame:
 
 # Audio path + TE helpers
 
-def _resolve_audio_path(row_or_df, df_all: pd.DataFrame) -> Optional[Path]:
+def _is_abs_like(p: str) -> bool:
+    """True for absolute paths on POSIX/Windows (including UNC), even if running on the other OS."""
+    p = (p or "").strip()
+    if not p:
+        return False
+    # Windows drive letter paths (e.g. C:\...) even when running on POSIX
+    if len(p) >= 2 and p[1] == ":":
+        return True
+    # UNC paths
+    if p.startswith("\\\\") or p.startswith("//"):
+        return True
+    try:
+        return Path(p).is_absolute()
+    except Exception:
+        return False
+
+
+def _resolve_audio_candidate(proj_root: Path, p: str) -> Optional[Path]:
+    """Resolve a stored audio path (project-relative or absolute) to an existing file."""
+    p = (p or "").strip()
+    if not p:
+        return None
+
+    cand = Path(p) if _is_abs_like(p) else (proj_root / p)
+
+    try:
+        cand = cand.expanduser()
+    except Exception:
+        pass
+
+    try:
+        cand = cand.resolve()
+    except Exception:
+        try:
+            cand = Path(os.path.normpath(str(cand)))
+        except Exception:
+            pass
+
+    return cand if cand.exists() else None
+
+
+def _resolve_audio_path(proj_root: Path, row_or_df, df_all: pd.DataFrame) -> Optional[Path]:
     if isinstance(row_or_df, pd.Series):
         rows = [row_or_df]
     else:
         rows = [row_or_df.iloc[0]] if len(row_or_df) else []
 
     for r in rows:
-        for col in ("file_path", "path"):
+        for col in ("file_path", "path", "file_path_rel", "file_path_abs", "file_path_original", "original_path"):
             p = r.get(col)
-            if isinstance(p, str) and p.strip() and Path(p).exists():
-                return Path(p)
+            if isinstance(p, str) and p.strip():
+                cand = _resolve_audio_candidate(proj_root, p)
+                if cand is not None:
+                    return cand
 
-    cand_cols = [c for c in ("file_path", "path") if c in df_all.columns]
+    cand_cols = [c for c in ("file_path", "path", "file_path_rel", "file_path_abs", "file_path_original", "original_path") if c in df_all.columns]
     if not cand_cols:
         return None
 
@@ -236,13 +279,17 @@ def _resolve_audio_path(row_or_df, df_all: pd.DataFrame) -> Optional[Path]:
 
     for col in cand_cols:
         for q in rows2[col]:
-            if isinstance(q, str) and q.strip() and Path(q).exists():
-                return Path(q)
+            if isinstance(q, str) and q.strip():
+                cand = _resolve_audio_candidate(proj_root, q)
+                if cand is not None:
+                    return cand
 
     for col in cand_cols:
         q = rows2[col].dropna().astype(str).head(1)
-        if not q.empty and Path(q.iloc[0]).exists():
-            return Path(q.iloc[0])
+        if not q.empty:
+            cand = _resolve_audio_candidate(proj_root, str(q.iloc[0]))
+            if cand is not None:
+                return cand
 
     return None
 
@@ -797,7 +844,7 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                         elif hasattr(st, "experimental_rerun"):
                             st.experimental_rerun()
 
-                apath = _resolve_audio_path(gdf, df_all)
+                apath = _resolve_audio_path(proj_root, gdf, df_all)
                 if not (apath and apath.exists()):
                     st.error("Audio not found")
                     y, sr = np.array([], dtype=np.float32), 1

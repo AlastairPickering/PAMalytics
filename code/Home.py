@@ -127,7 +127,7 @@ def _default_status() -> Dict[str, str]:
 
 def _default_paths(folder: Path) -> Dict[str, str]:
     return {
-        "root":            str(folder),
+        "root":            ".",
         "data_raw":        "data_raw/",
         "data_normalised": "data_normalised/",
         "metadata":        "metadata/",
@@ -200,6 +200,93 @@ def project_path(folder: Path, *keys: str) -> Path:
     for k in keys[1:]:
         base = (base / k).resolve()
     return base
+
+# Audio path helpers (project-portable)
+def _is_abs_like(p: str) -> bool:
+    """Heuristic that treats Windows drive/UNC paths as absolute even on POSIX."""
+    p = (p or "").strip()
+    if not p:
+        return False
+    if p.startswith("\\") or p.startswith("//"):
+        return True
+    if len(p) >= 3 and p[1] == ":" and p[2] in ("\\", "/"):
+        return True
+    try:
+        return Path(p).is_absolute()
+    except Exception:
+        return False
+
+def resolve_project_path(proj_path: Path, maybe_rel: str) -> Path:
+    """Resolve a stored path (relative-to-project or absolute) to an absolute Path."""
+    s = (maybe_rel or "").strip()
+    if not s:
+        return Path("")
+    if _is_abs_like(s):
+        return Path(s)
+    return (proj_path / s).resolve()
+
+def resolve_input_audio_path(audio_root: Optional[Path], p: str) -> Path:
+    """Resolve an input audio path or filename against an optional audio root."""
+    s = (p or "").strip()
+    if not s:
+        return Path("")
+    if _is_abs_like(s):
+        return Path(s)
+    if audio_root:
+        try:
+            cand = (audio_root / s).resolve()
+            if cand.exists():
+                return cand
+        except Exception:
+            pass
+        try:
+            cand2 = (audio_root / Path(s).name).resolve()
+            if cand2.exists():
+                return cand2
+        except Exception:
+            pass
+    return Path("")
+
+def stage_audio_into_project(
+    proj_path: Path,
+    src_path: Path,
+    *,
+    dest_root: Optional[Path] = None,
+    audio_root: Optional[Path] = None,
+) -> str:
+    """
+    Copy an audio file into the project folder so the project is portable.
+    Returns a POSIX-style path relative to the project root, or "" if staging fails.
+    """
+    import shutil
+
+    try:
+        if not src_path or not Path(src_path).exists():
+            return ""
+        proj_abs = proj_path.resolve()
+        dest_root = (dest_root or (proj_abs / "data_raw" / "audio")).resolve()
+        dest_root.mkdir(parents=True, exist_ok=True)
+
+        src_abs = Path(src_path).resolve()
+        rel_inside = None
+        if audio_root:
+            try:
+                rel_inside = src_abs.relative_to(Path(audio_root).resolve())
+            except Exception:
+                rel_inside = None
+
+        dest = (dest_root / rel_inside) if rel_inside is not None else (dest_root / src_abs.name)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+
+        if not dest.exists():
+            shutil.copy2(src_abs, dest)
+
+        try:
+            return dest.relative_to(proj_abs).as_posix()
+        except Exception:
+            return str(dest)
+    except Exception:
+        return ""
 
 # App config
 st.set_page_config(page_title="PAMalytics Studio", layout="wide", initial_sidebar_state="collapsed")
@@ -658,6 +745,31 @@ def build_analysis_dataset(proj_path: Path, use_stem_fallback: bool = True):
         except Exception:
             pass
 
+    # Keep stored project-relative paths for portability, but provide an absolute path for playback.
+    if "file_path" in df.columns:
+        df["file_path_rel"] = df["file_path"].astype(str)
+        df["file_path"] = df["file_path_rel"].apply(lambda s: str(resolve_project_path(proj_path, s)))
+
+        # Optional fallback: if an original absolute path exists locally, use it when the staged file is missing.
+        if "file_path_original" in df.columns:
+            try:
+                _abs = df["file_path"].astype(str)
+                _orig = df["file_path_original"].astype(str).str.strip()
+
+                def _pick_abs(a: str, o: str) -> str:
+                    try:
+                        if a and Path(a).exists():
+                            return a
+                        if o and Path(o).exists():
+                            return o
+                    except Exception:
+                        pass
+                    return a
+
+                df["file_path"] = [_pick_abs(a, o) for a, o in zip(_abs, _orig)]
+            except Exception:
+                pass
+
     has_path = df["file_path"].astype(str).str.strip().ne("")
     matched = df.loc[has_path].copy()
     if matched.empty:
@@ -705,11 +817,12 @@ def ensure_detection_clips(proj_path: Path, detections_df, audio_map_df):
             continue
 
         src = name_to_path.get(str(nm_lower))
-        if not src or not os.path.exists(src):
+        src_path = resolve_project_path(proj_path, str(src)) if src else Path("")
+        if (not src_path) or (not src_path.exists()):
             continue
 
         try:
-            info = sf.info(src)
+            info = sf.info(str(src_path))
             sr   = info.samplerate
             total = info.frames
 
@@ -719,7 +832,7 @@ def ensure_detection_clips(proj_path: Path, detections_df, audio_map_df):
                 continue
 
             frames = end_f - start_f
-            y, _ = sf.read(src, start=start_f, frames=frames, dtype="float32", always_2d=False)
+            y, _ = sf.read(str(src_path), start=start_f, frames=frames, dtype="float32", always_2d=False)
 
             safe_stem = Path(nm).stem
             clip_name = f"{safe_stem}_{start_f}_{end_f}.wav"
@@ -1158,12 +1271,41 @@ def view_import_results() -> None:
                 st.warning("No rows were ingested from the selected folder.")
             else:
                 norm_csv.parent.mkdir(parents=True, exist_ok=True)
+
+                # Stage audio into the project so paths are portable.
+                try:
+                    audio_dest_root = project_path(proj_path, "data_raw") / "audio"
+                    audio_root = audio_base if (audio_base and Path(audio_base).exists()) else None
+                    if "file_path" in df_norm.columns:
+                        df_norm["file_path_original"] = df_norm["file_path"].astype(str)
+                        _uniq = df_norm["file_path_original"].fillna("").astype(str).unique()
+                        _rel_map = {}
+                        for _p0 in _uniq:
+                            _p0s = str(_p0).strip()
+                            if not _p0s:
+                                _rel_map[_p0] = ""
+                                continue
+                            _src = resolve_input_audio_path(audio_root, _p0s)
+                            if _src and _src.exists():
+                                _rel = stage_audio_into_project(
+                                    proj_path, _src, dest_root=audio_dest_root, audio_root=audio_root
+                                )
+                                _rel_map[_p0] = _rel if _rel else _p0s
+                            else:
+                                _rel_map[_p0] = _p0s
+                        df_norm["file_path"] = df_norm["file_path_original"].astype(str).map(_rel_map).fillna("")
+                except Exception:
+                    pass
+
                 df_norm.to_csv(norm_csv, index=False)
 
                 if {"file_id","file_path"} <= set(df_norm.columns):
-                    mp = df_norm.loc[df_norm["file_path"].astype(str).str.strip().ne(""), ["file_id","file_path"]].drop_duplicates()
+                    cols = ["file_id", "file_path"]
+                    if "file_path_original" in df_norm.columns:
+                        cols.append("file_path_original")
+                    mp = df_norm.loc[df_norm["file_path"].astype(str).str.strip().ne(""), cols].drop_duplicates()
                     if not mp.empty:
-                        mp = mp.rename(columns={"file_id":"filename", "file_path":"path"})
+                        mp = mp.rename(columns={"file_id":"filename", "file_path":"path", "file_path_original":"original_path"})
                         ws_dir.mkdir(parents=True, exist_ok=True)
                         out_map = ws_dir / "audio_paths.csv"
                         mp.to_csv(out_map, index=False)
@@ -1247,16 +1389,45 @@ def view_import_results() -> None:
                 st.warning("No rows were ingested from the selected BirdNET location.")
             else:
                 norm_csv.parent.mkdir(parents=True, exist_ok=True)
+
+                # Stage audio into the project so paths are portable.
+                try:
+                    audio_dest_root = project_path(proj_path, "data_raw") / "audio"
+                    audio_root = audio_base if (audio_base and Path(audio_base).exists()) else None
+                    if "file_path" in df_norm.columns:
+                        df_norm["file_path_original"] = df_norm["file_path"].astype(str)
+                        _uniq = df_norm["file_path_original"].fillna("").astype(str).unique()
+                        _rel_map = {}
+                        for _p0 in _uniq:
+                            _p0s = str(_p0).strip()
+                            if not _p0s:
+                                _rel_map[_p0] = ""
+                                continue
+                            _src = resolve_input_audio_path(audio_root, _p0s)
+                            if _src and _src.exists():
+                                _rel = stage_audio_into_project(
+                                    proj_path, _src, dest_root=audio_dest_root, audio_root=audio_root
+                                )
+                                _rel_map[_p0] = _rel if _rel else _p0s
+                            else:
+                                _rel_map[_p0] = _p0s
+                        df_norm["file_path"] = df_norm["file_path_original"].astype(str).map(_rel_map).fillna("")
+                except Exception:
+                    pass
+
                 df_norm.to_csv(norm_csv, index=False)
 
                 if {"file_id", "file_path"} <= set(df_norm.columns):
+                    cols = ["file_id", "file_path"]
+                    if "file_path_original" in df_norm.columns:
+                        cols.append("file_path_original")
                     mp = df_norm.loc[
                         df_norm["file_path"].astype(str).str.strip().ne(""),
-                        ["file_id", "file_path"]
+                        cols
                     ].drop_duplicates()
 
                     if not mp.empty:
-                        mp = mp.rename(columns={"file_id": "filename", "file_path": "path"})
+                        mp = mp.rename(columns={"file_id": "filename", "file_path": "path", "file_path_original": "original_path"})
                         ws_dir.mkdir(parents=True, exist_ok=True)
                         out_map = ws_dir / "audio_paths.csv"
                         mp.to_csv(out_map, index=False)
@@ -1420,9 +1591,10 @@ def view_import_results() -> None:
     stems      = basenames.str.replace(r"\.[^.]+$", "", regex=True)
 
     name_to_path = dict(zip(wav_index["basename_lc"], wav_index["path"]))
-    df_link["file_path"] = basenames.map(name_to_path)
+    df_link["file_path_original"] = basenames.map(name_to_path)
+    df_link["file_path"] = df_link["file_path_original"]
 
-    need = df_link["file_path"].isna() | df_link["file_path"].astype(str).str.strip().eq("")
+    need = df_link["file_path_original"].isna() | df_link["file_path_original"].astype(str).str.strip().eq("")
     if need.any():
         stem_counts = wav_index["stem_lc"].value_counts()
         uniq_stems  = set(stem_counts[stem_counts == 1].index)
@@ -1430,7 +1602,8 @@ def view_import_results() -> None:
             wav_index.loc[wav_index["stem_lc"].isin(uniq_stems), "stem_lc"],
             wav_index.loc[wav_index["stem_lc"].isin(uniq_stems), "path"]
         ))
-        df_link.loc[need, "file_path"] = stems[need].map(stem_to_path)
+        df_link.loc[need, "file_path_original"] = stems[need].map(stem_to_path)
+        df_link.loc[need, "file_path"] = df_link.loc[need, "file_path_original"]
 
     matched_mask = df_link["file_path"].notna() & df_link["file_path"].astype(str).str.strip().ne("")
     total_rows   = int(len(df_link))
@@ -1626,7 +1799,12 @@ def view_import_results() -> None:
         cn["detection_probability"] = _from_norm("detection_probability", "score", numeric=True)
 
         cn["file_id"]   = df_av.loc[idx, file_id_col].astype(str)
-        cn["file_path"] = df_av.loc[idx, "file_path"].astype(str)
+        if "file_path_original" in df_av.columns:
+            cn["file_path_original"] = df_av.loc[idx, "file_path_original"].astype(str)
+            cn["file_path"] = df_av.loc[idx, "file_path"].astype(str)
+        else:
+            cn["file_path_original"] = df_av.loc[idx, "file_path"].astype(str)
+            cn["file_path"] = df_av.loc[idx, "file_path"].astype(str)
 
         if "detection_id" not in cn.columns or cn["detection_id"].isna().any():
             def _det_id(row) -> str:
@@ -1730,6 +1908,62 @@ def view_import_results() -> None:
             out_df["detection_end_s"]   = pd.to_numeric(out_df["detection_end_s"], errors="coerce")
             out_df["detection_probability"] = pd.to_numeric(out_df["detection_probability"], errors="coerce")
 
+            # Stage audio into the project and store portable relative paths.
+            try:
+                audio_dest_root = project_path(proj_path, "data_raw") / "audio"
+
+                audio_root = None
+                _ab = st.session_state.import_params.get("audio_base") or ""
+                try:
+                    _abp = Path(str(_ab)) if str(_ab).strip() else None
+                    if _abp and _abp.exists():
+                        audio_root = _abp
+                except Exception:
+                    audio_root = None
+
+                if "file_path_original" not in out_df.columns:
+                    out_df["file_path_original"] = out_df["file_path"].astype(str)
+
+                _orig = out_df["file_path_original"].astype(str).fillna("")
+                _uniq = _orig.unique()
+                _rel_map = {}
+                for _p0 in _uniq:
+                    _p0s = str(_p0).strip()
+                    if not _p0s:
+                        _rel_map[_p0] = ""
+                        continue
+
+                    # If a non-absolute path already exists inside the project, keep it as-is.
+                    _cand_in_proj = resolve_project_path(proj_path, _p0s)
+                    if (not _is_abs_like(_p0s)) and _cand_in_proj.exists():
+                        try:
+                            _rel_map[_p0] = _cand_in_proj.relative_to(proj_path.resolve()).as_posix()
+                        except Exception:
+                            _rel_map[_p0] = _p0s
+                        continue
+
+                    _src = resolve_input_audio_path(audio_root, _p0s)
+                    if _src and _src.exists():
+                        _rel = stage_audio_into_project(
+                            proj_path, _src, dest_root=audio_dest_root, audio_root=audio_root
+                        )
+                        _rel_map[_p0] = _rel
+                    else:
+                        _rel_map[_p0] = ""
+
+                out_df["file_path"] = _orig.map(_rel_map).fillna("")
+
+                missing_stage = (_orig.str.strip().ne("")) & (out_df["file_path"].astype(str).str.strip().eq(""))
+                if missing_stage.any():
+                    st.error(
+                        f"Could not stage {int(missing_stage.sum()):,} audio file(s) into the project. "
+                        "Check the Audio folder and try again."
+                    )
+                    st.stop()
+            except Exception as _e:
+                st.error(f"Audio staging failed: {_e}")
+                st.stop()
+
             problems = []
             if out_df["file_id"].astype(str).str.strip().eq("").any(): problems.append("Some rows have empty file_id.")
             if out_df["file_path"].astype(str).str.strip().eq("").any(): problems.append("Some rows have empty file_path.")
@@ -1760,9 +1994,12 @@ def view_import_results() -> None:
 
             try:
                 ws_dir = project_path(proj_path, "workspace"); ws_dir.mkdir(parents=True, exist_ok=True)
-                mp = out_df.loc[out_df["file_path"].astype(str).str.strip().ne(""), ["file_id", "file_path"]].drop_duplicates()
+                cols = ["file_id", "file_path"]
+                if "file_path_original" in out_df.columns:
+                    cols.append("file_path_original")
+                mp = out_df.loc[out_df["file_path"].astype(str).str.strip().ne(""), cols].drop_duplicates()
                 if not mp.empty:
-                    mp = mp.rename(columns={"file_id": "filename", "file_path": "path"})
+                    mp = mp.rename(columns={"file_id": "filename", "file_path": "path", "file_path_original": "original_path"})
                     mp.to_csv(ws_dir / "audio_paths.csv", index=False)
                     set_status(proj_path, "audio_resolver", "ready")
             except Exception:
