@@ -55,6 +55,7 @@ def _now_iso() -> str:
 def _user_name() -> str:
     return str(
         st.session_state.get("user_name")
+        or st.session_state.get("auth_user")
         or os.environ.get("USER")
         or os.environ.get("USERNAME")
         or ""
@@ -77,6 +78,25 @@ def _safe_widget_key(prefix: str, *parts: object) -> str:
     s = prefix + "|" + "|".join(str(p) for p in parts)
     h = hashlib.md5(s.encode("utf-8")).hexdigest()[:16]
     return f"{prefix}_{h}"
+
+
+def _force_string_cols(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
+    """
+    Ensure selected columns are pandas StringDtype with blanks instead of NaN.
+
+    """
+    for c in cols:
+        if c in df.columns:
+            try:
+                df[c] = df[c].astype("string")
+                df[c] = df[c].fillna("")
+            except Exception:
+                # fall back to object strings
+                try:
+                    df[c] = df[c].astype(str).replace({"nan": "", "None": ""})
+                except Exception:
+                    pass
+    return df
 
 
 # Dataset loading
@@ -181,6 +201,16 @@ def _ensure_validation_ready(df_in: pd.DataFrame) -> pd.DataFrame:
     ]:
         if c not in df.columns:
             df[c] = default
+
+    # Force the admin + key text columns to string dtype (prevents pandas dtype warnings on .at assignments)
+    df = _force_string_cols(df, [
+        "species_name", "presence_label",
+        "species_name_original", "presence_label_original",
+        "validation_state", "validation_label", "validation_species",
+        "validated_by", "validated_at", "validation_method",
+        "user_changed", "user_changed_by", "user_changed_at",
+        "path", "file_path", "basename", "filename_stem",
+    ])
 
     # Effective present/absent from presence_label (helper)
     pleff = df["presence_label"].astype(str).str.strip().str.lower()
@@ -432,6 +462,15 @@ def _commit_card(
 ) -> Tuple[pd.DataFrame, int, int]:
     det = df_all.copy()
 
+    # Safety: ensure text/admin columns are string dtype in this copy as well
+    det = _force_string_cols(det, [
+        "species_name", "presence_label",
+        "species_name_original", "presence_label_original",
+        "validation_state", "validation_label", "validation_species",
+        "validated_by", "validated_at", "validation_method",
+        "user_changed", "user_changed_by", "user_changed_at",
+    ])
+
     mask_card = (
         det["basename"].astype(str).eq(base)
         & det["species_display_original"].astype(str).eq(species_orig)
@@ -461,15 +500,16 @@ def _commit_card(
             new_species = ""
             new_presence = "absent"
         else:
-            new_species = choice
+            new_species = str(choice)
             new_presence = "present"
 
-        prev_sp = str(det.at[idx, "species_name"])
-        prev_pl = str(det.at[idx, "presence_label"]).lower()
+        prev_sp = str(det.at[idx, "species_name"] or "")
+        prev_pl = str(det.at[idx, "presence_label"] or "").lower()
 
-        if str(det.at[idx, "species_name_original"]).strip() == "":
+        # Guard for <NA> / missing originals
+        if pd.isna(det.at[idx, "species_name_original"]) or str(det.at[idx, "species_name_original"]).strip() in ("", "<NA>", "nan"):
             det.at[idx, "species_name_original"] = prev_sp
-        if str(det.at[idx, "presence_label_original"]).strip() == "":
+        if pd.isna(det.at[idx, "presence_label_original"]) or str(det.at[idx, "presence_label_original"]).strip() in ("", "<NA>", "nan"):
             det.at[idx, "presence_label_original"] = prev_pl
 
         det.at[idx, "species_name"] = new_species
@@ -680,7 +720,7 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
     df_all["changed_flag"] = (orig_sp_all != cur_sp_all) | (orig_pl_all != cur_pl_all)
 
     val_state_all = df_all.get("validation_state", pd.Series([""] * len(df_all))).astype(str).str.lower()
-    df_all["reviewed_flag"] = val_state_all.replace({"nan": ""}).ne("")
+    df_all["reviewed_flag"] = val_state_all.replace({"nan": "", "<na>": ""}).ne("")
 
     df_view = df_all.copy()
 
@@ -688,10 +728,12 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
         df_view = df_view[df_view[group_col].astype(str).isin(group_values)]
 
     if show_label in ("present", "absent"):
+        # Use the *view* slice for label filtering (safer when group filter is active)
+        orig_pl_view = df_view.get("presence_label_original", df_view.get("presence_label", "")).astype(str).str.lower()
         if show_label == "present":
-            df_view = df_view[orig_pl_all.eq("present")]
+            df_view = df_view[orig_pl_view.eq("present")]
         else:
-            df_view = df_view[orig_pl_all.ne("present")]
+            df_view = df_view[orig_pl_view.ne("present")]
     elif show_label == "user changed only":
         df_view = df_view[df_view["changed_flag"].astype(bool)]
 
