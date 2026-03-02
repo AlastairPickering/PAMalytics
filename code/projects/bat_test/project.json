@@ -1,0 +1,29 @@
+{
+  "project_id": "b0bf038b-8e01-407c-90bc-72d06a2579cb",
+  "name": "bat_test",
+  "use_case": "external_results",
+  "tz": "UTC",
+  "created_by": "alastair",
+  "created_at": "2026-03-02T08:56:03.809300+00:00",
+  "last_opened": "2026-03-02T08:56:03.817984+00:00",
+  "paths": {
+    "root": "/Users/alastairpickering/Desktop/Alastair/github/PAMalytics_desktop/code/projects/bat_test",
+    "data_raw": "data_raw/",
+    "data_normalised": "data_normalised/",
+    "metadata": "metadata/",
+    "exports": "exports/",
+    "logs": "logs/",
+    "workspace": "workspace/"
+  },
+  "status": {
+    "import_results": "ready",
+    "audio_resolver": "ready",
+    "metadata_joins": "empty",
+    "analysis": "empty",
+    "export": "empty"
+  },
+  "provenance": {
+    "app": "pamalytics_studio",
+    "version": "0.3.0"
+  }
+}
