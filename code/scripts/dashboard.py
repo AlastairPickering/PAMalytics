@@ -28,6 +28,51 @@ except Exception:
 os.environ["STREAMLIT_SERVER_FILEWATCHERTYPE"] = "none"
 
 
+
+
+def _resolve_audio_candidate(project_root: Path, p: object) -> Optional[Path]:
+    """
+    Resolve an audio path that may be:
+      - absolute (creator machine, not portable), or
+      - project-relative (portable; relative to project_root).
+    Returns a Path that exists, or None.
+    """
+    if p is None:
+        return None
+    s = str(p).strip()
+    if not s or s.lower() in {"nan", "none"}:
+        return None
+
+    # Expand ~ etc.
+    try:
+        pp = Path(s).expanduser()
+    except Exception:
+        return None
+
+    # 1) absolute path as-is
+    try:
+        if pp.is_absolute() and pp.exists():
+            return pp
+    except Exception:
+        pass
+
+    # 2) treat as project-relative
+    try:
+        cand = (project_root / pp).resolve()
+        if cand.exists():
+            return cand
+    except Exception:
+        pass
+
+    # 3) last resort: relative to current working directory
+    try:
+        if pp.exists():
+            return pp.resolve()
+    except Exception:
+        pass
+
+    return None
+
 def _slugify(s: str) -> str:
     s = (s or "").strip().lower()
     s = re.sub(r"[^a-z0-9]+", "-", s)
@@ -339,7 +384,7 @@ def _apply_time_expansion_for_playback(y: np.ndarray, sr: int, te: int) -> Tuple
     return y_out, psr
 
 
-def show_detection_examples(df_page: pd.DataFrame, df_all: pd.DataFrame):
+def show_detection_examples(df_page: pd.DataFrame, df_all: pd.DataFrame, project_root: Path):
     st.header("Detection examples")
 
     c1, c2, _, c4 = st.columns(4)
@@ -400,23 +445,27 @@ def show_detection_examples(df_page: pd.DataFrame, df_all: pd.DataFrame):
         else:
             rows = [row_or_df.iloc[0]] if len(row_or_df) else []
         for r_ in rows:
-            for col_ in ("path", "file_path"):
+            for col_ in ("path", "file_path", "file_path_original", "original_path"):
                 p_ = r_.get(col_)
-                if isinstance(p_, str) and p_.strip() and Path(p_).exists():
-                    return Path(p_)
+                ap = _resolve_audio_candidate(project_root, p_)
+                if ap is not None:
+                    return ap
         def _by_stem(df_present: pd.DataFrame, stem: str) -> Optional[Path]:
-            for col_ in ("path", "file_path"):
+            for col_ in ("path", "file_path", "file_path_original", "original_path"):
                 if col_ not in df_present.columns:
                     continue
                 rows2 = df_present[df_present["filename_stem"] == stem]
                 if rows2.empty:
                     continue
                 for p_ in rows2[col_]:
-                    if isinstance(p_, str) and p_.strip() and Path(p_).exists():
-                        return Path(p_)
+                    ap2 = _resolve_audio_candidate(project_root, p_)
+                    if ap2 is not None:
+                        return ap2
                 q = rows2[col_].dropna().astype(str).head(1)
-                if not q.empty and Path(q.iloc[0]).exists():
-                    return Path(q.iloc[0])
+                if not q.empty:
+                    ap3 = _resolve_audio_candidate(project_root, q.iloc[0])
+                    if ap3 is not None:
+                        return ap3
             return None
         if isinstance(row_or_df, pd.Series):
             stem = Path(str(row_or_df.get("basename", row_or_df.get("source_file", "")))).stem.lower()
@@ -658,6 +707,8 @@ def render_dashboard(df: Optional[pd.DataFrame], sources: Dict[str, str], page: 
             st.header("Pages")
             pages = ["Dashboard"]
             _ = st.radio("Navigate", pages, index=0, key="dashboard_nav_radio")
+
+    proj_root = Path(sources.get("project") or sources.get("project_root") or ".")
 
     df_default, ds_label, ds_choices, ds_paths = _dataset_choice(sources)
     if ds_label == "None" or df_default.empty:
@@ -956,4 +1007,4 @@ def render_dashboard(df: Optional[pd.DataFrame], sources: Dict[str, str], page: 
                 )
                 st.altair_chart(tod_chart, width='stretch')
 
-    show_detection_examples(df_page, df_all)
+    show_detection_examples(df_page, df_all, proj_root)
