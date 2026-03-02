@@ -472,15 +472,18 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
         return
 
     ds_labels = list(ds_choices.keys())
-    ds_index = ds_labels.index(ds_label) if ds_label in ds_labels else 0
 
     forced = st.session_state.pop("_force_validate_dataset", None)
     if forced in ds_labels:
         st.session_state["validate_dataset_selector"] = forced
 
+    # make sure the stored value is valid (or initialise it)
+    if st.session_state.get("validate_dataset_selector") not in ds_labels:
+        st.session_state["validate_dataset_selector"] = ds_label
+
     ds_col, _ = st.columns([1.4, 3])
     with ds_col:
-        dataset_label = st.selectbox("Dataset", ds_labels, index=ds_index, key="validate_dataset_selector")
+        dataset_label = st.selectbox("Dataset", ds_labels, key="validate_dataset_selector")
 
     if dataset_label != ds_label:
         df_default = ds_choices[dataset_label].copy()
