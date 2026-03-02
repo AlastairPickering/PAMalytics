@@ -187,10 +187,10 @@ def render_recalculate(df: pd.DataFrame, sources: Dict) -> None:
         st.metric("Present", f"{present:,} ({pct:.1f}%)")
     with s2:
         st.subheader("By species")
-        st.dataframe(summary, use_container_width=True)
+        st.dataframe(summary, width='stretch')
 
     st.subheader("Preview (first 25)")
-    st.dataframe(fn_level.head(25), use_container_width=True)
+    st.dataframe(fn_level.head(25), width='stretch')
 
     out_dir = proj_root / "data_normalised"
     out_dir.mkdir(parents=True, exist_ok=True)

@@ -714,7 +714,7 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                 grp.reset_index().rename(columns={"species_display_original": "species"}).sort_values(
                     "pct_reviewed", ascending=False
                 ),
-                use_container_width=True,
+                width='stretch',
             )
 
     df_view = df_view.sort_values(["basename", "species_display_original", "start_s"])
@@ -780,7 +780,7 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                     if st.button(
                         "Mark card as reviewed",
                         key=_safe_widget_key("mark_reviewed", base, species_orig),
-                        use_container_width=True,
+                        width='stretch',
                     ):
                         updated_df, _, _ = _commit_card(proj_root, df_all, base, species_orig)
                         out = proj_root / "data_normalised" / "detections_validated.csv"
@@ -915,7 +915,7 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                                     ),
                                 )
 
-                        st.pyplot(fig, use_container_width=True, clear_figure=True)
+                        st.pyplot(fig, width='stretch', clear_figure=True)
                         plt.close(fig)
                     except Exception as e:
                         st.error(f"Spectrogram error: {e}")
@@ -986,7 +986,7 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                     "presence_label",
                 ] if col in df_all.columns
             ]].copy()
-            st.dataframe(changed_df, use_container_width=True)
+            st.dataframe(changed_df, width='stretch')
         else:
             st.write("No saved species changes yet.")
     else:

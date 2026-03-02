@@ -457,7 +457,7 @@ def render_norm_preview(norm_csv: Path, heading: str = "Preview mapped detection
     with st.expander(heading, expanded=False):
         try:
             df_prev = pd.read_csv(norm_csv, low_memory=False)
-            st.dataframe(df_prev.head(50), use_container_width=True)
+            st.dataframe(df_prev.head(50), width='stretch')
             st.caption(f"Rows: {len(df_prev):,}")
         except Exception as e:
             st.error(f"Could not read normalised data: {e}")
@@ -831,7 +831,7 @@ def view_login() -> None:
             user = st.text_input("Username", value=default_user, key="login_user")
             pin = st.text_input("PIN (optional)", type="password", key="login_pin")
             remember = st.checkbox("Remember me", value=True, key="login_remember")
-            submit = st.form_submit_button("Sign in", use_container_width=True)
+            submit = st.form_submit_button("Sign in", width='stretch')
 
     if submit:
         if not user.strip():
@@ -916,20 +916,20 @@ def view_hub() -> None:
             launch_key = f"launch_{p.name}"
             del_key    = f"del_{p.name}"
 
-            if cols[3].button("Edit", key=edit_key, use_container_width=True):
+            if cols[3].button("Edit", key=edit_key, width='stretch'):
                 st.session_state.current_project = str(p)
                 touch_last_opened(p)
                 st.session_state.route = "overview"
                 st.toast(f"Opened: {p.name}")
                 st.rerun()
 
-            if cols[4].button("Launch ▶", key=launch_key, use_container_width=True, disabled=not ready_for_launch):
+            if cols[4].button("Launch ▶", key=launch_key, width='stretch', disabled=not ready_for_launch):
                 st.session_state.current_project = str(p)
                 touch_last_opened(p)
                 st.session_state.route = "dashboard"
                 st.switch_page("pages/40_Dashboard.py")
 
-            if cols[5].button("🗑️", key=del_key, help="Move project to Trash", use_container_width=True):
+            if cols[5].button("🗑️", key=del_key, help="Move project to Trash", width='stretch'):
                 st.session_state[f"confirm_delete_{p.name}"] = True
                 st.rerun()
 
@@ -1364,7 +1364,7 @@ def view_import_results() -> None:
 
     if df is not None:
         st.write("Preview (first 20 rows):")
-        st.dataframe(df.head(20), use_container_width=True)
+        st.dataframe(df.head(20), width='stretch')
 
     st.subheader("1) Link each detection to a WAV file")
 
@@ -1454,14 +1454,14 @@ def view_import_results() -> None:
         sample_matched = df_link.loc[matched_mask, preview_cols].head(30)
         if not sample_matched.empty:
             st.caption("Matched rows (first 30)")
-            st.dataframe(sample_matched, use_container_width=True)
+            st.dataframe(sample_matched, width='stretch')
         else:
             st.caption("No matched rows in sample. (You can still see unmatched below.)")
 
     if matched_rows < total_rows:
         with st.expander("Unmatched rows (sample)"):
             sample_unmatched = df_link.loc[~matched_mask, preview_cols].head(30)
-            st.dataframe(sample_unmatched, use_container_width=True)
+            st.dataframe(sample_unmatched, width='stretch')
 
     st.session_state["manual_df_linked"] = df_link
 
@@ -1477,7 +1477,7 @@ def view_import_results() -> None:
 
     df_av = st.session_state["manual_df_linked"]
     st.write("Preview (first 20 rows from linked table):")
-    st.dataframe(df_av.head(20), use_container_width=True)
+    st.dataframe(df_av.head(20), width='stretch')
 
     cols_av = list(df_av.columns)
 
@@ -1677,7 +1677,7 @@ def view_import_results() -> None:
             return
 
         st.subheader("4) Validate & edit the final mapped data (canonical)")
-        edited = st.data_editor(norm, use_container_width=True, num_rows="dynamic", key="norm_editor")
+        edited = st.data_editor(norm, width='stretch', num_rows="dynamic", key="norm_editor")
 
         if _btn("Save normalised copy", key="save_norm_btn"):
             out_dir = project_path(proj_path, "data_normalised"); out_dir.mkdir(parents=True, exist_ok=True)
@@ -1972,7 +1972,7 @@ def view_metadata() -> None:
     det["recorder_id"] = det["basename"].apply(lambda n: n.split("_", 1)[0] if "_" in n else n)
 
     with st.expander("Preview derived columns", expanded=False):
-        st.dataframe(det[["basename","recorder_id"]].head(20), use_container_width=True)
+        st.dataframe(det[["basename","recorder_id"]].head(20), width='stretch')
 
     st.subheader("1) Upload metadata table")
     up = st.file_uploader("Upload metadata CSV / TSV / Parquet", type=["csv","tsv","parquet"], key="meta_up")
@@ -1997,7 +1997,7 @@ def view_metadata() -> None:
     st.subheader("3) Preview join")
     preview_rows = min(200, len(det))
     merged = det.merge(meta, left_on=det_key, right_on=meta_key, how="left")
-    st.dataframe(merged.head(preview_rows), use_container_width=True)
+    st.dataframe(merged.head(preview_rows), width='stretch')
     join_rate = 100.0 * (1.0 - float(merged[meta_key].isna().mean()))
     st.info(f"Join coverage: **{len(merged) and join_rate:.1f}%** of detections joined with metadata (via `{det_key} == {meta_key}`).")
 

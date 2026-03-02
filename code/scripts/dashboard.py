@@ -542,7 +542,7 @@ def show_detection_examples(df_page: pd.DataFrame, df_all: pd.DataFrame):
                             )
                         )
                     _draw_prob_labels_inline(ax, gdf, xmin, xmax, ymin, ymax)
-                    st.pyplot(fig, use_container_width=True, clear_figure=True)
+                    st.pyplot(fig, width='stretch', clear_figure=True)
                     plt.close(fig)
                 except Exception as e:
                     st.error(f"Spectrogram error: {e}")
@@ -641,8 +641,8 @@ def _dataset_choice(sources: Dict[str, str]) -> Tuple[pd.DataFrame, str, Dict[st
 def _has_data(df: pd.DataFrame, col: str) -> bool:
     if col not in df.columns:
         return False
-    s = df[col].astype(str).str.strip()
-    s = s.replace({"": np.nan, "nan": np.nan, "None": np.nan})
+    s = df[col].astype("string").str.strip()
+    s = s.replace({"": pd.NA, "nan": pd.NA, "None": pd.NA})
     return s.notna().any()
 
 
@@ -719,7 +719,7 @@ def render_dashboard(df: Optional[pd.DataFrame], sources: Dict[str, str], page: 
         )
     with c3:
         st.markdown("<div style='height:1.95em'></div>", unsafe_allow_html=True)
-        if st.button("Clear filters", use_container_width=True):
+        if st.button("Clear filters", width='stretch'):
             for k in list(st.session_state.keys()):
                 if str(k).startswith("date_range_") or str(k).startswith("group_key_"):
                     st.session_state.pop(k, None)
@@ -795,7 +795,7 @@ def render_dashboard(df: Optional[pd.DataFrame], sources: Dict[str, str], page: 
         tmp = pretty.copy()
         if "Detection Rate (%)" in tmp.columns:
             tmp["Detection Rate (%)"] = (tmp["Detection Rate (%)"] * 100).round(1).astype(str) + "%"
-        st.dataframe(tmp, use_container_width=True)
+        st.dataframe(tmp, width='stretch')
 
     df_page = _ensure_latlon(df_page)
     need_latlon = df_page[["lat", "lon"]].dropna().empty
@@ -914,7 +914,7 @@ def render_dashboard(df: Optional[pd.DataFrame], sources: Dict[str, str], page: 
                     )
                     .interactive()
                 )
-                st.altair_chart(date_chart, use_container_width=True)
+                st.altair_chart(date_chart, width='stretch')
 
     # Detections by time of day
     if "date_time" in df_page.columns and not df_page.empty:
@@ -954,6 +954,6 @@ def render_dashboard(df: Optional[pd.DataFrame], sources: Dict[str, str], page: 
                     )
                     .interactive()
                 )
-                st.altair_chart(tod_chart, use_container_width=True)
+                st.altair_chart(tod_chart, width='stretch')
 
     show_detection_examples(df_page, df_all)
