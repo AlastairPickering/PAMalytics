@@ -2,17 +2,6 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-# macOS 12: provide realpath if missing
-if ! command -v realpath >/dev/null 2>&1; then
-  realpath() {
-    python3 - <<'PY' "$1"
-import os, sys
-print(os.path.realpath(sys.argv[1]))
-PY
-  }
-  export -f realpath 2>/dev/null || true
-fi
-
 # Bootstrap uv locally
 UV_DIR="${PWD}/.uv-bin"
 UV_BIN="${UV_DIR}/uv"
@@ -70,7 +59,8 @@ fi
 if [ -f "requirements.txt" ]; then
   "$UV_BIN" pip install --python "$PY_BIN" -r requirements.txt
 else
-  "$UV_BIN" pip install --python "$PY_BIN" streamlit pydantic python-dateutil streamlit-extras
+  echo "Error: requirements.txt not found."
+  exit 1
 fi
 
 # Launch PAMalytics (Streamlit)
