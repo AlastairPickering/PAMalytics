@@ -83,7 +83,6 @@ def _safe_widget_key(prefix: str, *parts: object) -> str:
 def _force_string_cols(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
     """
     Ensure selected columns are pandas StringDtype with blanks instead of NaN.
-
     """
     for c in cols:
         if c in df.columns:
@@ -91,12 +90,29 @@ def _force_string_cols(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
                 df[c] = df[c].astype("string")
                 df[c] = df[c].fillna("")
             except Exception:
-                # fall back to object strings
                 try:
                     df[c] = df[c].astype(str).replace({"nan": "", "None": ""})
                 except Exception:
                     pass
     return df
+
+
+def _bool_from_any(x) -> bool:
+    if pd.isna(x):
+        return False
+
+    if isinstance(x, (bool, np.bool_)):
+        return bool(x)
+
+    if isinstance(x, (int, float, np.integer, np.floating)):
+        try:
+            v = float(x)
+            return np.isfinite(v) and v != 0.0
+        except Exception:
+            return False
+
+    s = str(x).strip().lower()
+    return s in ("1", "1.0", "true", "yes", "y")
 
 
 # Dataset loading
@@ -187,28 +203,29 @@ def _ensure_validation_ready(df_in: pd.DataFrame) -> pd.DataFrame:
     if "detection_probability" not in df.columns:
         df["detection_probability"] = df.apply(_best_prob_from_row, axis=1)
 
-    # Originals for audit/reset (required for stable card keys + change tracking)
+    # Originals for audit/reset
     if "species_name_original" not in df.columns:
         df["species_name_original"] = df["species_name"]
     if "presence_label_original" not in df.columns:
         df["presence_label_original"] = df["presence_label"]
 
-    # Validation/admin fields (keep in saved validated file; export can drop extras)
+    # Validation/admin fields
     for c, default in [
         ("validation_state", ""), ("validation_label", ""), ("validation_species", ""),
         ("validated_by", ""), ("validated_at", ""), ("validation_method", ""),
-        ("user_changed", ""), ("user_changed_by", ""), ("user_changed_at", "")
+        ("user_changed", ""), ("user_changed_by", ""), ("user_changed_at", ""),
+        ("uncertain_flag", "")
     ]:
         if c not in df.columns:
             df[c] = default
 
-    # Force the admin + key text columns to string dtype (prevents pandas dtype warnings on .at assignments)
     df = _force_string_cols(df, [
         "species_name", "presence_label",
         "species_name_original", "presence_label_original",
         "validation_state", "validation_label", "validation_species",
         "validated_by", "validated_at", "validation_method",
         "user_changed", "user_changed_by", "user_changed_at",
+        "uncertain_flag",
         "path", "file_path", "basename", "filename_stem",
     ])
 
@@ -236,6 +253,61 @@ def _ensure_validation_ready(df_in: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _apply_card_widget_state(
+    det: pd.DataFrame,
+    base: str,
+    species_orig: str,
+) -> pd.DataFrame:
+    """
+    Apply current widget state for one card onto a dataframe copy.
+    Used only when the user marks the card as reviewed.
+    """
+    out = det.copy()
+
+    out = _force_string_cols(out, [
+        "species_name", "presence_label", "uncertain_flag",
+        "species_name_original", "presence_label_original",
+        "basename", "species_display_original",
+    ])
+
+    mask_card = (
+        out["basename"].astype(str).eq(base)
+        & out["species_display_original"].astype(str).eq(species_orig)
+    )
+    card_rows = out.loc[mask_card].copy()
+    if card_rows.empty:
+        return out
+
+    card_rows = card_rows.sort_values("start_s")
+    card_rows["__orig_index"] = card_rows.index
+    rgdf = card_rows.reset_index(drop=True)
+
+    for ridx, row in rgdf.iterrows():
+        idx = int(row["__orig_index"])
+
+        sp_key = f"sp_{base}_{species_orig}_{ridx}"
+        unc_key = f"unc_{base}_{species_orig}_{ridx}"
+
+        current_presence = str(row.get("presence_label", "") or "").strip().lower()
+        current_species = str(row.get("species_name", "") or "")
+
+        choice = st.session_state.get(sp_key, None)
+        if choice is None:
+            choice = "[absent]" if (current_presence != "present" or current_species.strip() == "") else current_species
+
+        if choice == "[absent]":
+            out.at[idx, "species_name"] = ""
+            out.at[idx, "presence_label"] = "absent"
+        else:
+            out.at[idx, "species_name"] = str(choice)
+            out.at[idx, "presence_label"] = "present"
+
+        current_unc = st.session_state.get(unc_key, _bool_from_any(row.get("uncertain_flag", "")))
+        out.at[idx, "uncertain_flag"] = "1" if bool(current_unc) else ""
+
+    return out
+
+
 # Audio path + TE helpers
 
 def _is_abs_like(p: str) -> bool:
@@ -243,10 +315,8 @@ def _is_abs_like(p: str) -> bool:
     p = (p or "").strip()
     if not p:
         return False
-    # Windows drive letter paths (e.g. C:\...) even when running on POSIX
     if len(p) >= 2 and p[1] == ":":
         return True
-    # UNC paths
     if p.startswith("\\\\") or p.startswith("//"):
         return True
     try:
@@ -415,40 +485,55 @@ def _card_change_counts(gdf: pd.DataFrame) -> Tuple[int, int]:
     return int(changed.sum()), int(len(gdf))
 
 
+def _card_uncertain_count(gdf: pd.DataFrame) -> int:
+    if gdf.empty or "uncertain_flag" not in gdf.columns:
+        return 0
+    return int(gdf["uncertain_flag"].map(_bool_from_any).sum())
+
+
 def _card_classifier_label_and_colour(changed: int, total: int, reviewed: bool) -> Tuple[str, str]:
     if total == 0:
         return "Classifier: not assessed", "#777777"
     if not reviewed:
         return "Classifier: not assessed", "#777777"
     if changed == 0:
-        return "Classifier: all correct", "#2e7d32"
+        return "Classifier: all unchanged", "#2e7d32"
     if changed == total:
-        return "Classifier: all incorrect", "#c62828"
+        return "Classifier: all changed", "#c62828"
     return "Classifier: mixed", "#ef6c00"
 
 
 def _render_pills(gdf: pd.DataFrame):
     changed, total = _card_change_counts(gdf)
+    uncertain_n = _card_uncertain_count(gdf)
     val_state = gdf.get("validation_state", pd.Series([""] * len(gdf))).astype(str).str.lower()
-    reviewed = bool(total) and val_state.replace({"nan": ""}).ne("").all()
+    reviewed = bool(total) and val_state.replace({"nan": "", "<na>": ""}).ne("").all()
 
     review_colour = "#2e7d32" if reviewed else "#777777"
     review_text = "Reviewed" if reviewed else "Not reviewed"
 
     cls_label, cls_colour = _card_classifier_label_and_colour(changed, total, reviewed)
 
-    pills_html = f"""
-    <div style="display:flex; gap:0.4rem; flex-wrap:wrap; justify-content:flex-end;">
-      <span style="padding:0.15rem 0.55rem; border-radius:999px;
-                   background-color:{review_colour}; color:white; font-size:0.72rem;">
-        {review_text}
-      </span>
-      <span style="padding:0.15rem 0.55rem; border-radius:999px;
-                   background-color:{cls_colour}; color:white; font-size:0.72rem;">
-        {cls_label}
-      </span>
-    </div>
-    """
+    pills_html = (
+        "<div style='display:flex; gap:0.4rem; flex-wrap:wrap; justify-content:flex-end; align-items:center;'>"
+        f"<span style='padding:0.15rem 0.55rem; border-radius:999px; "
+        f"background-color:{review_colour}; color:white; font-size:0.72rem;'>"
+        f"{review_text}</span>"
+        f"<span style='padding:0.15rem 0.55rem; border-radius:999px; "
+        f"background-color:{cls_colour}; color:white; font-size:0.72rem;'>"
+        f"{cls_label}</span>"
+    )
+
+    if uncertain_n > 0:
+        tooltip = f"{uncertain_n} uncertain detection" + ("s" if uncertain_n != 1 else "")
+        pills_html += (
+            f"<span title='{tooltip}' "
+            f"style='padding:0.10rem 0.40rem; border-radius:999px; "
+            f"background-color:#f9a825; color:white; font-size:0.78rem; font-weight:700;'>"
+            f"! {uncertain_n}</span>"
+        )
+
+    pills_html += "</div>"
     st.markdown(pills_html, unsafe_allow_html=True)
 
 
@@ -462,88 +547,68 @@ def _commit_card(
 ) -> Tuple[pd.DataFrame, int, int]:
     det = df_all.copy()
 
-    # Safety: ensure text/admin columns are string dtype in this copy as well
     det = _force_string_cols(det, [
         "species_name", "presence_label",
         "species_name_original", "presence_label_original",
         "validation_state", "validation_label", "validation_species",
         "validated_by", "validated_at", "validation_method",
         "user_changed", "user_changed_by", "user_changed_at",
+        "uncertain_flag",
     ])
+
+    det = _apply_card_widget_state(det, base, species_orig)
 
     mask_card = (
         det["basename"].astype(str).eq(base)
         & det["species_display_original"].astype(str).eq(species_orig)
     )
-    card_rows = det.loc[mask_card].copy()
-    if card_rows.empty:
+    card_rows_updated = det.loc[mask_card].copy()
+    if card_rows_updated.empty:
         return det, 0, 0
 
-    card_rows = card_rows.sort_values("start_s")
-    card_rows["__orig_index"] = card_rows.index
-    rgdf = card_rows.reset_index(drop=True)
+    card_rows_updated = card_rows_updated.sort_values("start_s")
 
     user_id = st.session_state.get("user_id") or st.session_state.get("username") or _user_name()
     now_iso = _now_iso()
 
-    total_cnt = len(rgdf)
-
-    for ridx, row in rgdf.iterrows():
-        idx = int(row["__orig_index"])
-        key = f"sp_{base}_{species_orig}_{ridx}"
-        choice = st.session_state.get(key, None)
-
-        if choice is None:
-            continue
-
-        if choice == "[absent]":
-            new_species = ""
-            new_presence = "absent"
-        else:
-            new_species = str(choice)
-            new_presence = "present"
-
-        prev_sp = str(det.at[idx, "species_name"] or "")
-        prev_pl = str(det.at[idx, "presence_label"] or "").lower()
-
-        # Guard for <NA> / missing originals
-        if pd.isna(det.at[idx, "species_name_original"]) or str(det.at[idx, "species_name_original"]).strip() in ("", "<NA>", "nan"):
-            det.at[idx, "species_name_original"] = prev_sp
-        if pd.isna(det.at[idx, "presence_label_original"]) or str(det.at[idx, "presence_label_original"]).strip() in ("", "<NA>", "nan"):
-            det.at[idx, "presence_label_original"] = prev_pl
-
-        det.at[idx, "species_name"] = new_species
-        det.at[idx, "presence_label"] = new_presence
-
-        changed_here = (prev_sp != new_species) or (prev_pl != new_presence)
-        if changed_here:
-            det.at[idx, "user_changed"] = user_id or "1"
-            det.at[idx, "user_changed_by"] = user_id
-            det.at[idx, "user_changed_at"] = now_iso
-
-    card_rows_updated = det.loc[mask_card].copy()
-    card_rows_updated = card_rows_updated.sort_values("start_s")
     cur_sp = card_rows_updated["species_name"].astype(str)
     cur_pl = card_rows_updated["presence_label"].astype(str).str.lower()
     orig_sp = card_rows_updated["species_name_original"].astype(str)
     orig_pl = card_rows_updated["presence_label_original"].astype(str).str.lower()
     changed_mask = (cur_sp != orig_sp) | (cur_pl != orig_pl)
 
-    for (i, changed_here) in zip(card_rows_updated.index, changed_mask):
-        det.at[i, "validation_state"] = "incorrect" if changed_here else "correct"
+    for i, changed_here in zip(card_rows_updated.index, changed_mask):
+        current_sp = str(det.at[i, "species_name"] or "")
+        current_pl = str(det.at[i, "presence_label"] or "").strip().lower()
+        original_sp = str(det.at[i, "species_name_original"] or "")
+        original_pl = str(det.at[i, "presence_label_original"] or "").strip().lower()
+
+        if changed_here:
+            det.at[i, "user_changed"] = user_id or "1"
+            det.at[i, "user_changed_by"] = user_id
+            det.at[i, "user_changed_at"] = now_iso
+
+        is_uncertain = _bool_from_any(det.at[i, "uncertain_flag"])
+        if is_uncertain:
+            det.at[i, "validation_state"] = "uncertain"
+        else:
+            det.at[i, "validation_state"] = "incorrect" if changed_here else "correct"
+
         det.at[i, "validated_by"] = user_id
         det.at[i, "validated_at"] = now_iso
 
-        pl = str(det.at[i, "presence_label"]).strip().lower()
-        det.at[i, "validation_label"] = "present" if pl == "present" else "absent"
-
+        det.at[i, "validation_label"] = "present" if current_pl == "present" else "absent"
         if det.at[i, "validation_label"] == "present":
-            det.at[i, "validation_species"] = str(det.at[i, "species_name"] or "").strip()
+            det.at[i, "validation_species"] = current_sp.strip()
         else:
             det.at[i, "validation_species"] = ""
 
-    return det, int(changed_mask.sum()), total_cnt
+        if original_sp.strip() in ("", "<NA>", "nan"):
+            det.at[i, "species_name_original"] = current_sp
+        if original_pl.strip() in ("", "<NA>", "nan"):
+            det.at[i, "presence_label_original"] = current_pl
 
+    return det, int(changed_mask.sum()), int(len(card_rows_updated))
 
 # Page entrypoint
 
@@ -564,7 +629,6 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
     if forced in ds_labels:
         st.session_state["validate_dataset_selector"] = forced
 
-    # make sure the stored value is valid (or initialise it)
     if st.session_state.get("validate_dataset_selector") not in ds_labels:
         st.session_state["validate_dataset_selector"] = ds_label
 
@@ -610,7 +674,7 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
         with r1c1:
             show_label = st.selectbox(
                 "Show clips labelled",
-                ["present", "absent", "all", "user changed only"],
+                ["present", "absent", "uncertain", "all", "user changed only"],
                 key="validate_show_label",
             )
         with r1c2:
@@ -721,6 +785,10 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
 
     val_state_all = df_all.get("validation_state", pd.Series([""] * len(df_all))).astype(str).str.lower()
     df_all["reviewed_flag"] = val_state_all.replace({"nan": "", "<na>": ""}).ne("")
+    df_all["uncertain_flag_bool"] = df_all.get(
+        "uncertain_flag",
+        pd.Series([""] * len(df_all), index=df_all.index)
+    ).map(_bool_from_any)
 
     df_view = df_all.copy()
 
@@ -728,12 +796,13 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
         df_view = df_view[df_view[group_col].astype(str).isin(group_values)]
 
     if show_label in ("present", "absent"):
-        # Use the *view* slice for label filtering (safer when group filter is active)
         orig_pl_view = df_view.get("presence_label_original", df_view.get("presence_label", "")).astype(str).str.lower()
         if show_label == "present":
             df_view = df_view[orig_pl_view.eq("present")]
         else:
             df_view = df_view[orig_pl_view.ne("present")]
+    elif show_label == "uncertain":
+        df_view = df_view[df_view["uncertain_flag_bool"].astype(bool)]
     elif show_label == "user changed only":
         df_view = df_view[df_view["changed_flag"].astype(bool)]
 
@@ -747,6 +816,7 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
     total_in_scope = len(df_view)
     reviewed_mask = df_view["reviewed_flag"].astype(bool)
     changed_mask = df_view["changed_flag"].astype(bool) & reviewed_mask
+    uncertain_mask = df_view["uncertain_flag_bool"].astype(bool)
 
     val_state_local = df_view.get("validation_state", pd.Series([""] * len(df_view))).astype(str).str.lower()
     correct_mask = reviewed_mask & val_state_local.eq("correct")
@@ -754,13 +824,14 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
     n_reviewed = int(reviewed_mask.sum())
     n_changed = int(changed_mask.sum())
     n_correct = int(correct_mask.sum())
+    n_uncertain = int(uncertain_mask.sum())
 
     pct_reviewed = (100.0 * n_reviewed / total_in_scope) if total_in_scope else 0.0
     pct_correct = (100.0 * n_correct / n_reviewed) if n_reviewed else 0.0
     pct_changed = (100.0 * n_changed / n_reviewed) if n_reviewed else 0.0
 
     with st.expander("Validation progress (current filters)", expanded=True):
-        m1, m2, m3, m4 = st.columns(4)
+        m1, m2, m3, m4, m5 = st.columns(5)
         with m1:
             st.metric("Detections in scope", total_in_scope)
         with m2:
@@ -769,6 +840,8 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
             st.metric("Classifier correct", f"{n_correct} ({pct_correct:.0f}%)")
         with m4:
             st.metric("Changed of reviewed", f"{n_changed} ({pct_changed:.0f}%)")
+        with m5:
+            st.metric("Flagged uncertain", n_uncertain)
 
         if "species_display_original" in df_view.columns:
             if "detection_id" in df_view.columns:
@@ -779,6 +852,7 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                         detections=("detection_id", "size"),
                         reviewed_n=("reviewed_flag", "sum"),
                         changed_n=("changed_flag", "sum"),
+                        uncertain_n=("uncertain_flag_bool", "sum"),
                     )
                 )
             else:
@@ -789,6 +863,7 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                         detections=("species_display_original", "size"),
                         reviewed_n=("reviewed_flag", "sum"),
                         changed_n=("changed_flag", "sum"),
+                        uncertain_n=("uncertain_flag_bool", "sum"),
                     )
                 )
 
@@ -803,7 +878,7 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                 grp.reset_index().rename(columns={"species_display_original": "species"}).sort_values(
                     "pct_reviewed", ascending=False
                 ),
-                width='stretch',
+                width="stretch",
             )
 
     df_view = df_view.sort_values(["basename", "species_display_original", "start_s"])
@@ -869,7 +944,7 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                     if st.button(
                         "Mark card as reviewed",
                         key=_safe_widget_key("mark_reviewed", base, species_orig),
-                        width='stretch',
+                        width="stretch",
                     ):
                         updated_df, _, _ = _commit_card(proj_root, df_all, base, species_orig)
                         out = proj_root / "data_normalised" / "detections_validated.csv"
@@ -901,12 +976,12 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                 for _, row in gdf.iterrows():
                     b = {
                         "start_s": _num(row.get("start_s", row.get("detection_start_s"))),
-                        "end_s":   _num(row.get("end_s",   row.get("detection_end_s"))),
+                        "end_s": _num(row.get("end_s", row.get("detection_end_s"))),
                         "low_freq": _num(row.get("low_freq")),
                         "high_freq": _num(row.get("high_freq")),
-                        "prob":     _num(row.get("detection_probability")),
+                        "prob": _num(row.get("detection_probability")),
                     }
-                    if (np.isfinite(b["start_s"]) and np.isfinite(b["end_s"]) and b["end_s"] > b["start_s"]):
+                    if np.isfinite(b["start_s"]) and np.isfinite(b["end_s"]) and b["end_s"] > b["start_s"]:
                         boxes.append(b)
 
                 if boxes:
@@ -924,7 +999,7 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                         ymax = min(ymax, nyq)
                     else:
                         highs = [b["high_freq"] for b in boxes if np.isfinite(b["high_freq"])]
-                        lows  = [b["low_freq"]  for b in boxes if np.isfinite(b["low_freq"])]
+                        lows = [b["low_freq"] for b in boxes if np.isfinite(b["low_freq"])]
                         if highs and lows and max(highs) > min(lows):
                             fmin, fmax = min(lows), max(highs)
                         else:
@@ -1004,7 +1079,7 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                                     ),
                                 )
 
-                        st.pyplot(fig, width='stretch', clear_figure=True)
+                        st.pyplot(fig, width="stretch", clear_figure=True)
                         plt.close(fig)
                     except Exception as e:
                         st.error(f"Spectrogram error: {e}")
@@ -1045,12 +1120,23 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                         except ValueError:
                             idx_choice = 0
 
-                        st.selectbox(
-                            f"Detection {ridx+1} @ {ts_str}",
-                            options=species_choices,
-                            index=idx_choice,
-                            key=f"sp_{base}_{species_orig}_{ridx}",
-                        )
+                        row_left, row_right = st.columns([4.0, 1.2])
+
+                        with row_left:
+                            st.selectbox(
+                                f"Detection {ridx+1} @ {ts_str}",
+                                options=species_choices,
+                                index=idx_choice,
+                                key=f"sp_{base}_{species_orig}_{ridx}",
+                            )
+
+                        with row_right:
+                            current_uncertain = _bool_from_any(row.get("uncertain_flag", ""))
+                            st.checkbox(
+                                "Uncertain",
+                                value=current_uncertain,
+                                key=f"unc_{base}_{species_orig}_{ridx}",
+                            )
 
     st.session_state["pa_df_det"] = df_all.copy()
 
@@ -1073,9 +1159,10 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                     "presence_label_original",
                     "species_name",
                     "presence_label",
+                    "uncertain_flag",
                 ] if col in df_all.columns
             ]].copy()
-            st.dataframe(changed_df, width='stretch')
+            st.dataframe(changed_df, width="stretch")
         else:
             st.write("No saved species changes yet.")
     else:
@@ -1084,7 +1171,8 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
     UNWANTED = [
         "validation_method", "user_changed", "user_changed_by", "user_changed_at",
         "FinalLabelEffective", "species_display", "species_display_original",
-        "changed_flag", "reviewed_flag", "source_file", "FinalLabel", "class",
+        "changed_flag", "reviewed_flag", "uncertain_flag_bool",
+        "source_file", "FinalLabel", "class",
         "class_prob", "UserLabel", "is_present", "Changed", "lat", "lon",
         "filename_stem", "dt", "time_of_day", "tod_ts",
     ]
@@ -1107,7 +1195,7 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
 
     export_df = df_all.copy()
 
-    for c in ["validation_state", "validation_label", "validation_species", "validated_by", "validated_at"]:
+    for c in ["validation_state", "validation_label", "validation_species", "validated_by", "validated_at", "uncertain_flag"]:
         if c not in export_df.columns:
             export_df[c] = ""
 
