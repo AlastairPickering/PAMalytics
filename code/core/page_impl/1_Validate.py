@@ -22,7 +22,6 @@ except Exception:
     pass
 
 
-
 # Generic utilities
 
 def _num(x) -> float:
@@ -115,7 +114,6 @@ def _clean_group_labels(s: pd.Series, fallback: str) -> pd.Series:
     s = s.str.strip()
     s = s.mask(s.eq(""), fallback)
     return s
-
 
 
 # Dataset loading
@@ -298,7 +296,6 @@ def _apply_card_widget_state(
     return out
 
 
-
 # Audio path + TE helpers
 
 def _is_abs_like(p: str) -> bool:
@@ -438,11 +435,9 @@ def _tmp_audio_path(proj_root: Path, base: str, species_line: str, te: int, sr: 
     return ws / f"play_{h}.wav"
 
 
-
 # Strategy helpers
 
 def _strategy_balance_options(df: pd.DataFrame, goal: Optional[str] = None) -> Dict[str, str]:
-    # For best/worst modes, keep grouping options, but not confidence-banded grouping.
     if goal in ("find_likely_mistakes", "review_strongest"):
         opts = {"all": "All clips"}
         if "species_display_original" in df.columns:
@@ -452,6 +447,9 @@ def _strategy_balance_options(df: pd.DataFrame, goal: Optional[str] = None) -> D
         if "recorder_id" in df.columns:
             opts["recorder"] = "Recorder"
         return opts
+
+    if goal == "equal_allocation":
+        return {"all": "Confidence bands only"}
 
     opts = {"all": "All clips"}
     if "species_display_original" in df.columns:
@@ -495,6 +493,7 @@ def _strategy_goal_label(goal: str) -> str:
         "find_likely_mistakes": "Find likely mistakes",
         "review_strongest": "Review strongest detections",
         "custom_stratified": "Custom stratified plan",
+        "equal_allocation": "Equal allocation",
     }.get(goal, "Representative sample")
 
 
@@ -514,6 +513,8 @@ def _strategy_defaults_for_goal(goal: str, df_len: int) -> Tuple[str, int]:
     df_len = max(1, int(df_len))
     if goal == "custom_stratified":
         return "per_group_percent", 10
+    if goal == "equal_allocation":
+        return "total_clips", min(200, df_len)
     if goal == "find_likely_mistakes":
         return "total_clips", min(100, df_len)
     if goal == "review_strongest":
@@ -553,6 +554,9 @@ def _effective_strategy_settings(df_len: int, df: Optional[pd.DataFrame] = None)
     if balance not in allowed_balance:
         balance = next(iter(allowed_balance.keys()))
 
+    if goal == "equal_allocation":
+        balance = "all"
+
     target_mode = str(st.session_state.get("validate_strategy_target_mode", "total_clips"))
     target_value = int(st.session_state.get("validate_strategy_target_value", 1))
     bins = int(st.session_state.get("validate_strategy_bins", 5))
@@ -584,6 +588,8 @@ def _strategy_summary(df: pd.DataFrame) -> str:
     goal_text = _strategy_goal_label(goal)
     balance_text = _strategy_balance_label(balance, df, goal)
     target_text = _strategy_target_summary(target_value, target_mode)
+    if goal == "equal_allocation":
+        return f"{goal_text} across confidence bands • {target_text} • {bins} bands"
     if "confidence" in balance:
         return f"{goal_text} across {balance_text} • {target_text} • {bins} bands"
     return f"{goal_text} across {balance_text} • {target_text}"
@@ -604,16 +610,23 @@ def _strategy_review_summary_text(
         if balance == "all":
             return f"Review the lowest-confidence clips only. Target {target_text} from the filtered pool."
         return f"Review the lowest-confidence clips within each {balance_text} group. Target {target_text}."
+
     if goal == "review_strongest":
         if balance == "all":
             return f"Review the highest-confidence clips only. Target {target_text} from the filtered pool."
         return f"Review the highest-confidence clips within each {balance_text} group. Target {target_text}."
+
+    if goal == "equal_allocation":
+        return f"Review {target_text} with equal allocation across the {bins} confidence bands only. If one band cannot fill its share, the remainder is topped up from the other bands."
+
     if goal == "custom_stratified":
         if "confidence" in balance:
             return f"Review a custom stratified sample across {balance_text}. Target {target_text} using {bins} confidence bands. Sparse bands will be topped up from neighbouring bands of the same parent group where possible."
         return f"Review a custom stratified sample across {balance_text}. Target {target_text}."
+
     if "confidence" in balance:
         return f"Review a representative random sample across {balance_text}. Target {target_text} using {bins} confidence bands. Sparse bands will be topped up from neighbouring bands of the same parent group where possible."
+
     return f"Review a representative random sample across {balance_text}. Target {target_text}."
 
 
@@ -872,10 +885,10 @@ def _desired_total_from_settings(
         return int(max(0, min(int(target_value), len(df))))
 
     if target_mode == "per_group_percent" and goal == "custom_stratified":
-        return -1  # not a fixed global total
+        return -1
 
     if target_mode == "per_group_clips" and goal == "custom_stratified":
-        return -1  # not a fixed global total
+        return -1
 
     return int(max(0, min(int(target_value), len(df))))
 
@@ -994,7 +1007,69 @@ def _compute_strategy_plan(
 
     desired_total = _desired_total_from_settings(df, goal, target_mode, target_value)
 
-    # Find likely mistakes / strongest: select lowest/highest confidence clips,
+    if goal == "equal_allocation":
+        work = df.copy()
+        work["__strategy_bin"] = _make_probability_bins(work, n_bins)
+
+        band_available = work.groupby("__strategy_bin", dropna=False).size().reindex(range(n_bins), fill_value=0)
+        band_targets = _allocate_even_with_caps(band_available, int(max(1, min(int(target_value), len(work)))))
+
+        meta = pd.DataFrame({
+            "available": band_available.astype(int),
+            "target": band_targets.astype(int),
+        })
+        meta["selected"] = np.minimum(meta["available"], meta["target"]).astype(int)
+        meta["remaining"] = (meta["available"] - meta["selected"]).astype(int)
+        meta["parent"] = "all"
+        meta["bin"] = meta.index.astype(int)
+        meta["stratum"] = meta.index.astype(str)
+
+        shortfalls: Dict[str, int] = {}
+        for band_id, row in meta.iterrows():
+            short = int(row["target"] - row["selected"])
+            if short > 0:
+                shortfalls[str(band_id)] = short
+
+        if shortfalls:
+            pool = meta[meta["remaining"] > 0].copy()
+            if not pool.empty:
+                need = sum(shortfalls.values())
+                order = pool.sort_values(["remaining"], ascending=[False]).index.tolist()
+                for idx in order:
+                    if need <= 0:
+                        break
+                    take = int(min(need, int(meta.at[idx, "remaining"])))
+                    if take <= 0:
+                        continue
+                    meta.at[idx, "selected"] += take
+                    meta.at[idx, "remaining"] -= take
+                    need -= take
+
+        chosen_parts: List[pd.DataFrame] = []
+        for band_id, g in work.groupby("__strategy_bin", dropna=False):
+            take_n = int(meta.at[int(band_id), "selected"]) if int(band_id) in meta.index else 0
+            if take_n <= 0:
+                continue
+            pr = _priority_series(g, goal, seed)
+            g2 = (
+                g.assign(__strategy_priority=pr)
+                .sort_values(["__strategy_priority", "basename", "start_s"], ascending=True)
+                .head(take_n)
+                .drop(columns="__strategy_priority", errors="ignore")
+                .copy()
+            )
+            chosen_parts.append(g2)
+
+        out = pd.concat(chosen_parts, axis=0) if chosen_parts else work.head(0).copy()
+        out = _enforce_final_selection_total(
+            work.drop(columns="__strategy_bin", errors="ignore"),
+            out.drop(columns="__strategy_bin", errors="ignore"),
+            goal,
+            int(max(1, min(int(target_value), len(work)))),
+            seed,
+        )
+        return out, meta
+
     if goal in ("find_likely_mistakes", "review_strongest"):
         if balance == "all":
             total = int(max(1, min(int(target_value), len(df))))
@@ -1058,7 +1133,6 @@ def _compute_strategy_plan(
 
         return out, meta
 
-    # Representative / custom
     df = _build_strategy_strata(df, balance, n_bins)
     df["__strategy_priority"] = _priority_series(df, goal, seed)
 
@@ -1083,11 +1157,15 @@ def _compute_strategy_plan(
 
         if "confidence" in balance:
             meta["target"] = 0
-            weights = np.ones(n_bins, dtype=float)
             for parent_name, parent_target in parent_targets.items():
                 parent_rows = meta[meta["parent"] == parent_name].sort_values("bin")
+                if parent_rows.empty:
+                    continue
+                weights = np.ones(n_bins, dtype=float)
                 bin_targets = _allocate_weighted_bin_targets(parent_rows["available"], int(parent_target), weights)
-                meta.loc[parent_rows.index, "target"] = bin_targets.reindex(parent_rows.index).fillna(0).astype(int)
+                meta.loc[parent_rows.index, "target"] = (
+                    bin_targets.reindex(parent_rows.index).fillna(0).astype(int)
+                )
         else:
             meta["target"] = 0
             for parent_name, parent_target in parent_targets.items():
@@ -1179,7 +1257,74 @@ def _strategy_preview_matrix(
     if df_in.empty:
         return pd.DataFrame(), metrics
 
-    # all clips + best/worst => show confidence bands anyway
+    if goal == "equal_allocation":
+        work = df_in.copy()
+        sel_work = selected_df.copy()
+
+        work["__bin"] = _make_probability_bins(work, n_bins)
+        sel_work["__bin"] = _make_probability_bins(sel_work, n_bins)
+
+        species_col = "species_display_original" if "species_display_original" in work.columns else None
+
+        labels = _confidence_band_labels(n_bins)
+        band_cols = list(range(max(1, int(n_bins))))
+
+        # Top row: all clips
+        avail_all = work.groupby("__bin", dropna=False).size().reindex(band_cols, fill_value=0)
+        sel_all = sel_work.groupby("__bin", dropna=False).size().reindex(band_cols, fill_value=0)
+
+        rows = []
+        all_row = {}
+        for i, lab in enumerate(labels):
+            all_row[lab] = f"{int(sel_all.get(i, 0))}/{int(avail_all.get(i, 0))}"
+        all_row["Total"] = f"{int(len(selected_df))}/{int(len(df_in))}"
+        rows.append(("All clips", all_row))
+
+        # Species rows underneath
+        if species_col is not None:
+            work_sp = work.copy()
+            sel_sp = sel_work.copy()
+
+            work_sp["__species"] = (
+                work_sp[species_col]
+                .astype(str)
+                .replace({"": "[unknown species]", "nan": "[unknown species]"})
+            )
+            sel_sp["__species"] = (
+                sel_sp[species_col]
+                .astype(str)
+                .replace({"": "[unknown species]", "nan": "[unknown species]"})
+            )
+
+            avail_sp = (
+                work_sp.groupby(["__species", "__bin"], dropna=False)
+                .size()
+                .unstack(fill_value=0)
+                .reindex(columns=band_cols, fill_value=0)
+            )
+            sel_sp_tab = (
+                sel_sp.groupby(["__species", "__bin"], dropna=False)
+                .size()
+                .unstack(fill_value=0)
+                .reindex(index=avail_sp.index, columns=band_cols, fill_value=0)
+            )
+
+            species_order = sel_sp_tab.sum(axis=1).sort_values(ascending=False).index.tolist()
+
+            for sp in species_order[:max_rows]:
+                row = {}
+                for i, lab in enumerate(labels):
+                    row[lab] = f"{int(sel_sp_tab.loc[sp, i])}/{int(avail_sp.loc[sp, i])}"
+                row["Total"] = f"{int(sel_sp_tab.loc[sp].sum())}/{int(avail_sp.loc[sp].sum())}"
+                rows.append((sp, row))
+
+        preview = pd.DataFrame(
+            [r[1] for r in rows],
+            index=[r[0] for r in rows],
+        )
+        preview.index.name = "Selection"
+        return preview, metrics
+
     if balance == "all" and goal in ("find_likely_mistakes", "review_strongest"):
         work = df_in.copy()
         sel_work = selected_df.copy()
@@ -1197,7 +1342,6 @@ def _strategy_preview_matrix(
         preview.index.name = "Selection"
         return preview, metrics
 
-    # grouped best/worst => rows = group, cols = bands
     if goal in ("find_likely_mistakes", "review_strongest") and balance != "all":
         work = df_in.copy()
         sel_work = selected_df.copy()
@@ -1345,7 +1489,7 @@ def _render_strategy_summary_bar(df: pd.DataFrame):
         f"Across: {balance_text}",
         f"Target: {_strategy_target_summary(target_value, target_mode)}",
     ]
-    if "confidence" in balance:
+    if goal == "equal_allocation" or "confidence" in balance:
         chips.append(f"Bands: {int(st.session_state.get('validate_strategy_bins', 5))}")
 
     left, right = st.columns([4.5, 1.2])
@@ -1370,7 +1514,6 @@ def _render_strategy_summary_bar(df: pd.DataFrame):
         st.markdown("<div style='height:0.35rem'></div>", unsafe_allow_html=True)
         if st.button("Change strategy", key="open_validate_strategy_modal", width="stretch"):
             st.session_state["validate_strategy_modal_open"] = True
-
 
 
 # Card commit logic
@@ -1447,7 +1590,6 @@ def _commit_card(
     return det, int(changed_mask.sum()), int(len(card_rows_updated))
 
 
-
 # Page entrypoint
 
 def _init_filter_state():
@@ -1483,6 +1625,7 @@ def _init_strategy_state():
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
+
 
 def _card_change_counts(gdf: pd.DataFrame) -> Tuple[int, int]:
     if gdf.empty:
@@ -1539,6 +1682,7 @@ def _render_pills(gdf: pd.DataFrame):
     pills_html += "</div>"
     st.markdown(pills_html, unsafe_allow_html=True)
 
+
 def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None:
     _init_filter_state()
     _init_strategy_state()
@@ -1588,6 +1732,7 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                 "Find likely mistakes": "find_likely_mistakes",
                 "Review strongest detections": "review_strongest",
                 "Custom stratified plan": "custom_stratified",
+                "Equal allocation": "equal_allocation",
             }
 
             current_goal = str(st.session_state.get("validate_strategy_goal", "representative_sample"))
@@ -1664,7 +1809,7 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                     max_value=20,
                     value=int(st.session_state.get("validate_strategy_bins", 5)),
                     step=1,
-                    disabled=("confidence" not in selected_balance),
+                    disabled=False,
                 )
             with c3:
                 seed_value = st.number_input(
@@ -1719,6 +1864,8 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                         st.caption("Preview: confidence-band breakdown for the selected lowest-confidence or highest-confidence clips.")
                     else:
                         st.caption("Preview: each cell shows selected / available for that group and confidence band.")
+                elif selected_goal == "equal_allocation":
+                    st.caption("Preview: each cell shows selected / available for the confidence bands only.")
                 elif "confidence" in selected_balance:
                     st.caption("Sampling preview: each cell shows selected / available for that group and confidence band.")
                 else:
@@ -1735,21 +1882,20 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                     st.metric("Selected", int(preview_metrics.get("selected", 0)))
                     st.metric("Sparse strata", int(preview_metrics.get("undersized", 0)))
 
-                if "confidence" in selected_balance:
-                    band_text = " • ".join(_confidence_band_labels(int(bins_value)))
-                    st.markdown(
-                        f"""
-                        <div style="border:1px solid #e5e7eb; border-radius:1rem; padding:0.85rem 1rem; background:white; margin-top:0.4rem;">
-                          <div style="font-size:0.72rem; text-transform:uppercase; letter-spacing:0.08em; color:#6b7280; margin-bottom:0.35rem;">
-                            Confidence bands
-                          </div>
-                          <div style="font-size:0.82rem; color:#374151; line-height:1.45;">
-                            {band_text}
-                          </div>
-                        </div>
-                        """,
-                        unsafe_allow_html=True,
-                    )
+                band_text = " • ".join(_confidence_band_labels(int(bins_value)))
+                st.markdown(
+                    f"""
+                    <div style="border:1px solid #e5e7eb; border-radius:1rem; padding:0.85rem 1rem; background:white; margin-top:0.4rem;">
+                      <div style="font-size:0.72rem; text-transform:uppercase; letter-spacing:0.08em; color:#6b7280; margin-bottom:0.35rem;">
+                        Confidence bands
+                      </div>
+                      <div style="font-size:0.82rem; color:#374151; line-height:1.45;">
+                        {band_text}
+                      </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
 
             dont_show = st.checkbox(
                 "Don’t show this automatically again for me",
