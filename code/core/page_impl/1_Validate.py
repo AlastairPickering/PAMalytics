@@ -859,7 +859,7 @@ def _strategy_presets(df_len: int) -> Dict[str, Dict[str, object]]:
             "target_value": 10,
             "bins": 5,
             "seed": 42,
-            "description": "Manual control over grouping and targets."
+            "description": "Manual control over the stratified sampling settings."
         },
     }
 
@@ -966,6 +966,46 @@ def _strategy_review_summary_text(
 
     return f"Review a representative random sample across {balance_text}. Target {target_text}."
 
+
+def _strategy_shortfall_count(
+    df_scope: pd.DataFrame,
+    df_selected: pd.DataFrame,
+    goal: str,
+    balance: str,
+    target_mode: str,
+    target_value: int,
+) -> int:
+    if df_scope.empty:
+        return 0
+
+    if balance == "all":
+        desired_total = _desired_total_from_settings(df_scope, goal, target_mode, target_value)
+        if desired_total < 0:
+            return 0
+        return int(len(df_selected) < desired_total)
+
+    parent_scope = _strategy_group_series(df_scope, balance).astype(str)
+    parent_selected = _strategy_group_series(df_selected, balance).astype(str)
+
+    available = parent_scope.value_counts(dropna=False).sort_index()
+    selected = parent_selected.value_counts(dropna=False).reindex(available.index).fillna(0).astype(int)
+
+    if target_mode == "per_group_clips":
+        requested = pd.Series(int(target_value), index=available.index, dtype=int)
+    elif target_mode == "per_group_percent":
+        pct = max(0.0, min(float(target_value), 100.0))
+        requested = np.ceil(available * (pct / 100.0)).astype(int)
+        requested = pd.Series(requested, index=available.index, dtype=int)
+    else:
+        requested = (
+            _parent_target_counts(available, target_mode, target_value)
+            .reindex(available.index)
+            .fillna(0)
+            .astype(int)
+        )
+
+    shortfall = selected < requested
+    return int(shortfall.sum())
 
 def _confidence_band_edges(n_bins: int) -> np.ndarray:
     n_bins = max(1, int(n_bins))
@@ -1611,7 +1651,14 @@ def _strategy_preview_matrix(
         "available": int(len(df_in)),
         "selected": int(len(selected_df)),
         "strata": int(len(meta)),
-        "undersized": int((meta.get("available", pd.Series(dtype=int)) < meta.get("target", pd.Series(dtype=int))).sum()) if not meta.empty else 0,
+        "undersized": _strategy_shortfall_count(
+            df_scope=df_in,
+            df_selected=selected_df,
+            goal=goal,
+            balance=balance,
+            target_mode=target_mode,
+            target_value=target_value,
+        ),
     }
 
     if df_in.empty:
@@ -2176,27 +2223,7 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                 unsafe_allow_html=True,
             )
 
-            if preset_label == "Custom":
-                goal_map = {
-                    "Representative sample": "representative_sample",
-                    "Find likely mistakes": "find_likely_mistakes",
-                    "Review strongest detections": "review_strongest",
-                    "Custom stratified plan": "custom_stratified",
-                    "Equal allocation": "equal_allocation",
-                }
-
-                current_goal = str(st.session_state.get("validate_strategy_goal", "representative_sample"))
-                if current_goal not in goal_map.values():
-                    current_goal = "representative_sample"
-
-                goal_label = st.selectbox(
-                    "Review goal",
-                    options=list(goal_map.keys()),
-                    index=list(goal_map.values()).index(current_goal),
-                )
-                selected_goal = goal_map[goal_label]
-            else:
-                selected_goal = str(st.session_state.get("validate_strategy_goal", current_goal_for_preset))
+            selected_goal = str(st.session_state.get("validate_strategy_goal", current_goal_for_preset))
 
             default_mode, default_value = _strategy_defaults_for_goal(selected_goal, len(df_all))
             balance_label_map = _strategy_balance_options(df_all, selected_goal)
@@ -2270,15 +2297,15 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                 st.markdown(
                     f"""
                     <div style="border:1px solid #e5e7eb; border-radius:0.9rem; padding:0.85rem 0.95rem; background:white;">
-                      <div style="font-size:0.72rem; text-transform:uppercase; letter-spacing:0.08em; color:#6b7280; margin-bottom:0.28rem;">
-                        Session summary
-                      </div>
-                      <div style="font-size:0.98rem; font-weight:600; color:#111827; margin-bottom:0.35rem;">
+                    <div style="font-size:0.72rem; text-transform:uppercase; letter-spacing:0.08em; color:#6b7280; margin-bottom:0.28rem;">
+                        Strategy overview
+                    </div>
+                    <div style="font-size:0.98rem; font-weight:600; color:#111827; margin-bottom:0.35rem;">
                         {_strategy_goal_label(selected_goal)} across {_strategy_balance_label(selected_balance, df_all, selected_goal)}
-                      </div>
-                      <div style="font-size:0.84rem; color:#4b5563; line-height:1.45;">
+                    </div>
+                    <div style="font-size:0.84rem; color:#4b5563; line-height:1.45;">
                         {review_summary}
-                      </div>
+                    </div>
                     </div>
                     """,
                     unsafe_allow_html=True,
@@ -2328,7 +2355,7 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
             with metric_cols[2]:
                 st.metric("Groups / strata", int(preview_metrics.get("strata", 0)))
             with metric_cols[3]:
-                st.metric("Could not meet target", int(preview_metrics.get("undersized", 0)))
+                st.metric("Groups below target", int(preview_metrics.get("undersized", 0)))
 
             st.caption(_compact_preview_caption(selected_goal, selected_balance))
             if not preview_df.empty:
@@ -2557,8 +2584,14 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
     n_changed = int(changed_mask.sum())
     n_correct = int(correct_mask.sum())
     n_uncertain = int(uncertain_mask.sum())
-    n_sparse = int((strategy_meta["available"] < strategy_meta["target"]).sum()) if not strategy_meta.empty and {"available", "target"}.issubset(strategy_meta.columns) else 0
-
+    n_sparse = _strategy_shortfall_count(
+        df_scope=df_candidates,
+        df_selected=df_view,
+        goal=goal,
+        balance=balance,
+        target_mode=target_mode,
+        target_value=target_value,
+    )
     pct_reviewed = (100.0 * n_reviewed / total_in_scope) if total_in_scope else 0.0
     pct_correct = (100.0 * n_correct / n_reviewed) if n_reviewed else 0.0
     pct_changed = (100.0 * n_changed / n_reviewed) if n_reviewed else 0.0
@@ -2578,7 +2611,7 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
         with m5:
             st.metric("Flagged uncertain", n_uncertain)
         with m6:
-            st.metric("Sparse strata", n_sparse)
+            st.metric("Groups below target", n_sparse)
 
         if "species_display_original" in df_view.columns:
             grp = (
