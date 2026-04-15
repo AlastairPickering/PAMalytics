@@ -149,26 +149,30 @@ def with_effective_labels(df_in: pd.DataFrame) -> pd.DataFrame:
     df["Changed"] = (u != "") & (u != m)
     return df
 
-
-def parse_dt_col(s: pd.Series) -> pd.Series:
-    ss = s.astype(str).str.replace(r"\D", "", regex=True)
-    dt14 = pd.to_datetime(ss.str.slice(0, 14), format="%Y%m%d%H%M%S", errors="coerce")
-    mask = dt14.isna()
-    if mask.any():
-        dt8 = pd.to_datetime(ss.str.slice(0, 8), format="%Y%m%d", errors="coerce")
-        dt14[mask] = dt8[mask]
-    return dt14.dt.normalize()
-
-
 def parse_dt_full(s: pd.Series) -> pd.Series:
-    ss = s.astype(str).str.replace(r"\D", "", regex=True)
-    dt = pd.to_datetime(ss.str.slice(0, 14), format="%Y%m%d%H%M%S", errors="coerce")
+    s = s.astype(str).str.strip()
+
+    # First pass: generic parser for normal datetime strings
+    dt = pd.to_datetime(s, errors="coerce", dayfirst=True)
+
+    # Fallback: compact detector formats such as 20250705_015445 / 20250705015445
     missing = dt.isna()
     if missing.any():
-        dt8 = pd.to_datetime(ss.str.slice(0, 8), format="%Y%m%d", errors="coerce")
-        dt[missing] = dt8[missing]
+        ss = s[missing].str.replace(r"\D", "", regex=True)
+
+        dt14 = pd.to_datetime(ss.str.slice(0, 14), format="%Y%m%d%H%M%S", errors="coerce")
+        still_missing = dt14.isna()
+        if still_missing.any():
+            dt8 = pd.to_datetime(ss.str.slice(0, 8), format="%Y%m%d", errors="coerce")
+            dt14.loc[still_missing] = dt8.loc[still_missing]
+
+        dt.loc[missing] = dt14
+
     return dt
 
+
+def parse_dt_col(s: pd.Series) -> pd.Series:
+    return parse_dt_full(s).dt.normalize()
 
 def _ensure_latlon(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
@@ -616,12 +620,29 @@ def show_detection_examples(df_page: pd.DataFrame, df_all: pd.DataFrame, project
 
 def _augment_grouping_fields_class(df_in: pd.DataFrame) -> pd.DataFrame:
     df = df_in.copy()
+
+    def _safe_path_str(x) -> str:
+        if pd.isna(x):
+            return ""
+        s = str(x).strip()
+        return "" if s.lower() in ("", "nan", "none", "<na>") else s
+
+    def _safe_basename(x) -> str:
+        s = _safe_path_str(x)
+        return Path(s).name if s else ""
+
+    def _safe_stem(x) -> str:
+        s = _safe_path_str(x)
+        return Path(s).stem.lower() if s else ""
+
     if "basename" not in df.columns:
         if "path" in df.columns and df["path"].notna().any():
-            df["basename"] = df["path"].astype(str).apply(lambda p: Path(p).name if p else "")
+            df["basename"] = df["path"].map(_safe_basename)
         else:
-            df["basename"] = df.get("source_file", "").astype(str).apply(lambda p: Path(p).name if p else "")
-    df["filename_stem"] = df["basename"].astype(str).apply(lambda n: Path(n).stem.lower())
+            src = df["source_file"] if "source_file" in df.columns else pd.Series([""] * len(df), index=df.index)
+            df["basename"] = src.map(_safe_basename)
+
+    df["filename_stem"] = df["basename"].map(_safe_stem)
 
     if "FinalLabel" not in df.columns and "label" in df.columns:
         df["FinalLabel"] = df["label"].astype(str)

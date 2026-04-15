@@ -113,10 +113,17 @@ def _bool_from_any(x) -> bool:
 
 
 def _clean_group_labels(s: pd.Series, fallback: str) -> pd.Series:
-    s = s.astype(str).replace({"nan": "", "None": ""}).fillna("")
+    s = s.astype(str).replace({"nan": "", "None": "", "<NA>": "", "none": ""}).fillna("")
     s = s.str.strip()
     s = s.mask(s.eq(""), fallback)
     return s
+
+
+def _clean_index_labels(idx: pd.Index, fallback: str = "[unknown]") -> pd.Index:
+    s = pd.Series(idx.astype(str), index=range(len(idx)))
+    s = s.replace({"nan": "", "None": "", "<NA>": "", "none": ""}).fillna("").str.strip()
+    s = s.mask(s.eq(""), fallback)
+    return pd.Index(s.tolist())
 
 
 def _fmt_ms(x: float) -> str:
@@ -256,6 +263,7 @@ def _ensure_validation_ready(df_in: pd.DataFrame) -> pd.DataFrame:
         "[absent]",
         sp0
     )
+    df["species_display_original"] = _clean_group_labels(df["species_display_original"], "[unknown species]")
 
     return df
 
@@ -441,6 +449,7 @@ def _apply_time_expansion_for_playback(y: np.ndarray, sr: int, te: int) -> Tuple
 
     psr = max(1, int(sr // te))
     return y_out, psr
+
 
 def _largest_valid_fft_at_or_below(limit: int) -> Optional[int]:
     allowed_ffts = [32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
@@ -803,6 +812,77 @@ def _target_value_for_widget(
     return int(max(1, min(default_value, max(1, df_len))))
 
 
+def _strategy_presets(df_len: int) -> Dict[str, Dict[str, object]]:
+    default_total = min(200, max(1, int(df_len)))
+    review_total = min(100, max(1, int(df_len)))
+    return {
+        "Representative sample": {
+            "goal": "representative_sample",
+            "balance": "species_confidence",
+            "target_mode": "total_clips",
+            "target_value": default_total,
+            "bins": 5,
+            "seed": 42,
+            "description": "Balanced sampling across species and confidence bands."
+        },
+        "Likely mistakes": {
+            "goal": "find_likely_mistakes",
+            "balance": "species",
+            "target_mode": "total_clips",
+            "target_value": review_total,
+            "bins": 5,
+            "seed": 42,
+            "description": "Lowest-confidence detections, balanced across species."
+        },
+        "Strongest detections": {
+            "goal": "review_strongest",
+            "balance": "all",
+            "target_mode": "total_clips",
+            "target_value": review_total,
+            "bins": 5,
+            "seed": 42,
+            "description": "Highest-confidence detections, regardless of group."
+        },
+        "Equal allocation": {
+            "goal": "equal_allocation",
+            "balance": "all",
+            "target_mode": "total_clips",
+            "target_value": default_total,
+            "bins": 5,
+            "seed": 42,
+            "description": "Even spread across confidence bands."
+        },
+        "Custom": {
+            "goal": "custom_stratified",
+            "balance": "species_confidence",
+            "target_mode": "per_group_percent",
+            "target_value": 10,
+            "bins": 5,
+            "seed": 42,
+            "description": "Manual control over grouping and targets."
+        },
+    }
+
+
+def _apply_strategy_preset_if_requested(df_len: int, selected_preset: str) -> None:
+    presets = _strategy_presets(df_len)
+    preset = presets.get(selected_preset)
+    if not preset:
+        return
+
+    last_applied = st.session_state.get("_validate_strategy_last_preset_applied")
+    if last_applied == selected_preset:
+        return
+
+    st.session_state["validate_strategy_goal"] = str(preset["goal"])
+    st.session_state["validate_strategy_balance"] = str(preset["balance"])
+    st.session_state["validate_strategy_target_mode"] = str(preset["target_mode"])
+    st.session_state["validate_strategy_target_value"] = int(preset["target_value"])
+    st.session_state["validate_strategy_bins"] = int(preset["bins"])
+    st.session_state["validate_strategy_seed"] = int(preset["seed"])
+    st.session_state["_validate_strategy_last_preset_applied"] = selected_preset
+
+
 def _effective_strategy_settings(df_len: int, df: Optional[pd.DataFrame] = None) -> Tuple[str, str, str, int, int, int]:
     goal = str(st.session_state.get("validate_strategy_goal", "representative_sample"))
     allowed_balance = _strategy_balance_options(df, goal) if df is not None else {"all": "All clips"}
@@ -913,6 +993,7 @@ def _priority_series(df: pd.DataFrame, goal: str, seed: int) -> pd.Series:
         return -probs
     rng = np.random.default_rng(int(seed))
     return pd.Series(rng.random(len(df)), index=df.index)
+
 
 def _build_strategy_strata(df_in: pd.DataFrame, balance: str, n_bins: int) -> pd.DataFrame:
     df = df_in.copy()
@@ -1491,6 +1572,29 @@ def _select_by_strategy(df_in: pd.DataFrame, df_all: pd.DataFrame) -> Tuple[pd.D
     return _compute_strategy_plan(df_in, goal, balance, target_mode, target_value, bins, seed)
 
 
+def _finalise_preview_table(preview: pd.DataFrame, fallback_label: str = "[unknown]", drop_zero_rows: bool = True) -> pd.DataFrame:
+    if preview.empty:
+        return preview
+
+    out = preview.copy()
+    out.index = _clean_index_labels(out.index, fallback=fallback_label)
+
+    if drop_zero_rows and not out.empty:
+        keep_mask = pd.Series(False, index=out.index)
+
+        for c in out.columns:
+            if pd.api.types.is_numeric_dtype(out[c]):
+                keep_mask = keep_mask | (pd.to_numeric(out[c], errors="coerce").fillna(0) > 0)
+            else:
+                vals = out[c].astype(str).fillna("").str.strip()
+                keep_mask = keep_mask | vals.ne("") | vals.str.contains("/", regex=False)
+
+        if keep_mask.any():
+            out = out.loc[keep_mask.values]
+
+    return out
+
+
 def _strategy_preview_matrix(
     df_in: pd.DataFrame,
     goal: str,
@@ -1539,16 +1643,8 @@ def _strategy_preview_matrix(
             work_sp = work.copy()
             sel_sp = sel_work.copy()
 
-            work_sp["__species"] = (
-                work_sp[species_col]
-                .astype(str)
-                .replace({"": "[unknown species]", "nan": "[unknown species]"})
-            )
-            sel_sp["__species"] = (
-                sel_sp[species_col]
-                .astype(str)
-                .replace({"": "[unknown species]", "nan": "[unknown species]"})
-            )
+            work_sp["__species"] = _clean_group_labels(work_sp[species_col], "[unknown species]")
+            sel_sp["__species"] = _clean_group_labels(sel_sp[species_col], "[unknown species]")
 
             avail_sp = (
                 work_sp.groupby(["__species", "__bin"], dropna=False)
@@ -1563,9 +1659,23 @@ def _strategy_preview_matrix(
                 .reindex(index=avail_sp.index, columns=band_cols, fill_value=0)
             )
 
-            species_order = sel_sp_tab.sum(axis=1).sort_values(ascending=False).index.tolist()
+            row_available = avail_sp.sum(axis=1)
+            keep = row_available > 0
+            avail_sp = avail_sp.loc[keep]
+            sel_sp_tab = sel_sp_tab.loc[keep]
 
-            for sp in species_order[:max_rows]:
+            row_meta = pd.DataFrame({
+                "selected": sel_sp_tab.sum(axis=1),
+                "available": avail_sp.sum(axis=1),
+                "label": avail_sp.index.astype(str),
+            }, index=avail_sp.index)
+
+            species_order = row_meta.sort_values(
+                ["selected", "available", "label"],
+                ascending=[False, False, True]
+            ).index.tolist()
+
+            for sp in species_order:
                 row = {}
                 for i, lab in enumerate(labels):
                     row[lab] = f"{int(sel_sp_tab.loc[sp, i])}/{int(avail_sp.loc[sp, i])}"
@@ -1577,7 +1687,7 @@ def _strategy_preview_matrix(
             index=[r[0] for r in rows],
         )
         preview.index.name = "Selection"
-        return preview, metrics
+        return _finalise_preview_table(preview, fallback_label="[unknown selection]"), metrics
 
     if balance == "all" and goal in ("find_likely_mistakes", "review_strongest"):
         work = df_in.copy()
@@ -1594,7 +1704,7 @@ def _strategy_preview_matrix(
             preview[lab] = [f"{int(sel.get(i, 0))}/{int(avail.get(i, 0))}"]
         preview["Total"] = [f"{len(selected_df)}/{len(df_in)}"]
         preview.index.name = "Selection"
-        return preview, metrics
+        return _finalise_preview_table(preview, fallback_label="All clips"), metrics
 
     if goal in ("find_likely_mistakes", "review_strongest") and balance != "all":
         work = df_in.copy()
@@ -1620,14 +1730,24 @@ def _strategy_preview_matrix(
         avail = avail.reindex(columns=band_cols, fill_value=0)
         sel = sel.reindex(index=avail.index, columns=band_cols, fill_value=0)
 
-        row_order = sel.sum(axis=1).sort_values(ascending=False).index.tolist()
+        row_available = avail.sum(axis=1)
+        keep = row_available > 0
+        avail = avail.loc[keep]
+        sel = sel.loc[keep]
+
+        row_meta = pd.DataFrame({
+            "selected": sel.sum(axis=1),
+            "available": avail.sum(axis=1),
+            "label": avail.index.astype(str),
+        }, index=avail.index)
+
+        row_order = row_meta.sort_values(
+            ["selected", "available", "label"],
+            ascending=[False, False, True]
+        ).index.tolist()
+
         avail = avail.reindex(row_order)
         sel = sel.reindex(row_order)
-
-        if len(avail) > max_rows:
-            top_idx = avail.index[:max_rows]
-            avail = avail.loc[top_idx]
-            sel = sel.loc[top_idx]
 
         labels = _confidence_band_labels(n_bins)
         preview = pd.DataFrame(index=avail.index)
@@ -1643,7 +1763,7 @@ def _strategy_preview_matrix(
             for parent_name in avail.index
         ]
         preview.index.name = _strategy_parent_label(balance)
-        return preview, metrics
+        return _finalise_preview_table(preview, fallback_label=f"[unknown {_strategy_parent_label(balance).lower()}]"), metrics
 
     if balance == "all":
         preview = pd.DataFrame({
@@ -1652,7 +1772,7 @@ def _strategy_preview_matrix(
             "selected %": [round(100.0 * len(selected_df) / max(1, len(df_in)), 1)],
         }, index=["All clips"])
         preview.index.name = "Selection"
-        return preview, metrics
+        return _finalise_preview_table(preview, fallback_label="All clips"), metrics
 
     if "confidence" not in balance:
         parent = _strategy_group_series(df_in, balance).astype(str)
@@ -1669,9 +1789,10 @@ def _strategy_preview_matrix(
             (100.0 * preview["selected"] / preview["available"]).round(1),
             0.0,
         )
-        preview = preview.sort_values(["selected", "available"], ascending=[False, False]).head(max_rows)
+        preview = preview.loc[preview["available"] > 0]
+        preview = preview.sort_values(["selected", "available"], ascending=[False, False])
         preview.index.name = _strategy_parent_label(balance)
-        return preview, metrics
+        return _finalise_preview_table(preview, fallback_label=f"[unknown {_strategy_parent_label(balance).lower()}]"), metrics
 
     work = _build_strategy_strata(df_in.copy(), balance, n_bins)
     work["__parent"] = work["__strategy_parent"].astype(str)
@@ -1696,14 +1817,24 @@ def _strategy_preview_matrix(
     avail = avail.reindex(columns=band_cols, fill_value=0)
     sel = sel.reindex(index=avail.index, columns=band_cols, fill_value=0)
 
-    row_order = sel.sum(axis=1).sort_values(ascending=False).index.tolist()
+    row_available = avail.sum(axis=1)
+    keep = row_available > 0
+    avail = avail.loc[keep]
+    sel = sel.loc[keep]
+
+    row_meta = pd.DataFrame({
+        "selected": sel.sum(axis=1),
+        "available": avail.sum(axis=1),
+        "label": avail.index.astype(str),
+    }, index=avail.index)
+
+    row_order = row_meta.sort_values(
+        ["selected", "available", "label"],
+        ascending=[False, False, True]
+    ).index.tolist()
+
     avail = avail.reindex(row_order)
     sel = sel.reindex(row_order)
-
-    if len(avail) > max_rows:
-        top_idx = avail.index[:max_rows]
-        avail = avail.loc[top_idx]
-        sel = sel.loc[top_idx]
 
     labels = _confidence_band_labels(n_bins)
     preview = pd.DataFrame(index=avail.index)
@@ -1720,7 +1851,7 @@ def _strategy_preview_matrix(
         for parent_name in avail.index
     ]
     preview.index.name = _strategy_parent_label(balance)
-    return preview, metrics
+    return _finalise_preview_table(preview, fallback_label=f"[unknown {_strategy_parent_label(balance).lower()}]"), metrics
 
 
 def _preview_display_df(preview_df: pd.DataFrame) -> pd.DataFrame:
@@ -1729,6 +1860,16 @@ def _preview_display_df(preview_df: pd.DataFrame) -> pd.DataFrame:
     out = preview_df.reset_index()
     if out.columns[0] == "index":
         out = out.rename(columns={"index": preview_df.index.name or "Group"})
+    if out.columns.size > 0:
+        first_col = out.columns[0]
+        out[first_col] = (
+            out[first_col]
+            .astype(str)
+            .replace({"nan": "", "None": "", "<NA>": ""})
+            .fillna("")
+            .str.strip()
+            .replace({"": "[unknown]"})
+        )
     return out
 
 
@@ -1768,6 +1909,24 @@ def _render_strategy_summary_bar(df: pd.DataFrame):
         st.markdown("<div style='height:0.35rem'></div>", unsafe_allow_html=True)
         if st.button("Change strategy", key="open_validate_strategy_modal", width="stretch"):
             st.session_state["validate_strategy_modal_open"] = True
+
+
+def _compact_preview_caption(goal: str, balance: str) -> str:
+    if goal in ("find_likely_mistakes", "review_strongest"):
+        if balance == "all":
+            return "Preview by confidence band for the selected review set."
+        return "Preview by group. Each row shows selected versus available."
+    if goal == "equal_allocation":
+        return "Preview by confidence band. Each cell shows selected versus available."
+    if "confidence" in balance:
+        return "Preview by group and confidence band. Each cell shows selected versus available."
+    return "Preview by group. Values show selected clips out of the total available."
+
+
+def _preview_height_for_rows(n_rows: int) -> int:
+    base = 44
+    per_row = 32
+    return max(180, min(420, base + per_row * int(max(1, n_rows))))
 
 
 def _commit_card(
@@ -1881,6 +2040,8 @@ def _init_strategy_state():
         "validate_strategy_modal_open": False,
         "validate_strategy_dont_auto_show": False,
         "validate_strategy_prompt_seen": False,
+        "validate_strategy_preset_label": "Representative sample",
+        "_validate_strategy_last_preset_applied": "",
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -1942,7 +2103,6 @@ def _render_pills(gdf: pd.DataFrame):
     pills_html += "</div>"
     st.markdown(pills_html, unsafe_allow_html=True)
 
-
 def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None:
     _init_filter_state()
     _init_strategy_state()
@@ -1989,21 +2149,54 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
         def _strategy_dialog():
             st.caption("Choose how clips should be selected for this review session.")
 
-            goal_map = {
-                "Representative sample": "representative_sample",
-                "Find likely mistakes": "find_likely_mistakes",
-                "Review strongest detections": "review_strongest",
-                "Custom stratified plan": "custom_stratified",
-                "Equal allocation": "equal_allocation",
-            }
+            presets = _strategy_presets(len(df_all))
+            preset_labels = list(presets.keys())
 
-            current_goal = str(st.session_state.get("validate_strategy_goal", "representative_sample"))
-            goal_label = st.radio(
-                "1. What do you want to review?",
-                options=list(goal_map.keys()),
-                index=list(goal_map.values()).index(current_goal) if current_goal in goal_map.values() else 0,
+            current_goal_for_preset = str(st.session_state.get("validate_strategy_goal", "representative_sample"))
+            current_preset = str(st.session_state.get("validate_strategy_preset_label", "Representative sample"))
+            if current_preset not in preset_labels:
+                current_preset = "Representative sample"
+
+            preset_label = st.radio(
+                "Review preset",
+                options=preset_labels,
+                index=preset_labels.index(current_preset) if current_preset in preset_labels else 0,
+                horizontal=True,
             )
-            selected_goal = goal_map[goal_label]
+            st.session_state["validate_strategy_preset_label"] = preset_label
+            _apply_strategy_preset_if_requested(len(df_all), preset_label)
+
+            st.markdown(
+                f"""
+                <div style="border:1px solid #e5e7eb; border-radius:0.9rem; padding:0.8rem 0.95rem; background:#f9fafb; margin-bottom:0.8rem;">
+                  <div style="font-size:0.92rem; color:#111827; font-weight:600; margin-bottom:0.2rem;">{preset_label}</div>
+                  <div style="font-size:0.84rem; color:#4b5563;">{presets[preset_label]['description']}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            if preset_label == "Custom":
+                goal_map = {
+                    "Representative sample": "representative_sample",
+                    "Find likely mistakes": "find_likely_mistakes",
+                    "Review strongest detections": "review_strongest",
+                    "Custom stratified plan": "custom_stratified",
+                    "Equal allocation": "equal_allocation",
+                }
+
+                current_goal = str(st.session_state.get("validate_strategy_goal", "representative_sample"))
+                if current_goal not in goal_map.values():
+                    current_goal = "representative_sample"
+
+                goal_label = st.selectbox(
+                    "Review goal",
+                    options=list(goal_map.keys()),
+                    index=list(goal_map.values()).index(current_goal),
+                )
+                selected_goal = goal_map[goal_label]
+            else:
+                selected_goal = str(st.session_state.get("validate_strategy_goal", current_goal_for_preset))
 
             default_mode, default_value = _strategy_defaults_for_goal(selected_goal, len(df_all))
             balance_label_map = _strategy_balance_options(df_all, selected_goal)
@@ -2014,43 +2207,42 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                 current_balance = next(iter(balance_label_map.keys()))
             current_balance_label = balance_label_map[current_balance]
 
-            balance_label = st.radio(
-                "2. Split the review across",
-                options=list(balance_label_map.values()),
-                index=list(balance_label_map.values()).index(current_balance_label),
-                horizontal=True,
-            )
-            selected_balance = balance_inv[balance_label]
+            primary_left, primary_right = st.columns([1.2, 1.0])
 
-            if selected_goal == "custom_stratified":
-                mode_map = {
-                    "Total clips": "total_clips",
-                    "Clips per group": "per_group_clips",
-                    "% per group": "per_group_percent",
-                }
-                current_mode = str(st.session_state.get("validate_strategy_target_mode", default_mode))
-                if current_mode not in mode_map.values():
-                    current_mode = default_mode
-                mode_label = st.radio(
-                    "3. Target mode",
-                    options=list(mode_map.keys()),
-                    index=list(mode_map.values()).index(current_mode),
-                    horizontal=True,
+            with primary_left:
+                balance_label = st.selectbox(
+                    "Balance across",
+                    options=list(balance_label_map.values()),
+                    index=list(balance_label_map.values()).index(current_balance_label),
                 )
-                target_mode = mode_map[mode_label]
-            else:
-                target_mode = "total_clips"
+                selected_balance = balance_inv[balance_label]
 
-            stored_target_value = int(st.session_state.get("validate_strategy_target_value", default_value))
-            target_value_default = _target_value_for_widget(
-                selected_goal,
-                target_mode,
-                stored_target_value,
-                len(df_all),
-            )
+                if selected_goal == "custom_stratified":
+                    mode_map = {
+                        "Total clips": "total_clips",
+                        "Clips per group": "per_group_clips",
+                        "% per group": "per_group_percent",
+                    }
+                    current_mode = str(st.session_state.get("validate_strategy_target_mode", default_mode))
+                    if current_mode not in mode_map.values():
+                        current_mode = default_mode
+                    mode_label = st.selectbox(
+                        "How many clips",
+                        options=list(mode_map.keys()),
+                        index=list(mode_map.values()).index(current_mode),
+                    )
+                    target_mode = mode_map[mode_label]
+                else:
+                    target_mode = "total_clips"
 
-            control_col1, control_col2, control_col3 = st.columns([1.35, 1.0, 0.9])
-            with control_col1:
+                stored_target_value = int(st.session_state.get("validate_strategy_target_value", default_value))
+                target_value_default = _target_value_for_widget(
+                    selected_goal,
+                    target_mode,
+                    stored_target_value,
+                    len(df_all),
+                )
+
                 label = {
                     "total_clips": "Total clips to review",
                     "per_group_clips": "Clips per group",
@@ -2064,23 +2256,58 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                     value=int(target_value_default),
                     step=1,
                 )
-            with control_col2:
-                bins_value = st.number_input(
-                    "Confidence bands",
-                    min_value=2,
-                    max_value=20,
-                    value=int(st.session_state.get("validate_strategy_bins", 5)),
-                    step=1,
-                    disabled=False,
+
+            with primary_right:
+                review_summary = _strategy_review_summary_text(
+                    df_all,
+                    selected_goal,
+                    selected_balance,
+                    target_mode,
+                    int(target_value),
+                    int(st.session_state.get("validate_strategy_bins", 5)),
                 )
-            with control_col3:
-                seed_value = st.number_input(
-                    "Random seed",
-                    min_value=0,
-                    max_value=100000,
-                    value=int(st.session_state.get("validate_strategy_seed", 42)),
-                    step=1,
+
+                st.markdown(
+                    f"""
+                    <div style="border:1px solid #e5e7eb; border-radius:0.9rem; padding:0.85rem 0.95rem; background:white;">
+                      <div style="font-size:0.72rem; text-transform:uppercase; letter-spacing:0.08em; color:#6b7280; margin-bottom:0.28rem;">
+                        Session summary
+                      </div>
+                      <div style="font-size:0.98rem; font-weight:600; color:#111827; margin-bottom:0.35rem;">
+                        {_strategy_goal_label(selected_goal)} across {_strategy_balance_label(selected_balance, df_all, selected_goal)}
+                      </div>
+                      <div style="font-size:0.84rem; color:#4b5563; line-height:1.45;">
+                        {review_summary}
+                      </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
                 )
+
+            needs_bands = (selected_goal == "equal_allocation") or ("confidence" in selected_balance) or (preset_label == "Custom")
+            with st.expander("Advanced options", expanded=False):
+                adv1, adv2 = st.columns(2)
+                with adv1:
+                    bins_value = st.number_input(
+                        "Confidence bands to use",
+                        min_value=2,
+                        max_value=20,
+                        value=int(st.session_state.get("validate_strategy_bins", 5)),
+                        step=1,
+                        disabled=not needs_bands,
+                    )
+                with adv2:
+                    seed_value = st.number_input(
+                        "Random seed",
+                        min_value=0,
+                        max_value=100000,
+                        value=int(st.session_state.get("validate_strategy_seed", 42)),
+                        step=1,
+                    )
+            if not needs_bands:
+                bins_value = int(st.session_state.get("validate_strategy_bins", 5))
+            if "seed_value" not in locals():
+                seed_value = int(st.session_state.get("validate_strategy_seed", 42))
 
             preview_df, preview_metrics = _strategy_preview_matrix(
                 df_all,
@@ -2090,57 +2317,28 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                 int(target_value),
                 int(bins_value),
                 int(seed_value),
-                max_rows=12,
-            )
-            review_summary = _strategy_review_summary_text(
-                df_all,
-                selected_goal,
-                selected_balance,
-                target_mode,
-                int(target_value),
-                int(bins_value),
+                max_rows=8,
             )
 
-            left, right = st.columns([2.45, 0.75], gap="medium")
-
-            with left:
-                st.markdown(
-                    f"""
-                    <div style="border:1px solid #e5e7eb; border-radius:1rem; padding:0.9rem 1rem; background:#f9fafb; margin-bottom:0.65rem;">
-                      <div style="font-size:0.72rem; text-transform:uppercase; letter-spacing:0.08em; color:#6b7280; margin-bottom:0.3rem;">
-                        Review summary
-                      </div>
-                      <div style="font-size:1rem; font-weight:600; color:#111827; margin-bottom:0.35rem;">
-                        {_strategy_goal_label(selected_goal)} across {_strategy_balance_label(selected_balance, df_all, selected_goal)}
-                      </div>
-                      <div style="font-size:0.85rem; color:#4b5563; line-height:1.45;">
-                        {review_summary}
-                      </div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-
-                if selected_goal in ("find_likely_mistakes", "review_strongest"):
-                    if selected_balance == "all":
-                        st.caption("Preview: confidence-band breakdown for the selected lowest-confidence or highest-confidence clips.")
-                    else:
-                        st.caption("Preview: each cell shows selected / available for that group and confidence band.")
-                elif selected_goal == "equal_allocation":
-                    st.caption("Preview: each cell shows selected / available for the confidence bands only.")
-                elif "confidence" in selected_balance:
-                    st.caption("Sampling preview: each cell shows selected / available for that group and confidence band.")
-                else:
-                    st.caption("Sampling preview: values show selected clips out of the total available.")
-
-                st.dataframe(_preview_display_df(preview_df), width="stretch", height=360)
-
-            with right:
-                st.markdown("<div style='height:0.15rem'></div>", unsafe_allow_html=True)
+            metric_cols = st.columns(4)
+            with metric_cols[0]:
                 st.metric("Available", int(preview_metrics.get("available", 0)))
+            with metric_cols[1]:
                 st.metric("Selected", int(preview_metrics.get("selected", 0)))
-                st.metric("Strata", int(preview_metrics.get("strata", 0)))
-                st.metric("Sparse strata", int(preview_metrics.get("undersized", 0)))
+            with metric_cols[2]:
+                st.metric("Groups / strata", int(preview_metrics.get("strata", 0)))
+            with metric_cols[3]:
+                st.metric("Could not meet target", int(preview_metrics.get("undersized", 0)))
+
+            st.caption(_compact_preview_caption(selected_goal, selected_balance))
+            if not preview_df.empty:
+                st.dataframe(
+                    _preview_display_df(preview_df),
+                    width="stretch",
+                    height=min(520, 44 + 32 * max(1, len(preview_df))),
+                )
+            else:
+                st.write("No preview available for the current strategy.")
 
             dont_show = st.checkbox(
                 "Don’t show this automatically again for me",
@@ -2341,7 +2539,7 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
     goal, balance, target_mode, target_value, bins, seed = _effective_strategy_settings(len(df_candidates), df_all)
 
     strategy_preview_df, strategy_preview_metrics = _strategy_preview_matrix(
-        df_candidates, goal, balance, target_mode, target_value, bins, seed, max_rows=12
+        df_candidates, goal, balance, target_mode, target_value, bins, seed, max_rows=8
     )
 
     df_view, strategy_meta = _select_by_strategy(df_candidates, df_all)
@@ -2406,9 +2604,13 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
             )
 
         with st.expander("Sampling preview for the active strategy", expanded=False):
-            st.caption("Each cell shows selected / available for the active strategy.")
+            st.caption(_compact_preview_caption(goal, balance))
             if not strategy_preview_df.empty:
-                st.dataframe(_preview_display_df(strategy_preview_df), width="stretch", height=320)
+                st.dataframe(
+                    _preview_display_df(strategy_preview_df),
+                    width="stretch",
+                    height=min(520, 44 + 32 * max(1, len(strategy_preview_df))),
+                )
             else:
                 st.write("No preview available for the current strategy.")
 

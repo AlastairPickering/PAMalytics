@@ -555,7 +555,7 @@ TRASH_DIR = PROJECTS_ROOT / ".trash"
 TRASH_DIR.mkdir(parents=True, exist_ok=True)
 
 def _trash_target_name(p: Path) -> Path:
-    ts = _dt.utcnow().strftime("%Y%m%d-%H%M%S")
+    ts = _dt.now(dt_timezone.utc).strftime("%Y%m%d-%H%M%S")
     return TRASH_DIR / f"{p.name}__{ts}"
 
 def move_project_to_trash(project_folder: Path) -> Path:
@@ -630,7 +630,6 @@ def _to_canonical_names(df_in: "object") -> "object":
             df["detection_id"] = ""
     return df
 
-# Build analysis dataset
 def build_analysis_dataset(proj_path: Path, use_stem_fallback: bool = True):
     """
     Returns (df, notes) where df contains all original columns plus the canonical PAMalytics columns.
@@ -701,7 +700,10 @@ def build_analysis_dataset(proj_path: Path, use_stem_fallback: bool = True):
 
     c_prob = _first(df, "detection_probability", "class_prob", "probability", "score", "det_prob")
     if c_prob is not None:
-        df["detection_probability"] = pd.to_numeric(c_prob if isinstance(c_prob, pd.Series) else df[c_prob], errors="coerce")
+        df["detection_probability"] = pd.to_numeric(
+            c_prob if isinstance(c_prob, pd.Series) else df[c_prob],
+            errors="coerce"
+        )
 
     c_existing_path = _first(df, "file_path", "path", "audio_path")
     if c_existing_path is not None:
@@ -744,6 +746,25 @@ def build_analysis_dataset(proj_path: Path, use_stem_fallback: bool = True):
             df = normalise_schema(df, build_detection_id=True)
         except Exception:
             pass
+
+    # Parse date_time for dashboard filtering / plotting
+    c_date_time = _first(df, "date_time", "datetime", "timestamp_utc")
+    if c_date_time is not None:
+        try:
+            if c_date_time == "timestamp_utc":
+                dt = pd.to_datetime(df[c_date_time], errors="coerce", utc=True)
+            elif c_date_time == "datetime":
+                dt = pd.to_datetime(df[c_date_time], errors="coerce", dayfirst=True)
+            else:
+                dt = pd.to_datetime(df[c_date_time], errors="coerce")
+
+            df["date_time"] = dt
+
+            if dt.notna().any():
+                df["date"] = dt.dt.date.astype(str)
+                df["hour"] = dt.dt.hour
+        except Exception:
+            notes.append("Could not parse date_time values for dashboard plots.")
 
     # Keep stored project-relative paths for portability, but provide an absolute path for playback.
     if "file_path" in df.columns:
@@ -894,13 +915,12 @@ def path_picker(label: str, state_key: str) -> Optional[_P]:
     c_txt, c_btn = st.columns([9, 1])
 
     c_txt.text_input(
-        "",
+        f"{label} path",
         key=state_key,
         label_visibility="collapsed",
         placeholder=(r"C:\path\to\folder" if _os.name == "nt" else "/path/to/folder"),
     )
 
-    # set session_state[state_key] safely
     c_btn.button(
         "Browse…",
         key=f"{state_key}__browse",
@@ -1467,10 +1487,13 @@ def view_import_results() -> None:
         c_txt, c_btn = st.columns([9, 1])
         widget_key = f"{state_key}__widget"
         current_val = st.session_state[state_key]
+
         new_text = c_txt.text_input(
-            "", value=current_val, key=widget_key,
+            f"{label} path",
+            value=current_val,
+            key=widget_key,
             label_visibility="collapsed",
-            placeholder="/path/to/results.(csv|tsv|parquet)"
+            placeholder="/path/to/results.(csv|tsv|parquet)",
         )
         if new_text != current_val:
             st.session_state[state_key] = new_text
@@ -1485,7 +1508,9 @@ def view_import_results() -> None:
                 else:
                     import tkinter as tk
                     from tkinter import filedialog
-                    root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
+                    root = tk.Tk()
+                    root.withdraw()
+                    root.attributes("-topmost", True)
                     chosen = filedialog.askopenfilename(
                         title="Select a results file",
                         filetypes=[("Tabular", "*.csv *.tsv *.parquet"), ("All files", "*.*")]
@@ -1496,6 +1521,7 @@ def view_import_results() -> None:
                     st.rerun()
             except Exception:
                 pass
+
         v = st.session_state[state_key].strip()
         return _P(v) if v else None
 
