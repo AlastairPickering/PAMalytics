@@ -609,24 +609,6 @@ def _plotly_spectrogram_figure(
     ymin: float,
     ymax: float,
 ) -> go.Figure:
-    peak_grid = np.tile(frame_peak_freq_hz, (len(freqs_hz), 1))
-    centroid_grid = np.tile(frame_centroid_hz, (len(freqs_hz), 1))
-    bandwidth_grid = np.tile(frame_bandwidth_hz, (len(freqs_hz), 1))
-    rolloff_grid = np.tile(frame_rolloff_hz, (len(freqs_hz), 1))
-    flatness_grid = np.tile(frame_flatness, (len(freqs_hz), 1))
-    rms_grid = np.tile(frame_rms, (len(freqs_hz), 1))
-    zcr_grid = np.tile(frame_zcr, (len(freqs_hz), 1))
-
-    customdata = np.dstack([
-        peak_grid,
-        centroid_grid,
-        bandwidth_grid,
-        rolloff_grid,
-        flatness_grid,
-        rms_grid,
-        zcr_grid,
-    ])
-
     zmax = float(np.nanmax(S_dB)) if np.size(S_dB) else 0.0
     zmin = zmax - 90.0
 
@@ -637,24 +619,52 @@ def _plotly_spectrogram_figure(
             z=S_dB,
             x=times,
             y=freqs_hz,
-            customdata=customdata,
             colorscale="Viridis",
             zmin=zmin,
             zmax=zmax,
             colorbar=dict(title="dB"),
             hovertemplate=(
+                "<b>Cursor</b><br>"
                 "Time: %{x:.3f} s<br>"
                 "Frequency: %{y:.0f} Hz<br>"
-                "Level: %{z:.1f} dB<br>"
-                "Frame peak: %{customdata[0]:.0f} Hz<br>"
-                "Centroid: %{customdata[1]:.0f} Hz<br>"
-                "Bandwidth: %{customdata[2]:.0f} Hz<br>"
-                "Rolloff (85%): %{customdata[3]:.0f} Hz<br>"
-                "Flatness: %{customdata[4]:.4f}<br>"
-                "RMS: %{customdata[5]:.5f}<br>"
-                "ZCR: %{customdata[6]:.5f}"
+                "Level: %{z:.1f} dB"
                 "<extra></extra>"
             ),
+        )
+    )
+
+    frame_customdata = np.column_stack([
+        frame_peak_freq_hz,
+        frame_centroid_hz,
+        frame_bandwidth_hz,
+        frame_rolloff_hz,
+        frame_flatness,
+        frame_rms,
+        frame_zcr,
+    ])
+
+    hover_y = np.full(len(times), ymin + 0.5 * (ymax - ymin), dtype=float)
+
+    fig.add_trace(
+        go.Scatter(
+            x=times,
+            y=hover_y,
+            mode="markers",
+            marker=dict(size=16, opacity=0),
+            customdata=frame_customdata,
+            hovertemplate=(
+                "<b>Frame summary</b><br>"
+                "Time: %{x:.3f} s<br>"
+                "Frame peak frequency: %{customdata[0]:.0f} Hz<br>"
+                "Frame centroid: %{customdata[1]:.0f} Hz<br>"
+                "Frame bandwidth: %{customdata[2]:.0f} Hz<br>"
+                "Frame rolloff (85%): %{customdata[3]:.0f} Hz<br>"
+                "Frame flatness: %{customdata[4]:.4f}<br>"
+                "Frame RMS: %{customdata[5]:.5f}<br>"
+                "Frame ZCR: %{customdata[6]:.5f}"
+                "<extra></extra>"
+            ),
+            showlegend=False,
         )
     )
 
@@ -709,6 +719,7 @@ def _plotly_spectrogram_figure(
     )
 
     return fig
+
 
 def _render_interactive_validate_dialog(
     proj_root: Path,
