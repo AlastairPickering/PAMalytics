@@ -19,3 +19,4 @@ tqdm>=4.66
 pymc>=5.0
 arviz>=0.16
 librosa
+plotly
