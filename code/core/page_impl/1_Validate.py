@@ -13,6 +13,7 @@ import streamlit as st
 import librosa
 import matplotlib.pyplot as plt
 import soundfile as sf
+import plotly.graph_objects as go
 from matplotlib.ticker import FuncFormatter
 from matplotlib.patches import Rectangle
 
@@ -498,6 +499,322 @@ def _get_validate_n_fft(sr: int) -> int:
     if bool(st.session_state.get("validate_use_fft_override", False)):
         return int(st.session_state.get("validate_fft_size", 4096))
     return 8192 if sr > 48_000 else 4096
+
+def _match_frame_count(x: np.ndarray, n_frames: int) -> np.ndarray:
+    arr = np.asarray(x, dtype=float).reshape(-1)
+    if arr.size == n_frames:
+        return arr
+    if arr.size == 0:
+        return np.full(n_frames, np.nan, dtype=float)
+    if arr.size > n_frames:
+        return arr[:n_frames]
+    pad = np.full(n_frames - arr.size, arr[-1], dtype=float)
+    return np.concatenate([arr, pad])
+
+def _compute_spectrogram_data(
+    y: np.ndarray,
+    sr: int,
+    n_fft: int,
+    hop_length: int,
+) -> Dict[str, np.ndarray]:
+    out = {
+        "S_power": np.zeros((2, 2), dtype=float),
+        "S_dB": np.zeros((2, 2), dtype=float),
+        "times": np.zeros(2, dtype=float),
+        "freqs_hz": np.zeros(2, dtype=float),
+        "frame_peak_freq_hz": np.zeros(2, dtype=float),
+        "frame_centroid_hz": np.zeros(2, dtype=float),
+        "frame_bandwidth_hz": np.zeros(2, dtype=float),
+        "frame_rolloff_hz": np.zeros(2, dtype=float),
+        "frame_flatness": np.zeros(2, dtype=float),
+        "frame_rms": np.zeros(2, dtype=float),
+        "frame_zcr": np.zeros(2, dtype=float),
+    }
+
+    if y.size == 0 or sr <= 0:
+        return out
+
+    D = librosa.stft(y=y, n_fft=int(n_fft), hop_length=int(hop_length))
+    S_power = np.abs(D) ** 2
+    if S_power.size == 0:
+        return out
+
+    S_mag = np.sqrt(S_power)
+    S_dB = librosa.power_to_db(S_power, ref=np.max, top_db=90)
+    times = librosa.frames_to_time(np.arange(S_power.shape[1]), sr=sr, hop_length=hop_length)
+    freqs_hz = librosa.fft_frequencies(sr=sr, n_fft=n_fft)
+    n_frames = S_power.shape[1]
+
+    frame_peak_idx = np.argmax(S_power, axis=0)
+    frame_peak_freq_hz = freqs_hz[frame_peak_idx]
+
+    denom = S_power.sum(axis=0)
+    frame_centroid_hz = np.full(n_frames, np.nan, dtype=float)
+    valid = denom > 0
+    if np.any(valid):
+        frame_centroid_hz[valid] = (freqs_hz[:, None] * S_power)[:, valid].sum(axis=0) / denom[valid]
+
+    try:
+        frame_bandwidth_hz = librosa.feature.spectral_bandwidth(S=S_mag, sr=sr)[0]
+    except Exception:
+        frame_bandwidth_hz = np.full(n_frames, np.nan, dtype=float)
+
+    try:
+        frame_rolloff_hz = librosa.feature.spectral_rolloff(S=S_mag, sr=sr, roll_percent=0.85)[0]
+    except Exception:
+        frame_rolloff_hz = np.full(n_frames, np.nan, dtype=float)
+
+    try:
+        frame_flatness = librosa.feature.spectral_flatness(S=S_mag)[0]
+    except Exception:
+        frame_flatness = np.full(n_frames, np.nan, dtype=float)
+
+    try:
+        frame_rms = librosa.feature.rms(y=y, frame_length=n_fft, hop_length=hop_length, center=True)[0]
+    except Exception:
+        frame_rms = np.full(n_frames, np.nan, dtype=float)
+
+    try:
+        frame_zcr = librosa.feature.zero_crossing_rate(y, frame_length=n_fft, hop_length=hop_length, center=True)[0]
+    except Exception:
+        frame_zcr = np.full(n_frames, np.nan, dtype=float)
+
+    out["S_power"] = S_power
+    out["S_dB"] = S_dB
+    out["times"] = times
+    out["freqs_hz"] = freqs_hz
+    out["frame_peak_freq_hz"] = _match_frame_count(frame_peak_freq_hz, n_frames)
+    out["frame_centroid_hz"] = _match_frame_count(frame_centroid_hz, n_frames)
+    out["frame_bandwidth_hz"] = _match_frame_count(frame_bandwidth_hz, n_frames)
+    out["frame_rolloff_hz"] = _match_frame_count(frame_rolloff_hz, n_frames)
+    out["frame_flatness"] = _match_frame_count(frame_flatness, n_frames)
+    out["frame_rms"] = _match_frame_count(frame_rms, n_frames)
+    out["frame_zcr"] = _match_frame_count(frame_zcr, n_frames)
+    return out
+
+def _plotly_spectrogram_figure(
+    S_dB: np.ndarray,
+    times: np.ndarray,
+    freqs_hz: np.ndarray,
+    frame_peak_freq_hz: np.ndarray,
+    frame_centroid_hz: np.ndarray,
+    frame_bandwidth_hz: np.ndarray,
+    frame_rolloff_hz: np.ndarray,
+    frame_flatness: np.ndarray,
+    frame_rms: np.ndarray,
+    frame_zcr: np.ndarray,
+    boxes: List[Dict[str, float]],
+    xmin: float,
+    xmax: float,
+    ymin: float,
+    ymax: float,
+) -> go.Figure:
+    peak_grid = np.tile(frame_peak_freq_hz, (len(freqs_hz), 1))
+    centroid_grid = np.tile(frame_centroid_hz, (len(freqs_hz), 1))
+    bandwidth_grid = np.tile(frame_bandwidth_hz, (len(freqs_hz), 1))
+    rolloff_grid = np.tile(frame_rolloff_hz, (len(freqs_hz), 1))
+    flatness_grid = np.tile(frame_flatness, (len(freqs_hz), 1))
+    rms_grid = np.tile(frame_rms, (len(freqs_hz), 1))
+    zcr_grid = np.tile(frame_zcr, (len(freqs_hz), 1))
+
+    customdata = np.dstack([
+        peak_grid,
+        centroid_grid,
+        bandwidth_grid,
+        rolloff_grid,
+        flatness_grid,
+        rms_grid,
+        zcr_grid,
+    ])
+
+    zmax = float(np.nanmax(S_dB)) if np.size(S_dB) else 0.0
+    zmin = zmax - 90.0
+
+    fig = go.Figure()
+
+    fig.add_trace(
+        go.Heatmap(
+            z=S_dB,
+            x=times,
+            y=freqs_hz,
+            customdata=customdata,
+            colorscale="Viridis",
+            zmin=zmin,
+            zmax=zmax,
+            colorbar=dict(title="dB"),
+            hovertemplate=(
+                "Time: %{x:.3f} s<br>"
+                "Frequency: %{y:.0f} Hz<br>"
+                "Level: %{z:.1f} dB<br>"
+                "Frame peak: %{customdata[0]:.0f} Hz<br>"
+                "Centroid: %{customdata[1]:.0f} Hz<br>"
+                "Bandwidth: %{customdata[2]:.0f} Hz<br>"
+                "Rolloff (85%): %{customdata[3]:.0f} Hz<br>"
+                "Flatness: %{customdata[4]:.4f}<br>"
+                "RMS: %{customdata[5]:.5f}<br>"
+                "ZCR: %{customdata[6]:.5f}"
+                "<extra></extra>"
+            ),
+        )
+    )
+
+    for b in boxes:
+        x0 = float(b["start_s"])
+        x1 = float(b["end_s"])
+        low_f = _num(b.get("low_freq"))
+        high_f = _num(b.get("high_freq"))
+        prob = b.get("prob", np.nan)
+
+        y0 = low_f if np.isfinite(low_f) else ymin
+        y1 = high_f if np.isfinite(high_f) and high_f > y0 else ymax
+
+        fig.add_shape(
+            type="rect",
+            x0=x0,
+            x1=x1,
+            y0=y0,
+            y1=y1,
+            line=dict(width=1, color="rgba(255,255,255,0.22)"),
+            fillcolor="rgba(255,255,255,0.08)",
+        )
+
+        if np.isfinite(prob):
+            fig.add_annotation(
+                x=(x0 + x1) * 0.5,
+                y=ymin + 0.88 * (ymax - ymin),
+                text=f"{prob:.2f}",
+                showarrow=False,
+                bgcolor="rgba(0,0,0,0.55)",
+                bordercolor="rgba(255,255,255,0.25)",
+                font=dict(size=11, color="white"),
+            )
+
+    tick_step = 1000 if (ymax - ymin) <= 15000 else 5000
+    tick_vals = np.arange(max(0, int(ymin // 1000) * 1000), int(ymax) + 1, tick_step)
+
+    fig.update_xaxes(title_text="Time (s)", range=[xmin, xmax], fixedrange=True)
+    fig.update_yaxes(
+        title_text="Frequency (kHz)",
+        range=[ymin, ymax],
+        tickvals=tick_vals.tolist(),
+        ticktext=[f"{v/1000:.0f}" for v in tick_vals],
+        fixedrange=True,
+    )
+
+    fig.update_layout(
+        height=560,
+        autosize=False,
+        margin=dict(l=10, r=10, t=10, b=10),
+        hovermode="closest",
+    )
+
+    return fig
+
+def _render_interactive_validate_dialog(
+    proj_root: Path,
+    df_all: pd.DataFrame,
+    grouped,
+    base: str,
+    species_orig: str,
+    lock_freq: bool,
+    fmin_khz: float,
+    fmax_khz: float,
+):
+    gdf_int = grouped.get_group((base, species_orig)).copy()
+    apath_int = _resolve_audio_path(proj_root, gdf_int, df_all)
+
+    if not (apath_int and apath_int.exists()):
+        st.error("Audio not found for the selected card.")
+        return
+
+    try:
+        y_int, sr_int = librosa.load(str(apath_int), sr=None, mono=True)
+    except Exception as e:
+        st.error(f"Audio read error: {e}")
+        return
+
+    boxes_int: List[Dict[str, float]] = []
+    for _, row in gdf_int.iterrows():
+        b = {
+            "start_s": _num(row.get("start_s", row.get("detection_start_s"))),
+            "end_s": _num(row.get("end_s", row.get("detection_end_s"))),
+            "low_freq": _num(row.get("low_freq")),
+            "high_freq": _num(row.get("high_freq")),
+            "prob": _num(row.get("detection_probability")),
+        }
+        if np.isfinite(b["start_s"]) and np.isfinite(b["end_s"]) and b["end_s"] > b["start_s"]:
+            boxes_int.append(b)
+
+    if boxes_int:
+        boxes_int = sorted(
+            boxes_int,
+            key=lambda b: (b["prob"] if np.isfinite(b["prob"]) else -1.0),
+            reverse=True,
+        )[:10]
+
+    n_fft_int = _get_validate_n_fft(sr_int)
+    hop_int = max(1, n_fft_int // 8)
+
+    if lock_freq and (fmax_khz > fmin_khz):
+        ymin_int = max(0.0, float(fmin_khz) * 1000.0)
+        ymax_int = float(fmax_khz) * 1000.0
+        nyq_int = 0.5 * sr_int * 0.98
+        ymax_int = min(ymax_int, nyq_int)
+    else:
+        highs = [b["high_freq"] for b in boxes_int if np.isfinite(b["high_freq"])]
+        lows = [b["low_freq"] for b in boxes_int if np.isfinite(b["low_freq"])]
+        if highs and lows and max(highs) > min(lows):
+            fmin_int, fmax_int = min(lows), max(highs)
+        else:
+            fmin_int, fmax_int = 0.0, 0.5 * sr_int
+        span_int = max(1.0, (fmax_int - fmin_int))
+        pad_int = max(4_000.0, 0.30 * span_int)
+        nyq_int = 0.5 * sr_int * 0.98
+        ymin_int = max(0.0, fmin_int - pad_int)
+        ymax_int = min(nyq_int, fmax_int + pad_int)
+
+    spec_int = _compute_spectrogram_data(
+        y=y_int,
+        sr=sr_int,
+        n_fft=n_fft_int,
+        hop_length=hop_int,
+    )
+
+    S_dB_int = spec_int["S_dB"]
+    times_int = spec_int["times"]
+    freqs_hz_int = spec_int["freqs_hz"]
+    frame_peak_freq_hz_int = spec_int["frame_peak_freq_hz"]
+    frame_centroid_hz_int = spec_int["frame_centroid_hz"]
+    frame_bandwidth_hz_int = spec_int["frame_bandwidth_hz"]
+    frame_rolloff_hz_int = spec_int["frame_rolloff_hz"]
+    frame_flatness_int = spec_int["frame_flatness"]
+    frame_rms_int = spec_int["frame_rms"]
+    frame_zcr_int = spec_int["frame_zcr"]
+
+    dur_int = max(1e-6, len(y_int) / sr_int)
+    tpad_int = dur_int * 0.01
+    xmin_int, xmax_int = 0 - tpad_int, dur_int + tpad_int
+
+    fig_int = _plotly_spectrogram_figure(
+        S_dB=S_dB_int,
+        times=times_int,
+        freqs_hz=freqs_hz_int,
+        frame_peak_freq_hz=frame_peak_freq_hz_int,
+        frame_centroid_hz=frame_centroid_hz_int,
+        frame_bandwidth_hz=frame_bandwidth_hz_int,
+        frame_rolloff_hz=frame_rolloff_hz_int,
+        frame_flatness=frame_flatness_int,
+        frame_rms=frame_rms_int,
+        frame_zcr=frame_zcr_int,
+        boxes=boxes_int,
+        xmin=xmin_int,
+        xmax=xmax_int,
+        ymin=ymin_int,
+        ymax=ymax_int,
+    )
+
+    st.caption(f"{base} • {species_orig}")
+    st.plotly_chart(fig_int, width='stretch', config={"displayModeBar": True})
 
 
 def _acoustic_metrics_for_detection(
@@ -1006,6 +1323,7 @@ def _strategy_shortfall_count(
 
     shortfall = selected < requested
     return int(shortfall.sum())
+
 
 def _confidence_band_edges(n_bins: int) -> np.ndarray:
     n_bins = max(1, int(n_bins))
@@ -1634,7 +1952,6 @@ def _finalise_preview_table(preview: pd.DataFrame, fallback_label: str = "[unkno
 
     return out
 
-
 def _strategy_preview_matrix(
     df_in: pd.DataFrame,
     goal: str,
@@ -2070,6 +2387,7 @@ def _init_filter_state():
         "validate_te_override": 10,
         "validate_use_fft_override": False,
         "validate_fft_size": 4096,
+        "validate_interactive_card": None,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -2149,6 +2467,7 @@ def _render_pills(gdf: pd.DataFrame):
 
     pills_html += "</div>"
     st.markdown(pills_html, unsafe_allow_html=True)
+
 
 def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None:
     _init_filter_state()
@@ -2400,6 +2719,28 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                         st.rerun()
                     elif hasattr(st, "experimental_rerun"):
                         st.experimental_rerun()
+
+        @st.dialog("Interactive spectrogram", width="large")
+        def _interactive_spectrogram_dialog():
+            selected_card = st.session_state.get("validate_interactive_card")
+            if not selected_card:
+                st.write("No card selected.")
+                return
+
+            sel_base, sel_species_orig = selected_card
+            try:
+                _render_interactive_validate_dialog(
+                    proj_root=proj_root,
+                    df_all=df_all,
+                    grouped=grouped,
+                    base=sel_base,
+                    species_orig=sel_species_orig,
+                    lock_freq=lock_freq,
+                    fmin_khz=fmin_khz,
+                    fmax_khz=fmax_khz,
+                )
+            except Exception as e:
+                st.error(f"Interactive spectrogram error: {e}")
 
         if st.session_state.get("validate_strategy_modal_open", False):
             _strategy_dialog()
@@ -2864,6 +3205,14 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                         plt.close(fig)
                     except Exception as e:
                         st.error(f"Spectrogram error: {e}")
+
+                    if st.button(
+                        "Open interactive spectrogram",
+                        key=_safe_widget_key("open_interactive_plotly", base, species_orig),
+                        width="stretch",
+                    ):
+                        st.session_state["validate_interactive_card"] = (base, species_orig)
+                        _interactive_spectrogram_dialog()
 
                     try:
                         y_seg = y
