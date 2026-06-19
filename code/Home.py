@@ -1,5 +1,3 @@
-# code/Home.py
-
 import json
 from dataclasses import dataclass, asdict, field
 from datetime import datetime, timezone as dt_timezone
@@ -27,7 +25,8 @@ except Exception:
     normalise_schema = None  # type: ignore
 
 # Streamlit / UI
-import streamlit as st  # noqa 
+import streamlit as st  # noqa
+
 
 def hide_chrome(hide_sidebar: bool = True, hide_header: bool = True) -> None:
     css = ["<style id='pa-chrome'>"]
@@ -76,26 +75,33 @@ def hide_chrome(hide_sidebar: bool = True, hide_header: bool = True) -> None:
     css += ["</style>"]
     st.markdown("\n".join(css), unsafe_allow_html=True, help=None)
 
+
 def chip(text: str, kind: str = "info") -> str:
-    colours = {"ready":"#16a34a","pending":"#d97706","empty":"#6b7280","error":"#dc2626","info":"#3b82f6"}
+    colours = {"ready": "#16a34a", "pending": "#d97706", "empty": "#6b7280", "error": "#dc2626", "info": "#3b82f6"}
     return f'<span style="display:inline-block;padding:2px 8px;border-radius:999px;background:{colours.get(kind, "#3b82f6")};color:white;font-size:12px">{text}</span>'
+
 
 def _btn(label: str, key: Optional[str] = None) -> bool:
     return st.button(label, key=key or label)
+
 
 def nav_row(left_label: str, left_route: str,
             right_label: Optional[str] = None, right_route: Optional[str] = None,
             key_prefix: str = "nav"):
     c1, c2 = st.columns([1, 1])
     if left_label and c1.button(left_label, key=f"{key_prefix}_left"):
-        st.session_state.route = left_route; st.rerun()
+        st.session_state.route = left_route
+        st.rerun()
     if right_label and c2.button(right_label, key=f"{key_prefix}_right"):
-        st.session_state.route = right_route; st.rerun()
+        st.session_state.route = right_route
+        st.rerun()
+
 
 # Project model
 PROJECTS_ROOT = STUDIO_ROOT / "projects"
 PROJECTS_ROOT.mkdir(parents=True, exist_ok=True)
 AUTH_FILE = STUDIO_ROOT / ".auth.json"
+
 
 @dataclass
 class ProjectManifest:
@@ -109,12 +115,15 @@ class ProjectManifest:
     paths: Optional[dict] = None
     status: Optional[dict] = None
     provenance: Optional[dict] = None
+
     def to_json(self) -> str:
         return json.dumps(asdict(self), indent=2)
+
 
 def _slug(name: str) -> str:
     s = "".join(c if (c.isalnum() or c in "-_") else "_" for c in name.strip())
     return s[:64] or "project"
+
 
 def _default_status() -> Dict[str, str]:
     return {
@@ -124,6 +133,7 @@ def _default_status() -> Dict[str, str]:
         "analysis":        "empty",
         "export":          "empty",
     }
+
 
 def _default_paths(folder: Path) -> Dict[str, str]:
     return {
@@ -135,6 +145,7 @@ def _default_paths(folder: Path) -> Dict[str, str]:
         "logs":            "logs/",
         "workspace":       "workspace/",
     }
+
 
 def create_project(name: str, use_case: str, created_by: Optional[str]) -> Path:
     folder = PROJECTS_ROOT / _slug(name)
@@ -154,22 +165,27 @@ def create_project(name: str, use_case: str, created_by: Optional[str]) -> Path:
     (Path(folder) / "project.json").write_text(manifest.to_json(), encoding="utf-8")
     return Path(folder)
 
+
 def list_projects() -> List[Path]:
     return sorted(
         [p for p in PROJECTS_ROOT.iterdir() if (p / "project.json").exists()],
         key=lambda p: p.stat().st_mtime, reverse=True
     )
 
+
 def load_project(folder: Path) -> dict:
     return json.loads((folder / "project.json").read_text(encoding="utf-8"))
 
+
 def save_project(folder: Path, data: Dict[str, Any]) -> None:
     (folder / "project.json").write_text(json.dumps(data, indent=2), encoding="utf-8")
+
 
 def touch_last_opened(folder: Path) -> None:
     data = load_project(folder)
     data["last_opened"] = datetime.now(dt_timezone.utc).isoformat()
     save_project(folder, data)
+
 
 def set_status(folder: Path, key: str, value: str) -> None:
     data = load_project(folder)
@@ -177,6 +193,7 @@ def set_status(folder: Path, key: str, value: str) -> None:
         data["status"] = _default_status()
     data["status"][key] = value
     save_project(folder, data)
+
 
 def ensure_paths_schema(folder: Path) -> None:
     data = load_project(folder)
@@ -192,6 +209,7 @@ def ensure_paths_schema(folder: Path) -> None:
         for rel in paths.values():
             (folder / rel).mkdir(parents=True, exist_ok=True)
 
+
 def project_path(folder: Path, *keys: str) -> Path:
     ensure_paths_schema(folder)
     data = load_project(folder)
@@ -201,13 +219,14 @@ def project_path(folder: Path, *keys: str) -> Path:
         base = (base / k).resolve()
     return base
 
+
 # Audio path helpers (project-portable)
 def _is_abs_like(p: str) -> bool:
     """Heuristic that treats Windows drive/UNC paths as absolute even on POSIX."""
     p = (p or "").strip()
     if not p:
         return False
-    if p.startswith("\\") or p.startswith("//"):
+    if p.startswith("\\\\") or p.startswith("//"):
         return True
     if len(p) >= 3 and p[1] == ":" and p[2] in ("\\", "/"):
         return True
@@ -215,6 +234,7 @@ def _is_abs_like(p: str) -> bool:
         return Path(p).is_absolute()
     except Exception:
         return False
+
 
 def resolve_project_path(proj_path: Path, maybe_rel: str) -> Path:
     """Resolve a stored path (relative-to-project or absolute) to an absolute Path."""
@@ -225,27 +245,206 @@ def resolve_project_path(proj_path: Path, maybe_rel: str) -> Path:
         return Path(s)
     return (proj_path / s).resolve()
 
+
 def resolve_input_audio_path(audio_root: Optional[Path], p: str) -> Path:
-    """Resolve an input audio path or filename against an optional audio root."""
     s = (p or "").strip()
     if not s:
         return Path("")
+
+    candidate = Path(s).expanduser()
+
     if _is_abs_like(s):
-        return Path(s)
+        return candidate
+
     if audio_root:
         try:
-            cand = (audio_root / s).resolve()
+            cand = (Path(audio_root).expanduser() / s).resolve()
             if cand.exists():
                 return cand
         except Exception:
             pass
+
+    return Path("")
+
+
+
+def _pa_clean_value(x) -> str:
+    import pandas as pd
+    try:
+        if pd.isna(x):
+            return ""
+    except Exception:
+        pass
+    s = str(x).strip()
+    if s.lower() in {"nan", "none", "null", "<na>"}:
+        return ""
+    return s
+
+
+def make_file_key(value: str) -> str:
+    return _pa_clean_value(value).replace("\\", "/").lower()
+
+
+def _pa_choose_single(values) -> str:
+    vals = [str(v) for v in values if _pa_clean_value(v)]
+    vals = list(dict.fromkeys(vals))
+    return vals[0] if len(vals) == 1 else ""
+
+
+def _pa_suffix_candidates(folder: str, name: str) -> List[str]:
+    folder = make_file_key(folder).strip("/")
+    name = Path(_pa_clean_value(name)).name.lower()
+    if not name:
+        return []
+    out = []
+    if folder:
+        parts = [p for p in folder.split("/") if p]
+        for i in range(len(parts)):
+            out.append("/".join(parts[i:] + [name]))
+    out.append(name)
+    return list(dict.fromkeys([x for x in out if x]))
+
+
+def _resolve_indexed_audio_value(wav_index, value: str, source_file: str = "", results_root: Optional[Path] = None) -> str:
+    import re as _re
+    raw = _pa_clean_value(value)
+    if wav_index is None or getattr(wav_index, "empty", True) or not raw:
+        return ""
+    raw_path_lc = str(Path(raw).expanduser()).lower()
+    raw_rel_lc = make_file_key(raw)
+    raw_name_lc = Path(raw).name.lower()
+    raw_stem_lc = _re.sub(r"\.[^.]+$", "", raw_name_lc)
+
+    m = wav_index.loc[wav_index["path_lc"].eq(raw_path_lc), "path"]
+    hit = _pa_choose_single(m)
+    if hit:
+        return hit
+
+    m = wav_index.loc[wav_index["rel_lc"].eq(raw_rel_lc), "path"]
+    hit = _pa_choose_single(m)
+    if hit:
+        return hit
+
+    if "/" in raw_rel_lc:
+        m = wav_index.loc[wav_index["rel_lc"].eq(raw_rel_lc) | wav_index["rel_lc"].str.endswith("/" + raw_rel_lc), "path"]
+        hit = _pa_choose_single(m)
+        if hit:
+            return hit
+
+    if source_file and results_root is not None:
         try:
-            cand2 = (audio_root / Path(s).name).resolve()
-            if cand2.exists():
-                return cand2
+            src_parent = Path(source_file).expanduser().resolve().parent
+            try:
+                folder = src_parent.relative_to(Path(results_root).expanduser().resolve()).as_posix()
+            except Exception:
+                folder = src_parent.name
+            for cand in _pa_suffix_candidates(folder, raw_name_lc):
+                m = wav_index.loc[wav_index["rel_lc"].eq(cand) | wav_index["rel_lc"].str.endswith("/" + cand), "path"]
+                hit = _pa_choose_single(m)
+                if hit:
+                    return hit
         except Exception:
             pass
-    return Path("")
+
+    m = wav_index.loc[wav_index["basename_lc"].eq(raw_name_lc), "path"]
+    hit = _pa_choose_single(m)
+    if hit:
+        return hit
+
+    m = wav_index.loc[wav_index["stem_lc"].eq(raw_stem_lc), "path"]
+    hit = _pa_choose_single(m)
+    if hit:
+        return hit
+
+    return ""
+
+
+def _pa_unique_paths(values) -> List[str]:
+    try:
+        return values.dropna().astype(str).drop_duplicates().tolist()
+    except Exception:
+        return []
+
+
+def _resolve_indexed_audio_values(wav_index, value: str, source_file: str = "", results_root: Optional[Path] = None) -> List[str]:
+    import re as _re
+    raw = _pa_clean_value(value)
+    if wav_index is None or getattr(wav_index, "empty", True) or not raw:
+        return []
+    raw_path_lc = str(Path(raw).expanduser()).lower()
+    raw_rel_lc = make_file_key(raw)
+    raw_name_lc = Path(raw).name.lower()
+    raw_stem_lc = _re.sub(r"\.[^.]+$", "", raw_name_lc)
+
+    m = _pa_unique_paths(wav_index.loc[wav_index["path_lc"].eq(raw_path_lc), "path"])
+    if m:
+        return m
+
+    m = _pa_unique_paths(wav_index.loc[wav_index["rel_lc"].eq(raw_rel_lc), "path"])
+    if m:
+        return m
+
+    if "/" in raw_rel_lc:
+        m = _pa_unique_paths(wav_index.loc[wav_index["rel_lc"].eq(raw_rel_lc) | wav_index["rel_lc"].str.endswith("/" + raw_rel_lc), "path"])
+        if m:
+            return m
+
+    if source_file and results_root is not None:
+        try:
+            src_parent = Path(source_file).expanduser().resolve().parent
+            try:
+                folder = src_parent.relative_to(Path(results_root).expanduser().resolve()).as_posix()
+            except Exception:
+                folder = src_parent.name
+            for cand in _pa_suffix_candidates(folder, raw_name_lc):
+                m = _pa_unique_paths(wav_index.loc[wav_index["rel_lc"].eq(cand) | wav_index["rel_lc"].str.endswith("/" + cand), "path"])
+                if m:
+                    return m
+        except Exception:
+            pass
+
+    m = _pa_unique_paths(wav_index.loc[wav_index["basename_lc"].eq(raw_name_lc), "path"])
+    if m:
+        return m
+
+    if raw_stem_lc:
+        m = _pa_unique_paths(wav_index.loc[wav_index["stem_lc"].eq(raw_stem_lc), "path"])
+        if m:
+            return m
+
+    return []
+
+
+def _pa_detection_id(row) -> str:
+    import numpy as _np
+    f = make_file_key(row.get("file_key", "")) or make_file_key(row.get("file_path", "")) or make_file_key(row.get("file_path_original", "")) or make_file_key(row.get("file_id", ""))
+    try:
+        s = float(row.get("detection_start_s"))
+        e = float(row.get("detection_end_s"))
+        species = make_file_key(row.get("species_name", ""))
+        if not (_np.isfinite(s) and _np.isfinite(e)):
+            return f"{f}:nan-nan:{species}"
+        return f"{f}:{s:.3f}-{e:.3f}:{species}"
+    except Exception:
+        return f"{f}:nan-nan:{make_file_key(row.get('species_name', ''))}"
+
+
+def _pa_rebuild_file_keys_and_detection_ids(df):
+    if df is None or getattr(df, "empty", True):
+        return df
+    source = df["file_path"] if "file_path" in df.columns else df["file_id"]
+    df["file_key"] = source.astype(str).map(make_file_key)
+    if "file_path_original" in df.columns:
+        missing = df["file_key"].astype(str).str.strip().eq("")
+        if missing.any():
+            df.loc[missing, "file_key"] = df.loc[missing, "file_path_original"].astype(str).map(make_file_key)
+    df["detection_id"] = df.apply(_pa_detection_id, axis=1)
+    d = df["detection_id"].astype(str)
+    n = d.groupby(d).cumcount()
+    dup = d.duplicated(keep=False)
+    if dup.any():
+        df.loc[dup, "detection_id"] = d.loc[dup] + ":" + n.loc[dup].astype(str)
+    return df
 
 def stage_audio_into_project(
     proj_path: Path,
@@ -288,13 +487,16 @@ def stage_audio_into_project(
     except Exception:
         return ""
 
+
 # App config
 st.set_page_config(page_title="PAMalytics Studio", layout="wide", initial_sidebar_state="collapsed")
 hide_chrome(True, True)
 
+
 # Auth helpers + Sign out
 def _is_logged_in() -> bool:
     return bool(st.session_state.get("auth_user"))
+
 
 def _sign_out():
     for k in list(st.session_state.keys()):
@@ -309,12 +511,14 @@ def _sign_out():
     st.session_state.route = "login"
     st.rerun()
 
+
 def _top_right_signout_button(label: str = "Sign out"):
     _, col_btn = st.columns([1, 0.18])
     with col_btn:
         st.write("")
         if st.button(label, key="pa_signout_topright"):
             _sign_out()
+
 
 # Session
 ss = st.session_state
@@ -365,6 +569,7 @@ if ss.get("auth_user") is None and AUTH_FILE.exists():
     except Exception:
         pass
 
+
 # Coverage helpers
 class Coverage(NamedTuple):
     matched_rows: int
@@ -372,33 +577,41 @@ class Coverage(NamedTuple):
     matched_unique_files: int
     total_unique_files: int
 
+
 def analysis_keys(df, col="source_file"):
-    import pandas as pd, os
+    import pandas as pd
+    import os as _os
     out = df.copy()
-    out["_basename"] = out[col].astype(str).apply(lambda p: os.path.basename(p).strip())
+    out["_basename"] = out[col].astype(str).apply(lambda p: _os.path.basename(p).strip())
     out["_name_lower"] = out["_basename"].str.lower()
-    out["_stem_lower"] = out["_name_lower"].apply(lambda s: os.path.splitext(s)[0])
+    out["_stem_lower"] = out["_name_lower"].apply(lambda s: _os.path.splitext(s)[0])
     return out
+
 
 def compute_audio_coverage(detections_csv: Path, mapping: Any, use_stem_fallback: bool = True) -> Coverage:
     import pandas as pd
+    import os as _os
     det = pd.read_csv(detections_csv)
-    if det.empty or "source_file" not in det.columns: return Coverage(0,0,0,0)
+    if det.empty or "source_file" not in det.columns:
+        return Coverage(0, 0, 0, 0)
     det = analysis_keys(det)
     total_rows = int(len(det))
-    det_files = det[["_basename","_name_lower","_stem_lower"]].drop_duplicates()
+    det_files = det[["_basename", "_name_lower", "_stem_lower"]].drop_duplicates()
     total_unique_files = int(len(det_files))
     if hasattr(mapping, "to_dict"):
         mp = mapping.copy()
     elif isinstance(mapping, (str, Path)):
-        try: mp = pd.read_csv(mapping)
-        except Exception: return Coverage(0, total_rows, 0, total_unique_files)
+        try:
+            mp = pd.read_csv(mapping)
+        except Exception:
+            return Coverage(0, total_rows, 0, total_unique_files)
     else:
         return Coverage(0, total_rows, 0, total_unique_files)
-    if mp.empty or "filename" not in mp.columns: return Coverage(0, total_rows, 0, total_unique_files)
+    if mp.empty or "filename" not in mp.columns:
+        return Coverage(0, total_rows, 0, total_unique_files)
     mp = mp.assign(_filename=mp["filename"].astype(str).str.strip())
     mp["_name_lower"] = mp["_filename"].str.lower()
-    mp["_stem_lower"] = mp["_name_lower"].apply(lambda s: os.path.splitext(s)[0])
+    mp["_stem_lower"] = mp["_name_lower"].apply(lambda s: _os.path.splitext(s)[0])
     name_set = set(mp["_name_lower"].unique())
     name_match_mask = det["_name_lower"].isin(name_set)
     if use_stem_fallback:
@@ -416,11 +629,13 @@ def compute_audio_coverage(detections_csv: Path, mapping: Any, use_stem_fallback
     matched_unique_files = int(files_final.sum())
     return Coverage(matched_rows, total_rows, matched_unique_files, total_unique_files)
 
+
 def back_to_overview_bar(where: str = "top") -> None:
     c1, _ = st.columns([1, 9])
     if c1.button("⬅︎ Back to Overview", key=f"back_overview_{where}"):
         st.session_state.route = "overview"
         st.rerun()
+
 
 def back_to_hub_bar(where: str = "top") -> None:
     c1, _ = st.columns([1, 9])
@@ -428,13 +643,15 @@ def back_to_hub_bar(where: str = "top") -> None:
         st.session_state.route = "hub"
         st.rerun()
 
+
 def compute_import_stats(
     norm_csv: Path,
     audio_csv: Optional[Path],
     meta_csv: Optional[Path],
     use_stem_fallback: bool = True,
 ) -> Dict[str, Any]:
-    import pandas as pd, os
+    import pandas as pd
+    import os as _os
 
     stats = {
         "detections_rows": 0,
@@ -456,12 +673,17 @@ def compute_import_stats(
         return stats
 
     det = det.copy()
-    det["_basename"]   = det["file_id"].astype(str).apply(lambda p: os.path.basename(p).strip())
+    det["_basename"] = det["file_id"].astype(str).apply(lambda p: _os.path.basename(p).strip())
     det["_name_lower"] = det["_basename"].str.lower()
-    det["_stem_lower"] = det["_name_lower"].apply(lambda s: os.path.splitext(s)[0])
+    det["_stem_lower"] = det["_name_lower"].apply(lambda s: _os.path.splitext(s)[0])
 
     stats["detections_rows"] = int(len(det))
-    stats["unique_files_in_detections"] = int(det["_basename"].nunique())
+    if "file_key" in det.columns:
+        stats["unique_files_in_detections"] = int(det["file_key"].astype(str).str.strip().replace("", pd.NA).dropna().nunique())
+    elif "file_path" in det.columns:
+        stats["unique_files_in_detections"] = int(det["file_path"].astype(str).str.strip().replace("", pd.NA).dropna().nunique())
+    else:
+        stats["unique_files_in_detections"] = int(det["_basename"].nunique())
 
     if "file_path" in det.columns:
         fp = det["file_path"].astype(str)
@@ -473,10 +695,15 @@ def compute_import_stats(
         if mp is not None and not mp.empty and {"filename", "path"}.issubset(mp.columns):
             mp = mp.copy()
             mp["_filename_lc"] = mp["filename"].astype(str).str.strip().str.lower()
-            mp["_stem_lc"]     = mp["_filename_lc"].apply(lambda s: os.path.splitext(s)[0])
-            stats["audio_files_indexed"] = int(mp["_filename_lc"].nunique())
+            mp["_stem_lc"] = mp["_filename_lc"].apply(lambda s: _os.path.splitext(s)[0])
+            if "file_key" in mp.columns:
+                stats["audio_files_indexed"] = int(mp["file_key"].astype(str).str.strip().replace("", pd.NA).dropna().nunique())
+            elif "path" in mp.columns:
+                stats["audio_files_indexed"] = int(mp["path"].astype(str).str.strip().replace("", pd.NA).dropna().nunique())
+            else:
+                stats["audio_files_indexed"] = int(mp["_filename_lc"].nunique())
 
-            if ("file_path" not in det.columns) or (stats["detections_with_audio"] == 0):
+            if "file_path" not in det.columns:
                 name_set = set(mp["_filename_lc"].unique())
                 mask = det["_name_lower"].isin(name_set)
 
@@ -499,6 +726,7 @@ def compute_import_stats(
     stats["final_rows"] = stats["detections_with_audio"]
 
     return stats
+
 
 def render_audio_coverage(
     norm_csv: Path,
@@ -533,6 +761,7 @@ def render_audio_coverage(
     c2.metric("Detections with audio", f"{with_audio:,}")
     c3.metric("Audio coverage", f"{pct:.1f}%")
 
+
 def render_norm_preview(norm_csv: Path, heading: str = "Preview mapped detections") -> None:
     """
     Render a preview of the saved normalised detections (canonical mapped table),
@@ -549,14 +778,17 @@ def render_norm_preview(norm_csv: Path, heading: str = "Preview mapped detection
         except Exception as e:
             st.error(f"Could not read normalised data: {e}")
 
+
 # Safe delete / move-to-trash
 from datetime import datetime as _dt
 TRASH_DIR = PROJECTS_ROOT / ".trash"
 TRASH_DIR.mkdir(parents=True, exist_ok=True)
 
+
 def _trash_target_name(p: Path) -> Path:
-    ts = _dt.utcnow().strftime("%Y%m%d-%H%M%S")
+    ts = _dt.now(dt_timezone.utc).strftime("%Y%m%d-%H%M%S")
     return TRASH_DIR / f"{p.name}__{ts}"
+
 
 def move_project_to_trash(project_folder: Path) -> Path:
     if not project_folder.exists():
@@ -569,6 +801,7 @@ def move_project_to_trash(project_folder: Path) -> Path:
     project_folder.rename(target)
     return target
 
+
 # Schema helpers
 PAMA_CORE = [
     "file_id", "file_path", "detection_id",
@@ -577,11 +810,14 @@ PAMA_CORE = [
 ]
 PAMA_OPTIONAL = ["recorder_id", "date_time"]
 
+
 def _mk_detection_id(file_id: str, start: float, end: float) -> str:
     try:
-        return f"{Path(str(file_id)).name}:{float(start):.3f}-{float(end):.3f}"
+        key = make_file_key(file_id)
+        return f"{key}:{float(start):.3f}-{float(end):.3f}"
     except Exception:
         return f"{str(file_id)}:{start}-{end}"
+
 
 def _to_canonical_names(df_in: "object") -> "object":
     import pandas as pd
@@ -630,7 +866,7 @@ def _to_canonical_names(df_in: "object") -> "object":
             df["detection_id"] = ""
     return df
 
-# Build analysis dataset
+
 def build_analysis_dataset(proj_path: Path, use_stem_fallback: bool = True):
     """
     Returns (df, notes) where df contains all original columns plus the canonical PAMalytics columns.
@@ -646,7 +882,7 @@ def build_analysis_dataset(proj_path: Path, use_stem_fallback: bool = True):
     def _ensure_float(s):
         return pd.to_numeric(s, errors="coerce")
 
-    norm     = project_path(proj_path, "data_normalised") / "detections_normalised.csv"
+    norm = project_path(proj_path, "data_normalised") / "detections_normalised.csv"
     enriched = project_path(proj_path, "data_normalised") / "detections_enriched.csv"
     audio_csv = project_path(proj_path, "workspace") / "audio_paths.csv"
 
@@ -677,7 +913,7 @@ def build_analysis_dataset(proj_path: Path, use_stem_fallback: bool = True):
     df["file_id"] = df[c_file_id].astype(str)
 
     c_start = _first(df, "detection_start_s", "start_s", "start", "begin", "onset", "start_time_s", "start_sec")
-    c_end   = _first(df, "detection_end_s",   "end_s",   "end",   "offset", "end_time_s",   "end_sec", "duration", "duration_s")
+    c_end = _first(df, "detection_end_s", "end_s", "end", "offset", "end_time_s", "end_sec", "duration", "duration_s")
     if c_start is None or c_end is None:
         return None, ["Missing detection start/end columns. Map these in Data mapping first."]
     start_vals = _ensure_float(df[c_start])
@@ -686,7 +922,7 @@ def build_analysis_dataset(proj_path: Path, use_stem_fallback: bool = True):
     else:
         end_vals = _ensure_float(df[c_end])
     df["detection_start_s"] = start_vals
-    df["detection_end_s"]   = end_vals
+    df["detection_end_s"] = end_vals
 
     c_lbl = _first(df, "presence_label", "FinalLabel", "label")
     if c_lbl is None:
@@ -701,7 +937,10 @@ def build_analysis_dataset(proj_path: Path, use_stem_fallback: bool = True):
 
     c_prob = _first(df, "detection_probability", "class_prob", "probability", "score", "det_prob")
     if c_prob is not None:
-        df["detection_probability"] = pd.to_numeric(c_prob if isinstance(c_prob, pd.Series) else df[c_prob], errors="coerce")
+        df["detection_probability"] = pd.to_numeric(
+            c_prob if isinstance(c_prob, pd.Series) else df[c_prob],
+            errors="coerce"
+        )
 
     c_existing_path = _first(df, "file_path", "path", "audio_path")
     if c_existing_path is not None:
@@ -715,12 +954,24 @@ def build_analysis_dataset(proj_path: Path, use_stem_fallback: bool = True):
             if not mp.empty and {"filename", "path"}.issubset(mp.columns):
                 _mp = mp.copy()
                 _mp["_filename_lc"] = _mp["filename"].astype(str).str.strip().str.lower()
-                _mp["_stem_lc"]     = _mp["_filename_lc"].str.replace(r"\.[^.]+$", "", regex=True)
+                _mp["_stem_lc"] = _mp["_filename_lc"].str.replace(r"\.[^.]+$", "", regex=True)
+                _mp["_file_key"] = (_mp["file_key"] if "file_key" in _mp.columns else _mp["path"]).astype(str).map(make_file_key)
 
-                _fid_lc  = df["file_id"].astype(str).str.strip().str.lower()
+                _fid_lc = df["file_id"].astype(str).str.strip().str.lower()
                 _stem_lc = _fid_lc.str.replace(r"\.[^.]+$", "", regex=True)
+                _df_key = (df["file_key"] if "file_key" in df.columns else df["file_path"]).astype(str).map(make_file_key)
+                key_to_path = dict(zip(_mp["_file_key"], _mp["path"]))
+                need = (df["file_path"].astype(str).str.strip() == "")
+                if need.any():
+                    df.loc[need, "file_path"] = _df_key[need].map(key_to_path)
 
-                name_to_path = dict(zip(_mp["_filename_lc"], _mp["path"]))
+                filename_counts = _mp["_filename_lc"].value_counts()
+                unique_filenames = set(filename_counts[filename_counts == 1].index)
+
+                name_to_path = dict(zip(
+                    _mp.loc[_mp["_filename_lc"].isin(unique_filenames), "_filename_lc"],
+                    _mp.loc[_mp["_filename_lc"].isin(unique_filenames), "path"]
+                ))
 
                 need = (df["file_path"].astype(str).str.strip() == "")
                 if need.any():
@@ -730,7 +981,7 @@ def build_analysis_dataset(proj_path: Path, use_stem_fallback: bool = True):
                     still = (df["file_path"].astype(str).str.strip() == "")
                     if still.any():
                         stem_counts = _mp["_stem_lc"].value_counts()
-                        uniq_stems  = set(stem_counts[stem_counts == 1].index)
+                        uniq_stems = set(stem_counts[stem_counts == 1].index)
                         stem_to_path = dict(zip(
                             _mp.loc[_mp["_stem_lc"].isin(uniq_stems), "_stem_lc"],
                             _mp.loc[_mp["_stem_lc"].isin(uniq_stems), "path"]
@@ -745,6 +996,25 @@ def build_analysis_dataset(proj_path: Path, use_stem_fallback: bool = True):
         except Exception:
             pass
 
+    # Parse date_time for dashboard filtering / plotting
+    c_date_time = _first(df, "date_time", "datetime", "timestamp_utc")
+    if c_date_time is not None:
+        try:
+            if c_date_time == "timestamp_utc":
+                dt = pd.to_datetime(df[c_date_time], errors="coerce", utc=True)
+            elif c_date_time == "datetime":
+                dt = pd.to_datetime(df[c_date_time], errors="coerce", dayfirst=True)
+            else:
+                dt = pd.to_datetime(df[c_date_time], errors="coerce")
+
+            df["date_time"] = dt
+
+            if dt.notna().any():
+                df["date"] = dt.dt.date.astype(str)
+                df["hour"] = dt.dt.hour
+        except Exception:
+            notes.append("Could not parse date_time values for dashboard plots.")
+
     # Keep stored project-relative paths for portability, but provide an absolute path for playback.
     if "file_path" in df.columns:
         df["file_path_rel"] = df["file_path"].astype(str)
@@ -754,19 +1024,16 @@ def build_analysis_dataset(proj_path: Path, use_stem_fallback: bool = True):
         if "file_path_original" in df.columns:
             try:
                 _abs = df["file_path"].astype(str)
-                _orig = df["file_path_original"].astype(str).str.strip()
 
-                def _pick_abs(a: str, o: str) -> str:
+                def _pick_abs(a: str) -> str:
                     try:
                         if a and Path(a).exists():
                             return a
-                        if o and Path(o).exists():
-                            return o
                     except Exception:
                         pass
                     return a
 
-                df["file_path"] = [_pick_abs(a, o) for a, o in zip(_abs, _orig)]
+                df["file_path"] = [_pick_abs(a) for a in _abs]
             except Exception:
                 pass
 
@@ -777,20 +1044,11 @@ def build_analysis_dataset(proj_path: Path, use_stem_fallback: bool = True):
 
     return matched, notes
 
-# per-detection clip builder
-def ensure_detection_clips(proj_path: Path, detections_df, audio_map_df):
-    """
-    For every detection (file_id/source_file, start_s/end_s or detection_start_s/detection_end_s),
-    write a WAV clip [start_s, end_s] with no cap. Returns DataFrame:
-    filename, clip_path, start_s, end_s, duration_s.
-    """
-    import soundfile as sf
-    import numpy as np
-    import pandas as pd
 
-    mp = audio_map_df.copy()
-    mp["_filename"] = mp["filename"].astype(str).str.strip().str.lower()
-    name_to_path = dict(zip(mp["_filename"], mp["path"]))
+# per-detection clip builder
+def ensure_detection_clips(proj_path: Path, detections_df, audio_map_df=None):
+    import soundfile as sf
+    import pandas as pd
 
     clips_dir = project_path(proj_path, "workspace") / "clips"
     clips_dir.mkdir(parents=True, exist_ok=True)
@@ -798,79 +1056,111 @@ def ensure_detection_clips(proj_path: Path, detections_df, audio_map_df):
     rows = []
     det = detections_df.copy()
 
-    if "source_file" in det.columns:
-        det_basename = det["source_file"].astype(str).map(lambda s: Path(s).name)
-    else:
-        det_basename = det["file_id"].astype(str).map(lambda s: Path(s).name if s else "")
-
-    det_name_lower = det_basename.str.lower()
-
-    start_vals = det.get("detection_start_s", det.get("start_s"))
-    end_vals   = det.get("detection_end_s",   det.get("end_s"))
-
-    for (_idx, (nm_lower, nm, s, e)) in enumerate(zip(det_name_lower, det_basename, start_vals, end_vals)):
+    for idx, row in det.iterrows():
         try:
-            start_s = float(s); end_s = float(e)
+            start_s = float(row.get("detection_start_s", row.get("start_s")))
+            end_s = float(row.get("detection_end_s", row.get("end_s")))
         except Exception:
             continue
+
         if not (end_s > start_s):
             continue
 
-        src = name_to_path.get(str(nm_lower))
-        src_path = resolve_project_path(proj_path, str(src)) if src else Path("")
-        if (not src_path) or (not src_path.exists()):
+        src_value = str(row.get("file_path_rel", row.get("file_path", ""))).strip()
+        if not src_value:
+            continue
+
+        src_path = resolve_project_path(proj_path, src_value)
+        if not src_path.exists():
             continue
 
         try:
             info = sf.info(str(src_path))
-            sr   = info.samplerate
+            sr = info.samplerate
             total = info.frames
 
             start_f = max(0, int(start_s * sr))
-            end_f   = min(total, int(end_s * sr))
+            end_f = min(total, int(end_s * sr))
             if end_f <= start_f:
                 continue
 
             frames = end_f - start_f
             y, _ = sf.read(str(src_path), start=start_f, frames=frames, dtype="float32", always_2d=False)
 
-            safe_stem = Path(nm).stem
-            clip_name = f"{safe_stem}_{start_f}_{end_f}.wav"
+            safe_stem = Path(src_path).stem
+            clip_name = f"{safe_stem}_{idx}_{start_f}_{end_f}.wav"
             clip_path = clips_dir / clip_name
             sf.write(clip_path, y, sr)
 
             rows.append({
-                "filename": nm,
+                "filename": src_path.name,
                 "clip_path": str(clip_path),
                 "start_s": start_s,
                 "end_s": end_s,
-                "duration_s": frames / sr
+                "duration_s": frames / sr,
             })
         except Exception:
             continue
 
-    import pandas as pd
     return pd.DataFrame(rows)
 
+
 # Buttons / pickers
-def pick_folder_dialog() -> Optional[str]:
+from pathlib import Path as _P
+import os as _os
+
+TABULAR_EXTS = {".csv", ".tsv", ".parquet"}
+AUDIO_EXTS = {".wav", ".mp3", ".flac", ".m4a", ".aac", ".ogg", ".aif", ".aiff"}
+
+
+def pick_file_dialog(
+    *,
+    title: str = "Select a file",
+    filetypes: Optional[List[Tuple[str, str]]] = None,
+) -> Optional[str]:
     try:
         system = platform.system().lower()
         if "darwin" in system or "mac" in system:
-            script = 'set _folder to POSIX path of (choose folder with prompt "Select a folder")\nreturn _folder'
+            script = f'set _file to POSIX path of (choose file with prompt "{title}")\nreturn _file'
             res = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
-            path = res.stdout.strip(); return path or None
+            path = res.stdout.strip()
+            return path or None
         else:
             import tkinter as tk
             from tkinter import filedialog
-            root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
-            folder = filedialog.askdirectory(title="Select a folder")
-            root.destroy(); return folder or None
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes("-topmost", True)
+            chosen = filedialog.askopenfilename(
+                title=title,
+                filetypes=filetypes or [("All files", "*.*")]
+            )
+            root.destroy()
+            return chosen or None
     except Exception:
         return None
 
-from pathlib import Path as _P
-import os as _os
+
+def pick_folder_dialog(title: str = "Select a folder") -> Optional[str]:
+    try:
+        system = platform.system().lower()
+        if "darwin" in system or "mac" in system:
+            script = f'set _folder to POSIX path of (choose folder with prompt "{title}")\nreturn _folder'
+            res = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
+            path = res.stdout.strip()
+            return path or None
+        else:
+            import tkinter as tk
+            from tkinter import filedialog
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes("-topmost", True)
+            folder = filedialog.askdirectory(title=title)
+            root.destroy()
+            return folder or None
+    except Exception:
+        return None
+
 
 def _clean_dialog_path(p: str) -> str:
     p = (p or "").strip().strip('"').strip("'")
@@ -882,34 +1172,182 @@ def _clean_dialog_path(p: str) -> str:
         p = p[4:]
     return _os.path.normpath(p)
 
-def _browse_into(state_key: str) -> None:
-    chosen = pick_folder_dialog()
+
+def _browse_into_file(state_key: str, title: str, filetypes: Optional[List[Tuple[str, str]]] = None) -> None:
+    chosen = pick_file_dialog(title=title, filetypes=filetypes)
     if chosen:
         st.session_state[state_key] = _clean_dialog_path(chosen)
 
-def path_picker(label: str, state_key: str) -> Optional[_P]:
+
+def _browse_into_folder(state_key: str, title: str) -> None:
+    chosen = pick_folder_dialog(title=title)
+    if chosen:
+        st.session_state[state_key] = _clean_dialog_path(chosen)
+
+
+def flexible_path_picker(
+    label: str,
+    state_key: str,
+    *,
+    allow_file: bool = True,
+    allow_folder: bool = True,
+    filetypes: Optional[List[Tuple[str, str]]] = None,
+    placeholder: Optional[str] = None,
+) -> Optional[_P]:
     st.session_state.setdefault(state_key, "")
 
     st.markdown(f"**{label}**")
-    c_txt, c_btn = st.columns([9, 1])
 
-    c_txt.text_input(
-        "",
+    widths = [8]
+    if allow_file:
+        widths.append(1)
+    if allow_folder:
+        widths.append(1)
+
+    cols = st.columns(widths)
+
+    cols[0].text_input(
+        f"{label} path",
         key=state_key,
         label_visibility="collapsed",
-        placeholder=(r"C:\path\to\folder" if _os.name == "nt" else "/path/to/folder"),
+        placeholder=placeholder or (r"C:\path\to\file_or_folder" if _os.name == "nt" else "/path/to/file_or_folder"),
     )
 
-    # set session_state[state_key] safely
-    c_btn.button(
-        "Browse…",
-        key=f"{state_key}__browse",
-        on_click=_browse_into,
-        args=(state_key,),
-    )
+    idx = 1
+    if allow_file:
+        cols[idx].button(
+            "File…",
+            key=f"{state_key}__browse_file",
+            on_click=_browse_into_file,
+            args=(state_key, f"Select {label.lower()}", filetypes),
+        )
+        idx += 1
+
+    if allow_folder:
+        cols[idx].button(
+            "Folder…",
+            key=f"{state_key}__browse_folder",
+            on_click=_browse_into_folder,
+            args=(state_key, f"Select {label.lower()}"),
+        )
 
     val = _clean_dialog_path(str(st.session_state.get(state_key, "")))
     return _P(val) if val else None
+
+
+def path_picker(label: str, state_key: str) -> Optional[_P]:
+    return flexible_path_picker(
+        label=label,
+        state_key=state_key,
+        allow_file=False,
+        allow_folder=True,
+        placeholder=(r"C:\path\to\folder" if _os.name == "nt" else "/path/to/folder"),
+    )
+
+
+def _list_result_files(path: Path) -> List[Path]:
+    if not path or not path.exists():
+        return []
+
+    if path.is_file():
+        return [path] if path.suffix.lower() in TABULAR_EXTS else []
+
+    if path.is_dir():
+        files: List[Path] = []
+        for ext in sorted(TABULAR_EXTS):
+            files.extend(path.rglob(f"*{ext}"))
+        return sorted([p for p in files if p.is_file()])
+
+    return []
+
+
+def _read_result_inputs(path: Path):
+    import pandas as pd
+
+    files = _list_result_files(path)
+    if not files:
+        raise ValueError("No CSV, TSV or Parquet files were found in the selected location.")
+
+    frames = []
+    for f in files:
+        if f.suffix.lower() == ".parquet":
+            df = pd.read_parquet(f)
+        elif f.suffix.lower() == ".tsv":
+            df = pd.read_csv(f, sep="\t")
+        else:
+            try:
+                df = pd.read_csv(f)
+            except Exception:
+                df = pd.read_csv(f, sep="\t")
+
+        if df is not None and not df.empty:
+            df = df.copy()
+            df["_ingest_source_file"] = str(f)
+            frames.append(df)
+
+    if not frames:
+        raise ValueError("All selected result files were empty.")
+
+    return pd.concat(frames, ignore_index=True), files
+
+
+@st.cache_data(show_spinner=False)
+def _index_audio_inputs(path_str: str):
+    import pandas as pd
+
+    root = Path(path_str).expanduser()
+    rows = []
+
+    if not root.exists():
+        return pd.DataFrame(columns=[
+            "basename_lc",
+            "stem_lc",
+            "path",
+            "path_lc",
+            "rel_lc",
+        ])
+
+    if root.is_file():
+        candidates = [root] if root.suffix.lower() in AUDIO_EXTS else []
+        root_for_rel = root.parent
+    else:
+        root_for_rel = root
+        candidates = []
+        for ext in AUDIO_EXTS:
+            candidates.extend(root.rglob(f"*{ext}"))
+            candidates.extend(root.rglob(f"*{ext.upper()}"))
+
+    seen = set()
+
+    for p in candidates:
+        try:
+            if not p.is_file():
+                continue
+
+            p_abs = p.resolve()
+            p_key = str(p_abs).lower()
+
+            if p_key in seen:
+                continue
+
+            seen.add(p_key)
+
+            try:
+                rel = p_abs.relative_to(root_for_rel.resolve()).as_posix()
+            except Exception:
+                rel = p_abs.name
+
+            rows.append({
+                "basename_lc": p_abs.name.lower(),
+                "stem_lc": p_abs.stem.lower(),
+                "path": str(p_abs),
+                "path_lc": str(p_abs).lower(),
+                "rel_lc": rel.lower(),
+            })
+        except Exception:
+            continue
+
+    return pd.DataFrame(rows)
 
 # Views
 def view_login() -> None:
@@ -973,7 +1411,8 @@ def view_hub() -> None:
     """
     hide_chrome(True, True)
     if not st.session_state.get("auth_user"):
-        st.session_state.route = "login"; st.rerun()
+        st.session_state.route = "login"
+        st.rerun()
 
     st.title("Project Hub")
     _top_right_signout_button()
@@ -1016,18 +1455,18 @@ def view_hub() -> None:
     else:
         for p in projects:
             data = load_project(p)
-            norm_csv  = project_path(p, "data_normalised") / "detections_normalised.csv"
+            norm_csv = project_path(p, "data_normalised") / "detections_normalised.csv"
             ready_for_launch = norm_csv.exists() and norm_csv.stat().st_size > 0
 
             cols = st.columns([4, 2, 2, 1, 1, 1])
             with cols[0]:
-                st.markdown(f"**{data.get('name','(unnamed)')}**  \n`{p.name}`")
+                st.markdown(f"**{data.get('name', '(unnamed)')}**  \n`{p.name}`")
             cols[1].write(f"Mode: `{data.get('use_case', 'external_results')}`")
-            cols[2].write(f"Timezone: `{data.get('tz','UTC')}`")
+            cols[2].write(f"Timezone: `{data.get('tz', 'UTC')}`")
 
-            edit_key   = f"edit_{p.name}"
+            edit_key = f"edit_{p.name}"
             launch_key = f"launch_{p.name}"
-            del_key    = f"del_{p.name}"
+            del_key = f"del_{p.name}"
 
             if cols[3].button("Edit", key=edit_key, width='stretch'):
                 st.session_state.current_project = str(p)
@@ -1048,7 +1487,7 @@ def view_hub() -> None:
 
             if st.session_state.get(f"confirm_delete_{p.name}"):
                 st.warning(f"Move project `{p.name}` to Trash? This is reversible (stored in projects/.trash).")
-                c1, c2 = st.columns([1,1])
+                c1, c2 = st.columns([1, 1])
                 if c1.button("Yes, move to Trash", key=f"confirm_yes_{p.name}"):
                     try:
                         new_loc = move_project_to_trash(p)
@@ -1064,21 +1503,27 @@ def view_hub() -> None:
     if st.session_state.get("current_project"):
         st.success(f"Active project: `{Path(st.session_state.current_project).name}`")
 
+
 def _import_progress_cards(proj_path: Path) -> Dict[str, str]:
     data = load_project(proj_path)
     s = (data.get("status") or _default_status()).copy()
-    norm_csv    = project_path(proj_path, "data_normalised") / "detections_normalised.csv"
-    enriched    = project_path(proj_path, "data_normalised") / "detections_enriched.csv"
-    if norm_csv.exists(): s["import_results"]  = "ready"
-    if enriched.exists():  s["metadata_joins"] = "ready"
+    norm_csv = project_path(proj_path, "data_normalised") / "detections_normalised.csv"
+    enriched = project_path(proj_path, "data_normalised") / "detections_enriched.csv"
+    if norm_csv.exists():
+        s["import_results"] = "ready"
+    if enriched.exists():
+        s["metadata_joins"] = "ready"
     return s
+
 
 def view_overview() -> None:
     hide_chrome(True, True)
     if not st.session_state.get("auth_user"):
-        st.session_state.route = "login"; st.rerun()
+        st.session_state.route = "login"
+        st.rerun()
     if not st.session_state.get("current_project"):
-        st.session_state.route = "hub"; st.rerun()
+        st.session_state.route = "hub"
+        st.rerun()
 
     proj_path = Path(st.session_state.current_project)
     ensure_paths_schema(proj_path)
@@ -1089,36 +1534,40 @@ def view_overview() -> None:
     if c_back.button("⬅︎ Back to Project Hub", key="back_to_hub_from_overview"):
         st.session_state.route = "hub"
         st.rerun()
-    st.caption(f"Project: **{data['name']}** • Mode: `{data.get('use_case','external_results')}` • Timezone: `{data.get('tz','UTC')}`")
+    st.caption(f"Project: **{data['name']}** • Mode: `{data.get('use_case', 'external_results')}` • Timezone: `{data.get('tz', 'UTC')}`")
 
     st.write("### Import phase (2 steps)")
     st.caption("Complete these in order: **1) Data mapping** → **2) Metadata mapping (optional)**.")
     s = _import_progress_cards(proj_path)
 
-    norm_csv   = project_path(proj_path, "data_normalised") / "detections_normalised.csv"
+    norm_csv = project_path(proj_path, "data_normalised") / "detections_normalised.csv"
     enrich_csv = project_path(proj_path, "data_normalised") / "detections_enriched.csv"
-    audio_csv  = project_path(proj_path, "workspace")        / "audio_paths.csv"
+    audio_csv = project_path(proj_path, "workspace") / "audio_paths.csv"
 
     step1, step3 = st.columns(2)
     with step1:
         st.markdown("#### 1) Data mapping")
         st.markdown(chip(
-            "ready" if s["import_results"]=="ready" else ("pending" if s["import_results"]=="pending" else "empty"),
-            "ready" if s["import_results"]=="ready" else ("pending" if s["import_results"]=="pending" else "empty")
+            "ready" if s["import_results"] == "ready" else ("pending" if s["import_results"] == "pending" else "empty"),
+            "ready" if s["import_results"] == "ready" else ("pending" if s["import_results"] == "pending" else "empty")
         ), unsafe_allow_html=True)
-        if norm_csv.exists(): st.caption(f"`{norm_csv.name}`")
+        if norm_csv.exists():
+            st.caption(f"`{norm_csv.name}`")
         if st.button("Open Data mapping", key="open_step1"):
-            st.session_state.route = "import"; st.rerun()
+            st.session_state.route = "import"
+            st.rerun()
 
     with step3:
         st.markdown("#### 2) Metadata mapping (optional)")
-        state = s.get("metadata_joins","empty")
-        kind = "ready" if state=="ready" else ("pending" if state=="pending" else "empty")
+        state = s.get("metadata_joins", "empty")
+        kind = "ready" if state == "ready" else ("pending" if state == "pending" else "empty")
         st.markdown(chip(kind, kind), unsafe_allow_html=True)
-        if enrich_csv.exists(): st.caption(f"`{enrich_csv.name}`")
-        c3a, c3b = st.columns([1,1])
+        if enrich_csv.exists():
+            st.caption(f"`{enrich_csv.name}`")
+        c3a, c3b = st.columns([1, 1])
         if c3a.button("Open Metadata mapping", key="open_step3"):
-            st.session_state.route = "metadata"; st.rerun()
+            st.session_state.route = "metadata"
+            st.rerun()
         if c3b.button("Skip Metadata", key="skip_meta_btn"):
             set_status(proj_path, "metadata_joins", "skipped")
             st.success("Metadata step marked as skipped.")
@@ -1142,7 +1591,7 @@ def view_overview() -> None:
 
     st.divider()
 
-    step1_ready = (s["import_results"]=="ready")
+    step1_ready = (s["import_results"] == "ready")
     if step1_ready:
         if s.get("metadata_joins") == "ready":
             st.success("Data mapping complete. Metadata mapping complete.")
@@ -1157,6 +1606,7 @@ def view_overview() -> None:
     else:
         st.info("Complete **Data mapping** to launch the PAMalytics dashboard.")
 
+
 # Import results (Data mapping)
 def _auto_guess(colnames: List[str], candidates: List[str]) -> Optional[str]:
     lower = {c.lower(): c for c in colnames}
@@ -1165,14 +1615,17 @@ def _auto_guess(colnames: List[str], candidates: List[str]) -> Optional[str]:
             return lower[cand]
     return None
 
+
 def view_import_results() -> None:
     import pandas as pd
-    from pathlib import Path as _P
     from schema import drop_mapped_columns
+
     if not st.session_state.get("auth_user"):
-        st.session_state.route = "login"; st.rerun()
+        st.session_state.route = "login"
+        st.rerun()
     if not st.session_state.get("current_project"):
-        st.session_state.route = "hub"; st.rerun()
+        st.session_state.route = "hub"
+        st.rerun()
 
     proj_path = Path(st.session_state.current_project)
     st.title("Import results - Data mapping")
@@ -1193,9 +1646,9 @@ def view_import_results() -> None:
         options=classifier_options,
         index=classifier_options.index(classifier_type),
         format_func=lambda x: {
-            "manual":   "Manual (custom mapping)",
+            "manual": "Manual (custom mapping)",
             "batdetect2": "BatDetect2 (per-clip CSVs)",
-            "birdnet":  "BirdNET (per-clip detections)",
+            "birdnet": "BirdNET (per-clip detections)",
         }.get(x, x),
         horizontal=True,
         key="classifier_type_radio",
@@ -1203,7 +1656,7 @@ def view_import_results() -> None:
     st.session_state.import_params["classifier_type"] = classifier_type
 
     norm_csv = project_path(proj_path, "data_normalised") / "detections_normalised.csv"
-    ws_dir   = project_path(proj_path, "workspace")
+    ws_dir = project_path(proj_path, "workspace")
     audio_csv = ws_dir / "audio_paths.csv"
 
     # Shared preview of any existing saved normalised data (canonical)
@@ -1215,18 +1668,18 @@ def view_import_results() -> None:
         from adapters.batdetect2 import ingest_batdetect2
 
         bd2_csv_root = path_picker("Classification results folder", "bd2_csv_root")
-        audio_base   = path_picker("Audio folder", "bd2_audio_base")
+        audio_base = path_picker("Audio folder", "bd2_audio_base")
 
         st.session_state.import_params["bd2_csv_root"] = str(bd2_csv_root) if bd2_csv_root else ""
-        st.session_state.import_params["audio_base"]   = str(audio_base)   if audio_base   else ""
+        st.session_state.import_params["audio_base"] = str(audio_base) if audio_base else ""
 
         det_th = float(st.session_state.import_params.get("bd2_det_thresh", 0.5))
         cls_th = float(st.session_state.import_params.get("bd2_class_thresh", 0.2))
         te_fac = float(st.session_state.import_params.get("bd2_te_factor", 1.0))
         c1, c2, c3 = st.columns(3)
-        det_th  = c1.number_input("Detection threshold (det_prob ≥)", min_value=0.0, max_value=1.0, value=float(det_th), step=0.01, key="bd2_det_th")
-        cls_th  = c2.number_input("Class threshold (class_prob ≥)",   min_value=0.0, max_value=1.0, value=float(cls_th), step=0.01, key="bd2_cls_th")
-        te_fac  = c3.number_input("Time expansion factor",            min_value=0.1, max_value=100.0, value=float(te_fac), step=0.1, key="bd2_te_fac")
+        det_th = c1.number_input("Detection threshold (det_prob ≥)", min_value=0.0, max_value=1.0, value=float(det_th), step=0.01, key="bd2_det_th")
+        cls_th = c2.number_input("Class threshold (class_prob ≥)", min_value=0.0, max_value=1.0, value=float(cls_th), step=0.01, key="bd2_cls_th")
+        te_fac = c3.number_input("Time expansion factor", min_value=0.1, max_value=100.0, value=float(te_fac), step=0.1, key="bd2_te_fac")
 
         with st.expander("Advanced mapping", expanded=False):
             st.caption("Remap BD2 → canonical columns.")
@@ -1281,7 +1734,7 @@ def view_import_results() -> None:
                         _uniq = df_norm["file_path_original"].fillna("").astype(str).unique()
                         _rel_map = {}
                         for _p0 in _uniq:
-                            _p0s = str(_p0).strip()
+                            _p0s = _pa_clean_value(_p0)
                             if not _p0s:
                                 _rel_map[_p0] = ""
                                 continue
@@ -1297,15 +1750,18 @@ def view_import_results() -> None:
                 except Exception:
                     pass
 
+                df_norm = _pa_rebuild_file_keys_and_detection_ids(df_norm)
                 df_norm.to_csv(norm_csv, index=False)
 
-                if {"file_id","file_path"} <= set(df_norm.columns):
+                if {"file_id", "file_path"} <= set(df_norm.columns):
                     cols = ["file_id", "file_path"]
+                    if "file_key" in df_norm.columns:
+                        cols.append("file_key")
                     if "file_path_original" in df_norm.columns:
                         cols.append("file_path_original")
                     mp = df_norm.loc[df_norm["file_path"].astype(str).str.strip().ne(""), cols].drop_duplicates()
                     if not mp.empty:
-                        mp = mp.rename(columns={"file_id":"filename", "file_path":"path", "file_path_original":"original_path"})
+                        mp = mp.rename(columns={"file_id": "filename", "file_path": "path", "file_path_original": "original_path"})
                         ws_dir.mkdir(parents=True, exist_ok=True)
                         out_map = ws_dir / "audio_paths.csv"
                         mp.to_csv(out_map, index=False)
@@ -1338,7 +1794,8 @@ def view_import_results() -> None:
                     st.switch_page("pages/40_Dashboard.py")
             with cR:
                 if st.button("Back to Overview ▶", key="go_overview_from_bd2"):
-                    st.session_state.route = "overview"; st.rerun()
+                    st.session_state.route = "overview"
+                    st.rerun()
 
         return
 
@@ -1346,11 +1803,11 @@ def view_import_results() -> None:
     if classifier_type == "birdnet":
         from adapters.birdnet import ingest_birdnet
 
-        bn_csv_root = path_picker("BirdNET results folder or CSV", "bn_csv_root")
-        audio_base   = path_picker("Audio folder", "bn_audio_base")
+        bn_csv_root = path_picker("BirdNET results folder", "bn_csv_root")
+        audio_base = path_picker("Audio folder", "bn_audio_base")
 
         st.session_state.import_params["bn_csv_root"] = str(bn_csv_root) if bn_csv_root else ""
-        st.session_state.import_params["audio_base"]  = str(audio_base)  if audio_base  else ""
+        st.session_state.import_params["audio_base"] = str(audio_base) if audio_base else ""
 
         min_conf = float(st.session_state.import_params.get("bn_min_conf", 0.2))
         keep_present_only = bool(st.session_state.import_params.get("bn_keep_present_only", True))
@@ -1399,7 +1856,7 @@ def view_import_results() -> None:
                         _uniq = df_norm["file_path_original"].fillna("").astype(str).unique()
                         _rel_map = {}
                         for _p0 in _uniq:
-                            _p0s = str(_p0).strip()
+                            _p0s = _pa_clean_value(_p0)
                             if not _p0s:
                                 _rel_map[_p0] = ""
                                 continue
@@ -1415,10 +1872,13 @@ def view_import_results() -> None:
                 except Exception:
                     pass
 
+                df_norm = _pa_rebuild_file_keys_and_detection_ids(df_norm)
                 df_norm.to_csv(norm_csv, index=False)
 
                 if {"file_id", "file_path"} <= set(df_norm.columns):
                     cols = ["file_id", "file_path"]
+                    if "file_key" in df_norm.columns:
+                        cols.append("file_key")
                     if "file_path_original" in df_norm.columns:
                         cols.append("file_path_original")
                     mp = df_norm.loc[
@@ -1455,92 +1915,72 @@ def view_import_results() -> None:
                     st.switch_page("pages/40_Dashboard.py")
             with cR:
                 if st.button("Back to Overview ▶", key="go_overview_from_bn"):
-                    st.session_state.route = "overview"; st.rerun()
+                    st.session_state.route = "overview"
+                    st.rerun()
 
         return
 
     # PATH C: MANUAL MAPPING
-
-    def _file_picker(label: str, state_key: str) -> Optional[_P]:
-        st.session_state.setdefault(state_key, "")
-        st.markdown(f"**{label}**")
-        c_txt, c_btn = st.columns([9, 1])
-        widget_key = f"{state_key}__widget"
-        current_val = st.session_state[state_key]
-        new_text = c_txt.text_input(
-            "", value=current_val, key=widget_key,
-            label_visibility="collapsed",
-            placeholder="/path/to/results.(csv|tsv|parquet)"
-        )
-        if new_text != current_val:
-            st.session_state[state_key] = new_text
-
-        if c_btn.button("Browse…", key=f"{state_key}__browse"):
-            try:
-                system = platform.system().lower()
-                if "darwin" in system or "mac" in system:
-                    script = 'set _file to POSIX path of (choose file with prompt "Select a results file")\nreturn _file'
-                    res = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
-                    chosen = res.stdout.strip()
-                else:
-                    import tkinter as tk
-                    from tkinter import filedialog
-                    root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
-                    chosen = filedialog.askopenfilename(
-                        title="Select a results file",
-                        filetypes=[("Tabular", "*.csv *.tsv *.parquet"), ("All files", "*.*")]
-                    )
-                    root.destroy()
-                if chosen:
-                    st.session_state[state_key] = chosen
-                    st.rerun()
-            except Exception:
-                pass
-        v = st.session_state[state_key].strip()
-        return _P(v) if v else None
-
-    results_path = _file_picker("Classifier results file", "manual_results_file")
-    audio_base   = path_picker("Audio folder", "manual_audio_base")
+    results_path = flexible_path_picker(
+        "Classifier results file or folder",
+        "manual_results_path",
+        allow_file=True,
+        allow_folder=True,
+        filetypes=[
+            ("Tabular", "*.csv *.tsv *.parquet"),
+            ("All files", "*.*"),
+        ],
+        placeholder="/path/to/results.csv or /path/to/results_folder",
+    )
+    audio_base = flexible_path_picker(
+        "Audio file or folder",
+        "manual_audio_source",
+        allow_file=True,
+        allow_folder=True,
+        filetypes=[
+            ("Audio", "*.wav *.mp3 *.flac *.m4a *.aac *.ogg *.aif *.aiff"),
+            ("All files", "*.*"),
+        ],
+        placeholder="/path/to/audio.wav or /path/to/audio_folder",
+    )
 
     st.session_state.import_params["results_file"] = str(results_path) if results_path else ""
     if audio_base:
         st.session_state.import_params["audio_base"] = str(audio_base)
 
     norm_csv = project_path(proj_path, "data_normalised") / "detections_normalised.csv"
-    ws_dir   = project_path(proj_path, "workspace")
+    ws_dir = project_path(proj_path, "workspace")
     audio_csv = ws_dir / "audio_paths.csv"
 
     df = st.session_state.import_params.get("df")
     if results_path and results_path.exists():
         try:
-            if results_path.suffix.lower() == ".parquet":
-                df = pd.read_parquet(results_path)
-            elif results_path.suffix.lower() == ".tsv":
-                df = pd.read_csv(results_path, sep="\t")
-            else:
-                try:
-                    df = pd.read_csv(results_path)
-                except Exception:
-                    df = pd.read_csv(results_path, sep="\t")
+            df, input_files = _read_result_inputs(results_path)
             if df is None or df.empty:
-                st.error("No rows found in the selected file."); return
+                st.error("No rows found in the selected results location.")
+                return
             st.session_state.import_params["filename"] = results_path.name
+            st.session_state.import_params["input_files"] = [str(p) for p in input_files]
             st.session_state.import_params["df"] = df
         except Exception as e:
-            st.error(f"Could not read file: {e}"); return
+            st.error(f"Could not read results: {e}")
+            return
 
     if df is None and not norm_csv.exists():
-        st.info("Select a **Classifier results file** to begin.")
+        st.info("Select a **Classifier results file or folder** to begin.")
         return
 
     if df is not None:
         st.write("Preview (first 20 rows):")
         st.dataframe(df.head(20), width='stretch')
+        input_files = st.session_state.import_params.get("input_files", [])
+        if input_files:
+            st.caption(f"Loaded {len(input_files):,} result file(s).")
 
-    st.subheader("1) Link each detection to a WAV file")
+    st.subheader("1) Link each detection to an audio file")
 
     if audio_base is None or not audio_base.exists():
-        st.info("Pick a valid **Audio folder** to index and link `.wav` files.")
+        st.info("Pick a valid **Audio file or folder** to index and link audio files.")
         return
 
     cols = list(df.columns)
@@ -1568,47 +2008,48 @@ def view_import_results() -> None:
         st.warning("Choose the audio column to proceed.")
         return
 
-    @st.cache_data(show_spinner=False)
-    def _index_wavs(root: Path) -> pd.DataFrame:
-        rows = []
-        for p in root.rglob("*.wav"):
-            if p.is_file():
-                rows.append({"basename_lc": p.name.lower(),
-                             "stem_lc": p.stem.lower(),
-                             "path": str(p)})
-        return pd.DataFrame(rows)
-
-    wav_index = _index_wavs(audio_base)
+    wav_index = _index_audio_inputs(str(audio_base))
     if wav_index.empty:
-        st.error("No `.wav` files found in the selected audio folder.")
+        st.error("No supported audio files found in the selected audio location.")
         return
 
-    import os as _os
     df_link = df.copy()
 
-    vals       = df_link[audio_col].astype(str)
-    basenames  = vals.apply(lambda s: _os.path.basename(s).strip().lower())
-    stems      = basenames.str.replace(r"\.[^.]+$", "", regex=True)
+    results_root = None
+    try:
+        results_root = results_path if results_path and Path(results_path).is_dir() else Path(results_path).parent
+    except Exception:
+        results_root = None
 
-    name_to_path = dict(zip(wav_index["basename_lc"], wav_index["path"]))
-    df_link["file_path_original"] = basenames.map(name_to_path)
-    df_link["file_path"] = df_link["file_path_original"]
+    vals = df_link[audio_col].astype(str).str.strip()
+    sources = df_link["_ingest_source_file"].astype(str) if "_ingest_source_file" in df_link.columns else pd.Series([""] * len(df_link), index=df_link.index)
+    cache = {}
+    expanded_rows = []
+    for idx_row, raw_value in vals.items():
+        source_value = str(sources.loc[idx_row]) if idx_row in sources.index else ""
+        cache_key = (str(raw_value), source_value)
+        if cache_key not in cache:
+            cache[cache_key] = _resolve_indexed_audio_values(wav_index, str(raw_value), source_file=source_value, results_root=results_root)
+        matches = cache[cache_key]
+        base_row = df_link.loc[idx_row].copy()
+        if matches:
+            for match in matches:
+                r = base_row.copy()
+                r["file_path_original"] = match
+                r["file_path"] = match
+                expanded_rows.append(r)
+        else:
+            base_row["file_path_original"] = ""
+            base_row["file_path"] = ""
+            expanded_rows.append(base_row)
 
-    need = df_link["file_path_original"].isna() | df_link["file_path_original"].astype(str).str.strip().eq("")
-    if need.any():
-        stem_counts = wav_index["stem_lc"].value_counts()
-        uniq_stems  = set(stem_counts[stem_counts == 1].index)
-        stem_to_path = dict(zip(
-            wav_index.loc[wav_index["stem_lc"].isin(uniq_stems), "stem_lc"],
-            wav_index.loc[wav_index["stem_lc"].isin(uniq_stems), "path"]
-        ))
-        df_link.loc[need, "file_path_original"] = stems[need].map(stem_to_path)
-        df_link.loc[need, "file_path"] = df_link.loc[need, "file_path_original"]
+    df_link = pd.DataFrame(expanded_rows).reset_index(drop=True)
+    df_link["file_key"] = df_link["file_path"].astype(str).map(make_file_key)
 
     matched_mask = df_link["file_path"].notna() & df_link["file_path"].astype(str).str.strip().ne("")
-    total_rows   = int(len(df_link))
+    total_rows = int(len(df_link))
     matched_rows = int(matched_mask.sum())
-    pct          = (100.0 * matched_rows / total_rows) if total_rows else 0.0
+    pct = (100.0 * matched_rows / total_rows) if total_rows else 0.0
 
     c1, c2, c3 = st.columns(3)
     c1.metric("Detections", f"{total_rows:,}")
@@ -1662,10 +2103,10 @@ def view_import_results() -> None:
         return None
 
     file_id_guess = _auto_guess_av(cols_av, ["file_id", "source_file", "filename", "file", "filepath", "path_in_results"])
-    start_guess   = _auto_guess_av(cols_av, ["detection_start_s","start","start_s","start_time_s","begin","onset","start_sec"])
-    end_guess     = _auto_guess_av(cols_av, ["detection_end_s","end","end_s","end_time_s","offset","end_sec","duration","duration_s"])
-    class_guess   = _auto_guess_av(cols_av, ["species_name","class","species","label","prediction","taxon"])
-    score_guess   = _auto_guess_av(cols_av, ["detection_probability","score","prob","probability","class_prob","det_prob"])
+    start_guess = _auto_guess_av(cols_av, ["detection_start_s", "start", "start_s", "start_time_s", "begin", "onset", "start_sec"])
+    end_guess = _auto_guess_av(cols_av, ["detection_end_s", "end", "end_s", "end_time_s", "offset", "end_sec", "duration", "duration_s"])
+    class_guess = _auto_guess_av(cols_av, ["species_name", "class", "species", "label", "prediction", "taxon"])
+    score_guess = _auto_guess_av(cols_av, ["detection_probability", "score", "prob", "probability", "class_prob", "det_prob"])
 
     def pick(name_key: str, label: str, default: Optional[str]):
         current = st.session_state.import_params.get(name_key, "—")
@@ -1676,9 +2117,9 @@ def view_import_results() -> None:
         st.session_state.import_params[name_key] = choice
         return choice
 
-    file_id_col = pick("file_id", "Detector file id → `file_id`",               file_id_guess)
-    start_col   = pick("start_s", "Start time (seconds) → `detection_start_s`", start_guess)
-    end_col     = pick("end_s",   "End time or duration → `detection_end_s`",   end_guess)
+    file_id_col = pick("file_id", "Detector file id → `file_id`", file_id_guess)
+    start_col = pick("start_s", "Start time (seconds) → `detection_start_s`", start_guess)
+    end_col = pick("end_s", "End time or duration → `detection_end_s`", end_guess)
 
     st.markdown("**Presence label → `presence_label`**")
     label_mode = st.session_state.import_params.get("label_mode", "binary_presence_column")
@@ -1686,21 +2127,21 @@ def view_import_results() -> None:
         "",
         options=["binary_presence_column", "use_label_column"],
         index=0 if label_mode == "binary_presence_column" else 1,
-        format_func=lambda x: "Binary presence column (0/1, true/false, yes/no…)" if x=="binary_presence_column" else "Use existing label column",
+        format_func=lambda x: "Binary presence column (0/1, true/false, yes/no…)" if x == "binary_presence_column" else "Use existing label column",
         horizontal=False,
         key="label_mode_radio"
     )
     st.session_state.import_params["label_mode"] = label_mode
 
     presence_col = st.session_state.import_params.get("presence_col", "—")
-    label_col    = st.session_state.import_params.get("label_col", "—")
+    label_col = st.session_state.import_params.get("label_col", "—")
 
     if label_mode == "binary_presence_column":
-        guess_presence = _auto_guess_av(cols_av, ["presence_label","present","presence","detected","label","class","species"])
+        guess_presence = _auto_guess_av(cols_av, ["presence_label", "present", "presence", "detected", "label", "class", "species"])
         if presence_col == "—" and guess_presence in cols_av:
             presence_col = guess_presence
         presence_col = st.selectbox("Presence column", ["—"] + cols_av,
-                                    index=(cols_av.index(presence_col)+1) if presence_col in cols_av else 0,
+                                    index=(cols_av.index(presence_col) + 1) if presence_col in cols_av else 0,
                                     key="presence_col_select")
         positive_tokens = st.text_input("Values that mean 'present' (comma-separated)", value=st.session_state.import_params.get("positive_tokens", "1,true,yes,present,y,t"), key="positive_tokens")
         positive_label_name = st.text_input("Canonical label for present detections", value=st.session_state.import_params.get("positive_label_name", "present"), key="positive_label_name")
@@ -1712,11 +2153,11 @@ def view_import_results() -> None:
             "keep_only_present": bool(keep_only_present),
         })
     else:
-        label_col_guess = _auto_guess_av(cols_av, ["presence_label","label","species","class","prediction"])
+        label_col_guess = _auto_guess_av(cols_av, ["presence_label", "label", "species", "class", "prediction"])
         if label_col == "—" and label_col_guess in cols_av:
             label_col = label_col_guess
         label_col = st.selectbox("Label column", ["—"] + cols_av,
-                                 index=(cols_av.index(label_col)+1) if label_col in cols_av else 0,
+                                 index=(cols_av.index(label_col) + 1) if label_col in cols_av else 0,
                                  key="label_col_select")
         canonicalise_existing = st.checkbox("Canonicalise this label to present/absent", value=bool(st.session_state.import_params.get("canonicalise_existing", False)), key="canonicalise_existing")
         present_value_for_existing = st.text_input("Value that means 'present' (used only when canonicalising)", value=str(st.session_state.import_params.get("present_value_for_existing", "1")), key="present_value_for_existing")
@@ -1726,17 +2167,24 @@ def view_import_results() -> None:
             "present_value_for_existing": present_value_for_existing,
         })
 
-    species_col = pick("species_name", "Species / class → `species_name`",           class_guess)
-    prob_col    = pick("score",        "Probability / score → `detection_probability`", score_guess)
+    species_col = pick("species_name", "Species / class → `species_name`", class_guess)
+    prob_col = pick("score", "Probability / score → `detection_probability`", score_guess)
 
     missing = []
-    if file_id_col == "—":  missing.append("file_id")
-    if start_col == "—":    missing.append("detection_start_s")
-    if end_col == "—":      missing.append("detection_end_s")
-    if label_mode == "binary_presence_column" and (presence_col in (None, "—")): missing.append("presence column")
-    if label_mode == "use_label_column" and (label_col in (None, "—")):          missing.append("label column")
-    if species_col == "—":  missing.append("species_name")
-    if prob_col == "—":     missing.append("detection_probability")
+    if file_id_col == "—":
+        missing.append("file_id")
+    if start_col == "—":
+        missing.append("detection_start_s")
+    if end_col == "—":
+        missing.append("detection_end_s")
+    if label_mode == "binary_presence_column" and (presence_col in (None, "—")):
+        missing.append("presence column")
+    if label_mode == "use_label_column" and (label_col in (None, "—")):
+        missing.append("label column")
+    if species_col == "—":
+        missing.append("species_name")
+    if prob_col == "—":
+        missing.append("detection_probability")
     if missing:
         st.warning("Please map required fields: " + ", ".join(missing))
 
@@ -1752,10 +2200,10 @@ def view_import_results() -> None:
         norm, notes = _build_normalised_table(
             df=df_av, source_file_col=file_id_col, start_col=start_col, end_col=end_col,
             score_col=prob_col, ts_col=None, convert_ms=bool(convert_ms), assume_utc=bool(assume_utc),
-            label_mode=label_mode, presence_col=presence_col, positive_tokens=st.session_state.import_params.get("positive_tokens","1,true,yes,present,y,t"),
-            positive_label_name=st.session_state.import_params.get("positive_label_name","present"), keep_only_present=bool(st.session_state.import_params.get("keep_only_present", True)),
+            label_mode=label_mode, presence_col=presence_col, positive_tokens=st.session_state.import_params.get("positive_tokens", "1,true,yes,present,y,t"),
+            positive_label_name=st.session_state.import_params.get("positive_label_name", "present"), keep_only_present=bool(st.session_state.import_params.get("keep_only_present", True)),
             label_col=label_col, canonicalise_existing=bool(st.session_state.import_params.get("canonicalise_existing", False)),
-            present_value_for_existing=st.session_state.import_params.get("present_value_for_existing","1"),
+            present_value_for_existing=st.session_state.import_params.get("present_value_for_existing", "1"),
         )
 
         import numpy as _np
@@ -1779,7 +2227,7 @@ def view_import_results() -> None:
             return s
 
         cn["detection_start_s"] = _from_norm("detection_start_s", "start_s", numeric=True)
-        cn["detection_end_s"]   = _from_norm("detection_end_s",   "end_s",   numeric=True)
+        cn["detection_end_s"] = _from_norm("detection_end_s", "end_s", numeric=True)
 
         pl = _from_norm("presence_label")
         if pl.isna().all() and "label" in norm.columns:
@@ -1798,7 +2246,7 @@ def view_import_results() -> None:
 
         cn["detection_probability"] = _from_norm("detection_probability", "score", numeric=True)
 
-        cn["file_id"]   = df_av.loc[idx, file_id_col].astype(str)
+        cn["file_id"] = df_av.loc[idx, file_id_col].astype(str)
         if "file_path_original" in df_av.columns:
             cn["file_path_original"] = df_av.loc[idx, "file_path_original"].astype(str)
             cn["file_path"] = df_av.loc[idx, "file_path"].astype(str)
@@ -1806,20 +2254,12 @@ def view_import_results() -> None:
             cn["file_path_original"] = df_av.loc[idx, "file_path"].astype(str)
             cn["file_path"] = df_av.loc[idx, "file_path"].astype(str)
 
-        if "detection_id" not in cn.columns or cn["detection_id"].isna().any():
-            def _det_id(row) -> str:
-                f = str(row.get("file_id", ""))
-                try:
-                    s = float(row.get("detection_start_s")); e = float(row.get("detection_end_s"))
-                    if not (_np.isfinite(s) and _np.isfinite(e)): return f"{f}:nan-nan"
-                    return f"{f}:{s:.3f}-{e:.3f}"
-                except Exception:
-                    return f"{f}:nan-nan"
-            cn["detection_id"] = cn.apply(_det_id, axis=1)
+        cn = _pa_rebuild_file_keys_and_detection_ids(cn)
 
         if callable(normalise_schema):
             try:
-                cn = normalise_schema(cn, build_detection_id=True)
+                cn = normalise_schema(cn, build_detection_id=False)
+                cn = _pa_rebuild_file_keys_and_detection_ids(cn)
             except Exception as e:
                 st.warning(f"Schema normalisation failed on preview: {e}")
 
@@ -1858,11 +2298,12 @@ def view_import_results() -> None:
         edited = st.data_editor(norm, width='stretch', num_rows="dynamic", key="norm_editor")
 
         if _btn("Save normalised copy", key="save_norm_btn"):
-            out_dir = project_path(proj_path, "data_normalised"); out_dir.mkdir(parents=True, exist_ok=True)
+            out_dir = project_path(proj_path, "data_normalised")
+            out_dir.mkdir(parents=True, exist_ok=True)
 
             if callable(normalise_schema):
                 try:
-                    out_df = normalise_schema(edited.copy(), build_detection_id=True)
+                    out_df = normalise_schema(edited.copy(), build_detection_id=False)
                 except Exception as e:
                     st.warning(f"Schema normalisation failed on save (writing edited table as-is): {e}")
                     out_df = edited.copy()
@@ -1870,7 +2311,7 @@ def view_import_results() -> None:
                 out_df = edited.copy()
 
             canonical_cols = [
-                "file_id", "file_path", "detection_id",
+                "file_id", "file_path", "file_key", "detection_id",
                 "detection_start_s", "detection_end_s",
                 "presence_label", "species_name", "detection_probability",
             ]
@@ -1902,10 +2343,11 @@ def view_import_results() -> None:
             required = set(canonical_cols)
             miss = [c for c in required if c not in out_df.columns]
             if miss:
-                st.error("Missing required columns: " + ", ".join(miss)); st.stop()
+                st.error("Missing required columns: " + ", ".join(miss))
+                st.stop()
 
             out_df["detection_start_s"] = pd.to_numeric(out_df["detection_start_s"], errors="coerce")
-            out_df["detection_end_s"]   = pd.to_numeric(out_df["detection_end_s"], errors="coerce")
+            out_df["detection_end_s"] = pd.to_numeric(out_df["detection_end_s"], errors="coerce")
             out_df["detection_probability"] = pd.to_numeric(out_df["detection_probability"], errors="coerce")
 
             # Stage audio into the project and store portable relative paths.
@@ -1952,6 +2394,7 @@ def view_import_results() -> None:
                         _rel_map[_p0] = ""
 
                 out_df["file_path"] = _orig.map(_rel_map).fillna("")
+                out_df = _pa_rebuild_file_keys_and_detection_ids(out_df)
 
                 missing_stage = (_orig.str.strip().ne("")) & (out_df["file_path"].astype(str).str.strip().eq(""))
                 if missing_stage.any():
@@ -1965,36 +2408,48 @@ def view_import_results() -> None:
                 st.stop()
 
             problems = []
-            if out_df["file_id"].astype(str).str.strip().eq("").any(): problems.append("Some rows have empty file_id.")
-            if out_df["file_path"].astype(str).str.strip().eq("").any(): problems.append("Some rows have empty file_path.")
-            if out_df["detection_id"].astype(str).str.strip().eq("").any(): problems.append("Some rows have empty detection_id.")
-            if out_df["species_name"].astype(str).str.strip().eq("").any(): problems.append("Some rows have empty species_name.")
-            if out_df["detection_id"].duplicated().any(): problems.append("detection_id must be unique; duplicates found.")
+            if out_df["file_id"].astype(str).str.strip().eq("").any():
+                problems.append("Some rows have empty file_id.")
+            if out_df["file_path"].astype(str).str.strip().eq("").any():
+                problems.append("Some rows have empty file_path.")
+            if out_df["detection_id"].astype(str).str.strip().eq("").any():
+                problems.append("Some rows have empty detection_id.")
+            if out_df["species_name"].astype(str).str.strip().eq("").any():
+                problems.append("Some rows have empty species_name.")
+            if out_df["detection_id"].duplicated().any():
+                problems.append("detection_id must be unique; duplicates found.")
             bad_times = (
                 out_df["detection_start_s"].isna() |
-                out_df["detection_end_s"].isna()   |
-                (out_df["detection_start_s"] < 0)  |
+                out_df["detection_end_s"].isna() |
+                (out_df["detection_start_s"] < 0) |
                 (out_df["detection_end_s"] <= out_df["detection_start_s"])
             )
-            if bad_times.any(): problems.append("Invalid times: ensure start ≥ 0 and end > start for all rows.")
+            if bad_times.any():
+                problems.append("Invalid times: ensure start ≥ 0 and end > start for all rows.")
             bad_labels = ~out_df["presence_label"].astype(str).str.strip().isin(["present", "absent"])
-            if bad_labels.any(): problems.append("presence_label must be 'present' or 'absent' (lower-case).")
+            if bad_labels.any():
+                problems.append("presence_label must be 'present' or 'absent' (lower-case).")
             bad_prob = (
                 out_df["detection_probability"].isna() |
                 (out_df["detection_probability"] < 0) |
                 (out_df["detection_probability"] > 1)
             )
-            if bad_prob.any(): problems.append("detection_probability must be a real number in [0, 1] for all rows.")
+            if bad_prob.any():
+                problems.append("detection_probability must be a real number in [0, 1] for all rows.")
             if problems:
-                for p in problems: st.error(p)
+                for p in problems:
+                    st.error(p)
                 st.stop()
 
             out_csv = out_dir / "detections_normalised.csv"
             out_df.to_csv(out_csv, index=False)
 
             try:
-                ws_dir = project_path(proj_path, "workspace"); ws_dir.mkdir(parents=True, exist_ok=True)
+                ws_dir = project_path(proj_path, "workspace")
+                ws_dir.mkdir(parents=True, exist_ok=True)
                 cols = ["file_id", "file_path"]
+                if "file_key" in out_df.columns:
+                    cols.append("file_key")
                 if "file_path_original" in out_df.columns:
                     cols.append("file_path_original")
                 mp = out_df.loc[out_df["file_path"].astype(str).str.strip().ne(""), cols].drop_duplicates()
@@ -2011,7 +2466,7 @@ def view_import_results() -> None:
                     "file_id": file_id_col,
                     "detection_start_s": start_col,
                     "detection_end_s": end_col,
-                    "presence_label": (f"{presence_col}→present/absent" if label_mode=="binary_presence_column"
+                    "presence_label": (f"{presence_col}→present/absent" if label_mode == "binary_presence_column"
                                        else (f"{label_col} (canonicalised)" if st.session_state.import_params.get("canonicalise_existing") else label_col)),
                     "species_name": species_col,
                     "detection_probability": prob_col,
@@ -2021,18 +2476,20 @@ def view_import_results() -> None:
                     "convert_ms": bool(convert_ms),
                     "assume_utc": bool(assume_utc),
                     "label_mode": label_mode,
-                    "positive_tokens": st.session_state.import_params.get("positive_tokens") if label_mode=="binary_presence_column" else None,
-                    "keep_only_present": bool(st.session_state.import_params.get("keep_only_present")) if label_mode=="binary_presence_column" else None,
-                    "canonicalise_existing": bool(st.session_state.import_params.get("canonicalise_existing")) if label_mode=="use_label_column" else None,
-                    "present_value_for_existing": st.session_state.import_params.get("present_value_for_existing") if label_mode=="use_label_column" else None,
+                    "positive_tokens": st.session_state.import_params.get("positive_tokens") if label_mode == "binary_presence_column" else None,
+                    "keep_only_present": bool(st.session_state.import_params.get("keep_only_present")) if label_mode == "binary_presence_column" else None,
+                    "canonicalise_existing": bool(st.session_state.import_params.get("canonicalise_existing")) if label_mode == "use_label_column" else None,
+                    "present_value_for_existing": st.session_state.import_params.get("present_value_for_existing") if label_mode == "use_label_column" else None,
                     "te_factor_default": float(te_factor_default),
                 },
                 "input_file": st.session_state.import_params.get("filename"),
+                "input_files": st.session_state.import_params.get("input_files"),
                 "rows_out": int(len(out_df)),
                 "created_at": datetime.now(dt_timezone.utc).isoformat(),
                 "app_version": "pamalytics_studio 0.3.0",
             }
-            ws_dir = project_path(proj_path, "workspace"); ws_dir.mkdir(parents=True, exist_ok=True)
+            ws_dir = project_path(proj_path, "workspace")
+            ws_dir.mkdir(parents=True, exist_ok=True)
             (ws_dir / "ingest_mapping.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
             st.session_state.import_last_saved = str(out_csv)
@@ -2051,7 +2508,7 @@ def view_import_results() -> None:
             }
             if need.issubset(_chk.columns):
                 _chk["detection_start_s"] = pd.to_numeric(_chk["detection_start_s"], errors="coerce")
-                _chk["detection_end_s"]   = pd.to_numeric(_chk["detection_end_s"], errors="coerce")
+                _chk["detection_end_s"] = pd.to_numeric(_chk["detection_end_s"], errors="coerce")
                 _chk["detection_probability"] = pd.to_numeric(_chk["detection_probability"], errors="coerce")
                 ok_to_launch = (
                     _chk["file_id"].astype(str).str.strip().ne("").all()
@@ -2076,15 +2533,17 @@ def view_import_results() -> None:
         render_norm_preview(norm_csv, heading="Preview mapped detections (manual)")
 
     if ok_to_launch:
-        cL, cR = st.columns([1,1])
+        cL, cR = st.columns([1, 1])
         with cL:
             if st.button("Launch PAMalytics dashboard ▶", key="go_dashboard_from_manual"):
                 st.switch_page("pages/40_Dashboard.py")
         with cR:
             if st.button("Back to Overview ▶", key="go_overview_from_manual"):
-                st.session_state.route = "overview"; st.rerun()
+                st.session_state.route = "overview"
+                st.rerun()
     else:
         st.info("Finalise ingestion steps prior to launching PAMalytics")
+
 
 # Normalisation builder
 def _build_normalised_table(
@@ -2095,11 +2554,12 @@ def _build_normalised_table(
     present_value_for_existing: str,
 ):
     import pandas as pd
-    from datetime import datetime as _dt
+    from datetime import datetime as _dt2
 
     def to_seconds(series):
         s = pd.to_numeric(series, errors="coerce")
-        if convert_ms: s = s / 1000.0
+        if convert_ms:
+            s = s / 1000.0
         return s
 
     if label_mode == "binary_presence_column":
@@ -2108,7 +2568,7 @@ def _build_normalised_table(
         present_mask = ser.isin(tokens)
         if keep_only_present:
             if not present_mask.any():
-                empty = pd.DataFrame(columns=["source_file","start_s","end_s","label","score","timestamp_utc"])
+                empty = pd.DataFrame(columns=["source_file", "start_s", "end_s", "label", "score", "timestamp_utc"])
                 return empty, ["No rows matched the chosen present value(s)."]
             base = df.loc[present_mask].copy()
         else:
@@ -2120,10 +2580,13 @@ def _build_normalised_table(
     norm["source_file"] = base[source_file_col].astype(str)
 
     if end_col.lower() in {"duration", "duration_s"}:
-        start_vals = to_seconds(base[start_col]); dur_vals = to_seconds(base[end_col])
-        norm["start_s"] = start_vals; norm["end_s"] = start_vals + dur_vals
+        start_vals = to_seconds(base[start_col])
+        dur_vals = to_seconds(base[end_col])
+        norm["start_s"] = start_vals
+        norm["end_s"] = start_vals + dur_vals
     else:
-        norm["start_s"] = to_seconds(base[start_col]); norm["end_s"] = to_seconds(base[end_col])
+        norm["start_s"] = to_seconds(base[start_col])
+        norm["end_s"] = to_seconds(base[end_col])
 
     if label_mode == "binary_presence_column":
         if keep_only_present:
@@ -2139,7 +2602,8 @@ def _build_normalised_table(
         if canonicalise_existing:
             pv = str(present_value_for_existing).strip().lower()
             mask = lbl.str.strip().str.lower().eq(pv)
-            lbl = lbl.mask(mask, "present"); lbl = lbl.where(lbl == "present", "absent")
+            lbl = lbl.mask(mask, "present")
+            lbl = lbl.where(lbl == "present", "absent")
         norm["label"] = lbl
 
     norm["score"] = pd.to_numeric(base[score_col], errors="coerce") if (score_col and score_col != "—") else pd.NA
@@ -2153,9 +2617,9 @@ def _build_normalised_table(
                 x = x.strip()
                 try:
                     if len(x) == 15 and x[8] == "_" and x[:8].isdigit() and x[9:].isdigit():
-                        return _dt.strptime(x, "%Y%m%d_%H%M%S")
+                        return _dt2.strptime(x, "%Y%m%d_%H%M%S")
                     if len(x) == 14 and x.isdigit():
-                        return _dt.strptime(x, "%Y%m%d%H%M%S")
+                        return _dt2.strptime(x, "%Y%m%d%H%M%S")
                 except Exception:
                     return None
                 return None
@@ -2168,66 +2632,84 @@ def _build_normalised_table(
         if tzinfo is None:
             if assume_utc:
                 try:
-                    ts = ts.dt.tz_localize("UTC"); notes.append("Naïve datetimes interpreted as UTC (+00:00).")
+                    ts = ts.dt.tz_localize("UTC")
+                    notes.append("Naïve datetimes interpreted as UTC (+00:00).")
                 except Exception:
                     pass
             else:
                 notes.append("Datetimes are timezone-naïve; consider enabling ‘Interpret as UTC’.")
         else:
             try:
-                ts = ts.dt.tz_convert("UTC"); notes.append("Datetimes converted to UTC (+00:00).")
+                ts = ts.dt.tz_convert("UTC")
+                notes.append("Datetimes converted to UTC (+00:00).")
             except Exception:
                 pass
         norm["timestamp_utc"] = ts
 
     return norm, notes
 
+
 # Metadata join (Metadata mapping)
 def view_metadata() -> None:
     hide_chrome(True, True)
-    import pandas as pd, os
-    if not st.session_state.get("auth_user"): st.session_state.route = "login"; st.rerun()
-    if not st.session_state.get("current_project"): st.session_state.route = "hub"; st.rerun()
+    import pandas as pd
+    import os as _os
+    if not st.session_state.get("auth_user"):
+        st.session_state.route = "login"
+        st.rerun()
+    if not st.session_state.get("current_project"):
+        st.session_state.route = "hub"
+        st.rerun()
 
     proj_path = Path(st.session_state.current_project)
     st.title("Metadata mapping — Join metadata")
     st.caption("Upload a metadata table (e.g., site, lat, lon, recorder). Map a join key and save enriched detections.")
     nav_row("Back to Audio mapping", "locate_audio", "Back to Overview", "overview", key_prefix="meta_top")
-    if st.columns([1,1,1])[2].button("Skip Metadata for now"):
+    if st.columns([1, 1, 1])[2].button("Skip Metadata for now"):
         set_status(proj_path, "metadata_joins", "skipped")
-        st.session_state.route = "overview"; st.rerun()
+        st.session_state.route = "overview"
+        st.rerun()
 
     norm_csv = project_path(proj_path, "data_normalised") / "detections_normalised.csv"
     if not norm_csv.exists():
-        st.error("No normalised detections found. Please complete Data mapping first."); return
+        st.error("No normalised detections found. Please complete Data mapping first.")
+        return
 
     det = pd.read_csv(norm_csv)
     if det.empty:
-        st.error("Detections table is empty."); return
-    det["basename"] = det.get("source_file", det.get("file_id", "")).astype(str).apply(lambda p: os.path.basename(p))
+        st.error("Detections table is empty.")
+        return
+    det["basename"] = det.get("source_file", det.get("file_id", "")).astype(str).apply(lambda p: _os.path.basename(p))
     det["stem"] = det["basename"].str.replace(r"\.[^.]+$", "", regex=True)
     det["recorder_id"] = det["basename"].apply(lambda n: n.split("_", 1)[0] if "_" in n else n)
 
     with st.expander("Preview derived columns", expanded=False):
-        st.dataframe(det[["basename","recorder_id"]].head(20), width='stretch')
+        st.dataframe(det[["basename", "recorder_id"]].head(20), width='stretch')
 
     st.subheader("1) Upload metadata table")
-    up = st.file_uploader("Upload metadata CSV / TSV / Parquet", type=["csv","tsv","parquet"], key="meta_up")
+    up = st.file_uploader("Upload metadata CSV / TSV / Parquet", type=["csv", "tsv", "parquet"], key="meta_up")
     if up is None:
-        st.info("Select a metadata file to begin."); return
+        st.info("Select a metadata file to begin.")
+        return
 
     try:
-        if up.name.endswith(".parquet"): meta = pd.read_parquet(up)
+        if up.name.endswith(".parquet"):
+            meta = pd.read_parquet(up)
         else:
-            try: meta = pd.read_csv(up)
-            except Exception: up.seek(0); meta = pd.read_csv(up, sep="\t")
+            try:
+                meta = pd.read_csv(up)
+            except Exception:
+                up.seek(0)
+                meta = pd.read_csv(up, sep="\t")
     except Exception as e:
-        st.error(f"Could not read metadata: {e}"); return
+        st.error(f"Could not read metadata: {e}")
+        return
     if meta.empty:
-        st.error("Metadata file is empty."); return
+        st.error("Metadata file is empty.")
+        return
 
     st.subheader("2) Choose join keys")
-    det_key = st.selectbox("Detections key", options=["recorder_id","basename","stem","source_file","file_id"], index=0)
+    det_key = st.selectbox("Detections key", options=["recorder_id", "basename", "stem", "source_file", "file_id"], index=0)
     meta_cols = list(meta.columns)
     meta_key = st.selectbox("Metadata key (column in uploaded table)", options=meta_cols)
 
@@ -2245,6 +2727,7 @@ def view_metadata() -> None:
         st.success(f"Saved enriched detections to: `{out_csv}`")
         nav_row("Back to Overview", "overview", "Launch dashboard", "dashboard", key_prefix="meta_after_save")
 
+
 # Dashboard
 def _load_renderer(module_stem: str, func_name: str):
     """
@@ -2254,13 +2737,15 @@ def _load_renderer(module_stem: str, func_name: str):
       3) load case-insensitive from scripts/pages/
     Return callable or None.
     """
-    import importlib, importlib.util
+    import importlib
+    import importlib.util
 
     for cand in {module_stem, module_stem.capitalize()}:
         try:
             mod = importlib.import_module(cand)
             fn = getattr(mod, func_name, None)
-            if callable(fn): return fn
+            if callable(fn):
+                return fn
         except ModuleNotFoundError:
             pass
 
@@ -2277,12 +2762,15 @@ def _load_renderer(module_stem: str, func_name: str):
         return None
 
     fn = _scan_and_load(SCRIPTS_DIR, module_stem)
-    if fn: return fn
+    if fn:
+        return fn
     pages_dir = SCRIPTS_DIR / "pages"
     if pages_dir.exists():
         fn = _scan_and_load(pages_dir, module_stem)
-        if fn: return fn
+        if fn:
+            return fn
     return None
+
 
 def view_dashboard() -> None:
     hide_chrome(hide_sidebar=False, hide_header=True)
@@ -2290,9 +2778,11 @@ def view_dashboard() -> None:
     import pandas as pd
 
     if not st.session_state.get("auth_user"):
-        st.session_state.route = "login"; st.rerun()
+        st.session_state.route = "login"
+        st.rerun()
     if not st.session_state.get("current_project"):
-        st.session_state.route = "hub"; st.rerun()
+        st.session_state.route = "hub"
+        st.rerun()
 
     proj_path = Path(st.session_state.current_project)
 
@@ -2333,7 +2823,7 @@ def view_dashboard() -> None:
     def _render(page_key: str, func_name: str):
         fn = _load_renderer(page_key, func_name)
         if not fn:
-            st.error(f"Could not find a renderer for '{page_key}' in {SCRIPTS_DIR} or {SCRIPTS_DIR/'pages'}.")
+            st.error(f"Could not find a renderer for '{page_key}' in {SCRIPTS_DIR} or {SCRIPTS_DIR / 'pages'}.")
             return
         try:
             fn(df_det, sources)
@@ -2353,15 +2843,22 @@ def view_dashboard() -> None:
 
     nav_row("Back to Overview", "overview", key_prefix="pa_bottom")
 
+
 # Router
 route = st.session_state.get("route", "login")
-if route == "login":          view_login()
-elif route == "hub":          view_hub()
-elif route == "overview":     view_overview()
-elif route == "import":       view_import_results()
-elif route == "metadata":     view_metadata()
+if route == "login":
+    view_login()
+elif route == "hub":
+    view_hub()
+elif route == "overview":
+    view_overview()
+elif route == "import":
+    view_import_results()
+elif route == "metadata":
+    view_metadata()
 elif route == "dashboard":
     st.switch_page("pages/40_Dashboard.py")
     st.stop()
 else:
-    st.session_state.route = "login"; st.rerun()
+    st.session_state.route = "login"
+    st.rerun()
