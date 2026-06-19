@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional, List, Dict, Tuple
 import os
+import re
 import numpy as np
 import pandas as pd
 
@@ -60,6 +61,134 @@ def _derive_file_id(df: pd.DataFrame) -> pd.Series:
     return df.get("_source_csv", "").astype(str).map(from_csv)
 
 
+
+def _clean_identity_value(x) -> str:
+    
+    try:
+        if pd.isna(x):
+            return ""
+    except Exception:
+        pass
+    s = str(x).strip()
+    if s.lower() in {"nan", "none", "null", "<na>"}:
+        return ""
+    return s
+
+
+def _key_text(x) -> str:
+    return _clean_identity_value(x).replace("\\", "/").lower()
+
+
+def _choose_single_path(matches: pd.DataFrame) -> str:
+    if matches is None or matches.empty:
+        return ""
+    paths = matches["path"].dropna().astype(str).drop_duplicates()
+    return paths.iloc[0] if len(paths) == 1 else ""
+
+
+def _path_suffix_candidates(rel_folder: str, audio_name: str) -> List[str]:
+    rel_folder = _key_text(rel_folder).strip("/")
+    audio_name = Path(_clean_identity_value(audio_name)).name.lower()
+    if not audio_name:
+        return []
+    out: List[str] = []
+    if rel_folder:
+        parts = [p for p in rel_folder.split("/") if p]
+        for i in range(len(parts)):
+            out.append("/".join(parts[i:] + [audio_name]))
+    out.append(audio_name)
+    seen = set()
+    keep = []
+    for item in out:
+        if item and item not in seen:
+            seen.add(item)
+            keep.append(item)
+    return keep
+
+
+def _match_audio_row(mp: pd.DataFrame, raw_value: str, source_csv: str = "", csv_base: Optional[Path] = None) -> str:
+    raw = _clean_identity_value(raw_value)
+    if not raw:
+        return ""
+    raw_path_lc = str(Path(raw).expanduser()).lower()
+    raw_rel_lc = _key_text(raw)
+    raw_name_lc = Path(raw).name.lower()
+    raw_stem_lc = re.sub(r"\.[^.]+$", "", raw_name_lc)
+
+    exact = mp.loc[mp["path_lc"].eq(raw_path_lc)]
+    hit = _choose_single_path(exact)
+    if hit:
+        return hit
+
+    exact_rel = mp.loc[mp["rel_lc"].eq(raw_rel_lc)]
+    hit = _choose_single_path(exact_rel)
+    if hit:
+        return hit
+
+    if "/" in raw_rel_lc:
+        suffix_rel = mp.loc[mp["rel_lc"].eq(raw_rel_lc) | mp["rel_lc"].str.endswith("/" + raw_rel_lc)]
+        hit = _choose_single_path(suffix_rel)
+        if hit:
+            return hit
+
+    if source_csv and csv_base is not None:
+        try:
+            source_folder = Path(str(source_csv)).expanduser().resolve().parent
+            try:
+                rel_folder = source_folder.relative_to(csv_base).as_posix()
+            except Exception:
+                rel_folder = source_folder.name
+            for cand in _path_suffix_candidates(rel_folder, raw_name_lc):
+                m = mp.loc[mp["rel_lc"].eq(cand) | mp["rel_lc"].str.endswith("/" + cand)]
+                hit = _choose_single_path(m)
+                if hit:
+                    return hit
+        except Exception:
+            pass
+
+    same_name = mp.loc[mp["_name_lc"].eq(raw_name_lc)]
+    hit = _choose_single_path(same_name)
+    if hit:
+        return hit
+
+    same_stem = mp.loc[mp["_stem_lc"].eq(raw_stem_lc)]
+    hit = _choose_single_path(same_stem)
+    if hit:
+        return hit
+
+    return ""
+
+
+def _make_file_key(row) -> str:
+    for c in ("file_path", "file_path_original", "file_id", "file", "_source_csv"):
+        v = _clean_identity_value(row.get(c, ""))
+        if v:
+            return _key_text(v)
+    return ""
+
+
+def _make_detection_id(row) -> str:
+    f = _make_file_key(row)
+    s = _safe_float(row.get("detection_start_s"), np.nan)
+    e = _safe_float(row.get("detection_end_s"), np.nan)
+    species = _key_text(row.get("species_name", ""))
+    if np.isnan(s) or np.isnan(e):
+        base = f"{f}:nan-nan:{species}"
+    else:
+        base = f"{f}:{s:.3f}-{e:.3f}:{species}"
+    return base
+
+
+def _ensure_unique_detection_ids(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty or "detection_id" not in df.columns:
+        return df
+    d = df["detection_id"].astype(str)
+    n = d.groupby(d).cumcount()
+    dup = d.duplicated(keep=False)
+    if dup.any():
+        df.loc[dup, "detection_id"] = d.loc[dup] + ":" + n.loc[dup].astype(str)
+    return df
+
 def _time_to_seconds(col: pd.Series) -> pd.Series:
     """
     Convert BirdNET start_time/end_time to seconds.
@@ -98,53 +227,178 @@ def _time_to_seconds(col: pd.Series) -> pd.Series:
 
 def _index_audio_recursive(audio_root: Path) -> pd.DataFrame:
     rows: List[Dict[str, str]] = []
+    audio_root = Path(audio_root).expanduser().resolve()
+
     for root, _, names in os.walk(audio_root):
         for nm in names:
-            if os.path.splitext(nm)[1].lower() in (".wav", ".flac", ".mp3"):
-                full = Path(root) / nm
-                rows.append({"filename": nm, "path": str(full.resolve())})
+            if os.path.splitext(nm)[1].lower() in (".wav", ".flac", ".mp3", ".m4a", ".aac", ".ogg", ".aif", ".aiff"):
+                full = (Path(root) / nm).resolve()
+                try:
+                    rel = full.relative_to(audio_root).as_posix()
+                except Exception:
+                    rel = full.name
+
+                rows.append({
+                    "filename": nm,
+                    "path": str(full),
+                    "path_lc": str(full).lower(),
+                    "rel_lc": rel.lower(),
+                })
+
     mp = pd.DataFrame(rows)
+
     if mp.empty:
         return mp
+
     mp["_name_lc"] = mp["filename"].astype(str).str.strip().str.lower()
     mp["_stem_lc"] = mp["_name_lc"].str.replace(r"\.[^.]+$", "", regex=True)
+
+    name_counts = mp["_name_lc"].value_counts()
     stem_counts = mp["_stem_lc"].value_counts()
+    rel_counts = mp["rel_lc"].value_counts()
+
+    mp["_name_unique"] = mp["_name_lc"].isin(name_counts[name_counts == 1].index)
     mp["_stem_unique"] = mp["_stem_lc"].isin(stem_counts[stem_counts == 1].index)
+    mp["_rel_unique"] = mp["rel_lc"].isin(rel_counts[rel_counts == 1].index)
+
     return mp
 
+def _unique_paths(matches: pd.DataFrame) -> List[str]:
+    if matches is None or matches.empty or "path" not in matches.columns:
+        return []
+    return matches["path"].dropna().astype(str).drop_duplicates().tolist()
 
-def _attach_paths_by_filename(df: pd.DataFrame, audio_root: Optional[Path]) -> pd.Series:
-    if not audio_root or not Path(audio_root).exists():
-        # fall back to the original BirdNET 'file' column if present
-        if "file" in df.columns:
-            return df["file"].astype(str)
-        return pd.Series([""] * len(df), index=df.index)
+
+def _match_audio_paths(mp: pd.DataFrame, raw_value: str, source_csv: str = "", csv_base: Optional[Path] = None) -> List[str]:
+    raw = _clean_identity_value(raw_value)
+    if not raw:
+        return []
+    raw_path_lc = str(Path(raw).expanduser()).lower()
+    raw_rel_lc = _key_text(raw)
+    raw_name_lc = Path(raw).name.lower()
+    raw_stem_lc = re.sub(r"\.[^.]+$", "", raw_name_lc)
+
+    exact = _unique_paths(mp.loc[mp["path_lc"].eq(raw_path_lc)])
+    if exact:
+        return exact
+
+    exact_rel = _unique_paths(mp.loc[mp["rel_lc"].eq(raw_rel_lc)])
+    if exact_rel:
+        return exact_rel
+
+    if "/" in raw_rel_lc:
+        suffix_rel = _unique_paths(mp.loc[mp["rel_lc"].eq(raw_rel_lc) | mp["rel_lc"].str.endswith("/" + raw_rel_lc)])
+        if suffix_rel:
+            return suffix_rel
+
+    if source_csv and csv_base is not None:
+        try:
+            source_folder = Path(str(source_csv)).expanduser().resolve().parent
+            try:
+                rel_folder = source_folder.relative_to(csv_base).as_posix()
+            except Exception:
+                rel_folder = source_folder.name
+            for cand in _path_suffix_candidates(rel_folder, raw_name_lc):
+                m = _unique_paths(mp.loc[mp["rel_lc"].eq(cand) | mp["rel_lc"].str.endswith("/" + cand)])
+                if m:
+                    return m
+        except Exception:
+            pass
+
+    same_name = _unique_paths(mp.loc[mp["_name_lc"].eq(raw_name_lc)])
+    if same_name:
+        return same_name
+
+    if raw_stem_lc:
+        same_stem = _unique_paths(mp.loc[mp["_stem_lc"].eq(raw_stem_lc)])
+        if same_stem:
+            return same_stem
+
+    return []
+
+
+def _expand_rows_by_audio_matches(
+    df: pd.DataFrame,
+    audio_root: Optional[Path],
+    csv_root: Optional[Path] = None,
+) -> pd.DataFrame:
+    if df.empty or not audio_root or not Path(audio_root).exists():
+        out = df.copy()
+        out["file_path"] = ""
+        return out
 
     mp = _index_audio_recursive(Path(audio_root))
     if mp.empty:
-        if "file" in df.columns:
-            return df["file"].astype(str)
-        return pd.Series([""] * len(df), index=df.index)
+        out = df.copy()
+        out["file_path"] = ""
+        return out
 
-    name_map = dict(zip(mp["_name_lc"], mp["path"]))
-    fid_lc = df["file_id"].astype(str).str.strip().str.lower()
-    out = fid_lc.map(name_map)
+    raw_file = df["file"].astype(str).str.strip() if "file" in df.columns else df["file_id"].astype(str).str.strip()
 
-    need = out.isna() | (out.astype(str).str.strip() == "")
-    if need.any():
-        uniq = mp.loc[mp["_stem_unique"], ["_stem_lc", "path"]]
-        stem_map = dict(zip(uniq["_stem_lc"], uniq["path"]))
-        fid_stem = fid_lc.str.replace(r"\.[^.]+$", "", regex=True)
-        out.loc[need] = fid_stem.loc[need].map(stem_map)
+    csv_base = None
+    if csv_root is not None:
+        try:
+            csv_root_p = Path(csv_root).expanduser().resolve()
+            csv_base = csv_root_p.parent if csv_root_p.is_file() else csv_root_p
+        except Exception:
+            csv_base = None
 
-    out = out.fillna("")
-    # fall back to BirdNET 'file' path for any remaining blanks
-    if "file" in df.columns:
-        src = df["file"].astype(str)
-        missing = out.astype(str).str.strip().eq("")
-        out.loc[missing] = src.loc[missing]
-    return out
+    rows = []
+    cache: Dict[Tuple[str, str], List[str]] = {}
+    for idx, row in df.iterrows():
+        source_csv = str(row.get("_source_csv", ""))
+        raw_value = str(raw_file.at[idx])
+        key = (raw_value, source_csv)
+        if key not in cache:
+            cache[key] = _match_audio_paths(mp, raw_value, source_csv=source_csv, csv_base=csv_base)
+        matches = cache[key]
+        if matches:
+            for path in matches:
+                r = row.copy()
+                r["file_path"] = path
+                rows.append(r)
+        else:
+            r = row.copy()
+            r["file_path"] = ""
+            rows.append(r)
 
+    return pd.DataFrame(rows).reset_index(drop=True)
+
+
+def _attach_paths_by_filename(
+    df: pd.DataFrame,
+    audio_root: Optional[Path],
+    csv_root: Optional[Path] = None,
+) -> pd.Series:
+    out = pd.Series([""] * len(df), index=df.index)
+
+    if not audio_root or not Path(audio_root).exists():
+        return out
+
+    mp = _index_audio_recursive(Path(audio_root))
+    if mp.empty:
+        return out
+
+    raw_file = df["file"].astype(str).str.strip() if "file" in df.columns else df["file_id"].astype(str).str.strip()
+
+    csv_base = None
+    if csv_root is not None:
+        try:
+            csv_root_p = Path(csv_root).expanduser().resolve()
+            csv_base = csv_root_p.parent if csv_root_p.is_file() else csv_root_p
+        except Exception:
+            csv_base = None
+
+    cache: Dict[Tuple[str, str], str] = {}
+    for idx in df.index:
+        source_csv = str(df.at[idx, "_source_csv"]) if "_source_csv" in df.columns else ""
+        raw_value = str(raw_file.at[idx])
+        key = (raw_value, source_csv)
+        if key not in cache:
+            cache[key] = _match_audio_row(mp, raw_value, source_csv=source_csv, csv_base=csv_base)
+        out.at[idx] = cache[key]
+
+    return out.fillna("")
 
 def _drop_legacy_mapped_columns(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
@@ -255,22 +509,15 @@ def ingest_birdnet(
     if keep_only_present:
         df = df.loc[df["presence_label"] == "present"].copy()
 
-    # file_path via audio_root (exact filename + unique-stem fallback, then fallback to BirdNET file path)
-    df["file_path"] = _attach_paths_by_filename(df, audio_root)
-
-    # detection_id
-    def _det_id(row) -> str:
-        f = str(row.get("file_id", ""))
-        s = _safe_float(row.get("detection_start_s"), np.nan)
-        e = _safe_float(row.get("detection_end_s"),   np.nan)
-        if np.isnan(s) or np.isnan(e):
-            return f"{f}:nan-nan"
-        return f"{f}:{s:.3f}-{e:.3f}"
-
-    df["detection_id"] = df.apply(_det_id, axis=1)
+    df = _expand_rows_by_audio_matches(df, audio_root, csv_root=csv_root)
+    df["file_key"] = df.apply(_make_file_key, axis=1)
+    df["detection_id"] = df.apply(_make_detection_id, axis=1)
 
     # Normalise (types, missing cores, label lower-casing, id backfill)
-    df = normalise_schema(df, build_detection_id=True)
+    df = normalise_schema(df, build_detection_id=False)
+    df["file_key"] = df.apply(_make_file_key, axis=1)
+    df["detection_id"] = df.apply(_make_detection_id, axis=1)
+    df = _ensure_unique_detection_ids(df)
 
     # BirdNET raw columns used to build canonical fields
     mapped_sources = []
