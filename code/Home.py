@@ -1291,63 +1291,226 @@ def _read_result_inputs(path: Path):
     return pd.concat(frames, ignore_index=True), files
 
 
-@st.cache_data(show_spinner=False)
-def _index_audio_inputs(path_str: str):
-    import pandas as pd
 
-    root = Path(path_str).expanduser()
-    rows = []
+def _audio_index_db_path(proj_path: Path) -> Path:
+    return project_path(proj_path, "workspace") / "audio_index.sqlite"
 
-    if not root.exists():
-        return pd.DataFrame(columns=[
-            "basename_lc",
-            "stem_lc",
-            "path",
-            "path_lc",
-            "rel_lc",
-        ])
 
-    if root.is_file():
-        candidates = [root] if root.suffix.lower() in AUDIO_EXTS else []
-        root_for_rel = root.parent
+def _audio_index_norm_path(p: str) -> str:
+    return _pa_clean_value(p).replace("\\", "/").lower()
+
+
+def _audio_index_status(index_db: Path, audio_root: Optional[Path]) -> Dict[str, Any]:
+    import sqlite3
+    out = {"ready": False, "file_count": 0, "audio_root": "", "index_db": str(index_db), "created_at": ""}
+    if not index_db or not Path(index_db).exists():
+        return out
+    try:
+        root_abs = os.path.abspath(os.path.expanduser(str(audio_root))) if audio_root else ""
+        with sqlite3.connect(str(index_db)) as conn:
+            meta = dict(conn.execute("SELECT key, value FROM audio_index_meta").fetchall())
+            cnt = conn.execute("SELECT COUNT(*) FROM audio_files").fetchone()[0]
+        out.update({
+            "ready": bool(cnt and (not root_abs or meta.get("audio_root", "") == root_abs)),
+            "file_count": int(cnt or 0),
+            "audio_root": meta.get("audio_root", ""),
+            "created_at": meta.get("created_at", ""),
+        })
+    except Exception:
+        return {"ready": False, "file_count": 0, "audio_root": "", "index_db": str(index_db), "created_at": ""}
+    return out
+
+
+def _format_elapsed(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h:02d}:{m:02d}:{s:02d}"
+
+
+def _build_audio_index_sqlite(audio_root: Path, index_db: Path, progress_callback=None, batch_size: int = 10000) -> Dict[str, Any]:
+    import sqlite3
+    import time
+
+    root_abs = os.path.abspath(os.path.expanduser(str(audio_root)))
+    index_db = Path(index_db)
+    index_db.parent.mkdir(parents=True, exist_ok=True)
+    tmp_db = index_db.with_suffix(index_db.suffix + ".building")
+    if tmp_db.exists():
+        tmp_db.unlink()
+
+    audio_exts = {e.lower() for e in AUDIO_EXTS}
+    started = time.monotonic()
+    count = 0
+    batch = []
+
+    conn = sqlite3.connect(str(tmp_db))
+    try:
+        cur = conn.cursor()
+        cur.execute("PRAGMA journal_mode=OFF")
+        cur.execute("PRAGMA synchronous=OFF")
+        cur.execute("PRAGMA temp_store=MEMORY")
+        cur.execute("CREATE TABLE audio_files (id INTEGER PRIMARY KEY, audio_root TEXT NOT NULL, filename TEXT NOT NULL, filename_lc TEXT NOT NULL, stem_lc TEXT NOT NULL, suffix_lc TEXT NOT NULL, path TEXT NOT NULL, path_lc TEXT NOT NULL, rel_lc TEXT NOT NULL, parent_lc TEXT NOT NULL)")
+        cur.execute("CREATE TABLE audio_index_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+
+        for root, _, names in os.walk(root_abs):
+            for nm in names:
+                suffix = os.path.splitext(nm)[1].lower()
+                if suffix not in audio_exts:
+                    continue
+                full = os.path.abspath(os.path.join(root, nm))
+                try:
+                    rel = os.path.relpath(full, root_abs).replace(os.sep, "/")
+                except Exception:
+                    rel = nm
+                filename_lc = nm.lower()
+                stem_lc = os.path.splitext(filename_lc)[0]
+                path_lc = full.replace("\\", "/").lower()
+                rel_lc = rel.replace("\\", "/").lower()
+                parent_lc = os.path.dirname(rel_lc).replace("\\", "/").lower()
+                batch.append((root_abs, nm, filename_lc, stem_lc, suffix, full, path_lc, rel_lc, parent_lc))
+                count += 1
+                if len(batch) >= batch_size:
+                    cur.executemany("INSERT INTO audio_files (audio_root, filename, filename_lc, stem_lc, suffix_lc, path, path_lc, rel_lc, parent_lc) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", batch)
+                    conn.commit()
+                    batch.clear()
+                    if progress_callback:
+                        progress_callback(count, root, time.monotonic() - started, False)
+
+        if batch:
+            cur.executemany("INSERT INTO audio_files (audio_root, filename, filename_lc, stem_lc, suffix_lc, path, path_lc, rel_lc, parent_lc) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", batch)
+            conn.commit()
+            batch.clear()
+            if progress_callback:
+                progress_callback(count, root_abs, time.monotonic() - started, False)
+
+        cur.execute("CREATE INDEX idx_audio_filename_lc ON audio_files(filename_lc)")
+        cur.execute("CREATE INDEX idx_audio_stem_lc ON audio_files(stem_lc)")
+        cur.execute("CREATE INDEX idx_audio_path_lc ON audio_files(path_lc)")
+        cur.execute("CREATE INDEX idx_audio_rel_lc ON audio_files(rel_lc)")
+        cur.execute("CREATE INDEX idx_audio_parent_lc ON audio_files(parent_lc)")
+        cur.execute("INSERT OR REPLACE INTO audio_index_meta (key, value) VALUES (?, ?)", ("audio_root", root_abs))
+        cur.execute("INSERT OR REPLACE INTO audio_index_meta (key, value) VALUES (?, ?)", ("file_count", str(count)))
+        cur.execute("INSERT OR REPLACE INTO audio_index_meta (key, value) VALUES (?, ?)", ("created_at", datetime.now(dt_timezone.utc).isoformat()))
+        conn.commit()
+    finally:
+        conn.close()
+
+    if index_db.exists():
+        index_db.unlink()
+    tmp_db.replace(index_db)
+    elapsed = time.monotonic() - started
+    if progress_callback:
+        progress_callback(count, root_abs, elapsed, True)
+    return {"ready": True, "file_count": int(count), "elapsed_s": float(elapsed), "index_db": str(index_db), "audio_root": root_abs}
+
+
+def _ensure_audio_index_ui(proj_path: Path, audio_root: Optional[Path], key_prefix: str, auto_build: bool = False) -> Dict[str, Any]:
+    if not audio_root or not Path(audio_root).exists():
+        return {"ready": False, "file_count": 0, "index_db": ""}
+
+    index_db = _audio_index_db_path(proj_path)
+    status = _audio_index_status(index_db, audio_root)
+
+    st.subheader("Audio index")
+    if status.get("ready"):
+        c1, c2 = st.columns([1, 2])
+        c1.metric("Indexed audio files", f"{int(status.get('file_count', 0)):,}")
+        c2.caption(f"Using `{index_db}`")
+        rebuild = st.button("Rebuild audio index", key=f"{key_prefix}_rebuild_audio_index")
+        if not rebuild:
+            status["index_db"] = str(index_db)
+            return status
     else:
-        root_for_rel = root
-        candidates = []
-        for ext in AUDIO_EXTS:
-            candidates.extend(root.rglob(f"*{ext}"))
-            candidates.extend(root.rglob(f"*{ext.upper()}"))
+        st.info("Build the project audio index before linking detections. This reads every supported audio file under the selected audio root.")
+        rebuild = auto_build or st.button("Build audio index", key=f"{key_prefix}_build_audio_index")
+        if not rebuild:
+            status["index_db"] = str(index_db)
+            return status
 
-    seen = set()
+    status_box = st.empty()
+    metric_box = st.empty()
+    folder_box = st.empty()
 
-    for p in candidates:
+    def _progress(n: int, folder: str, elapsed: float, done: bool):
+        rate = (float(n) / elapsed) if elapsed > 0 else 0.0
+        label = "Audio index complete" if done else "Indexing audio files"
+        status_box.info(f"{label}: {int(n):,} files | elapsed {_format_elapsed(elapsed)} | {rate:,.0f} files/sec")
+        metric_box.metric("Files indexed", f"{int(n):,}")
+        folder_box.caption(f"Current folder: `{folder}`")
+
+    try:
+        result = _build_audio_index_sqlite(Path(audio_root), index_db, progress_callback=_progress)
+        set_status(proj_path, "audio_resolver", "ready")
+        st.success(f"Indexed {int(result.get('file_count', 0)):,} audio files in {_format_elapsed(float(result.get('elapsed_s', 0)))}.")
+        return {"ready": True, "file_count": int(result.get("file_count", 0)), "index_db": str(index_db), "audio_root": result.get("audio_root", "")}
+    except Exception as e:
+        st.error(f"Audio indexing failed: {e}")
+        return {"ready": False, "file_count": 0, "index_db": str(index_db)}
+
+
+def _audio_index_query_paths(index_db: Path, raw_sql: str, params: Tuple[Any, ...]) -> List[str]:
+    import sqlite3
+    if not index_db or not Path(index_db).exists():
+        return []
+    try:
+        with sqlite3.connect(str(index_db)) as conn:
+            rows = conn.execute(raw_sql, params).fetchall()
+        return list(dict.fromkeys([str(r[0]) for r in rows if r and _pa_clean_value(r[0])]))
+    except Exception:
+        return []
+
+
+def _resolve_audio_values_sqlite(index_db: Path, value: str, source_file: str = "", results_root: Optional[Path] = None) -> List[str]:
+    import re as _re
+    raw = _pa_clean_value(value)
+    if not raw or not index_db or not Path(index_db).exists():
+        return []
+
+    raw_rel_lc = make_file_key(raw).strip("/")
+    raw_name_lc = Path(raw).name.lower()
+    raw_stem_lc = _re.sub(r"\.[^.]+$", "", raw_name_lc)
+
+    if _is_abs_like(raw):
+        raw_path_lc = raw.replace("\\", "/").lower()
+        m = _audio_index_query_paths(index_db, "SELECT path FROM audio_files WHERE path_lc = ?", (raw_path_lc,))
+        if m:
+            return m
+
+    m = _audio_index_query_paths(index_db, "SELECT path FROM audio_files WHERE rel_lc = ?", (raw_rel_lc,))
+    if m:
+        return m
+
+    if "/" in raw_rel_lc:
+        m = _audio_index_query_paths(index_db, "SELECT path FROM audio_files WHERE rel_lc = ? OR rel_lc LIKE ?", (raw_rel_lc, "%/" + raw_rel_lc))
+        if m:
+            return m
+
+    if source_file and results_root is not None:
         try:
-            if not p.is_file():
-                continue
-
-            p_abs = p.resolve()
-            p_key = str(p_abs).lower()
-
-            if p_key in seen:
-                continue
-
-            seen.add(p_key)
-
+            src_parent = Path(source_file).expanduser().resolve().parent
             try:
-                rel = p_abs.relative_to(root_for_rel.resolve()).as_posix()
+                folder = src_parent.relative_to(Path(results_root).expanduser().resolve()).as_posix()
             except Exception:
-                rel = p_abs.name
-
-            rows.append({
-                "basename_lc": p_abs.name.lower(),
-                "stem_lc": p_abs.stem.lower(),
-                "path": str(p_abs),
-                "path_lc": str(p_abs).lower(),
-                "rel_lc": rel.lower(),
-            })
+                folder = src_parent.name
+            for cand in _pa_suffix_candidates(folder, raw_name_lc):
+                m = _audio_index_query_paths(index_db, "SELECT path FROM audio_files WHERE rel_lc = ? OR rel_lc LIKE ?", (cand, "%/" + cand))
+                if m:
+                    return m
         except Exception:
-            continue
+            pass
 
-    return pd.DataFrame(rows)
+    m = _audio_index_query_paths(index_db, "SELECT path FROM audio_files WHERE filename_lc = ?", (raw_name_lc,))
+    if m:
+        return m
+
+    if raw_stem_lc:
+        m = _audio_index_query_paths(index_db, "SELECT path FROM audio_files WHERE stem_lc = ?", (raw_stem_lc,))
+        if m:
+            return m
+
+    return []
+
 
 # Views
 def view_login() -> None:
@@ -1834,12 +1997,19 @@ def view_import_results() -> None:
             st.info("Select a valid BirdNET results folder or CSV to enable ingestion.")
 
         if run_btn and can_run:
+            audio_index_db = None
+            if audio_base and Path(audio_base).exists():
+                audio_index = _ensure_audio_index_ui(proj_path, audio_base, key_prefix="bn", auto_build=True)
+                if not audio_index.get("ready"):
+                    return
+                audio_index_db = Path(str(audio_index.get("index_db")))
             with st.spinner("Ingesting BirdNET results and normalising…"):
                 df_norm = ingest_birdnet(
                     csv_root=bn_csv_root,
                     audio_root=audio_base,
                     min_conf=float(min_conf),
                     keep_only_present=bool(keep_present_only),
+                    audio_index_db=audio_index_db,
                 )
 
             if df_norm.empty:
@@ -2008,10 +2178,13 @@ def view_import_results() -> None:
         st.warning("Choose the audio column to proceed.")
         return
 
-    wav_index = _index_audio_inputs(str(audio_base))
-    if wav_index.empty:
+    audio_index = _ensure_audio_index_ui(proj_path, audio_base, key_prefix="manual", auto_build=False)
+    if not audio_index.get("ready"):
+        return
+    if int(audio_index.get("file_count", 0)) <= 0:
         st.error("No supported audio files found in the selected audio location.")
         return
+    wav_index = Path(str(audio_index.get("index_db")))
 
     df_link = df.copy()
 
@@ -2029,7 +2202,7 @@ def view_import_results() -> None:
         source_value = str(sources.loc[idx_row]) if idx_row in sources.index else ""
         cache_key = (str(raw_value), source_value)
         if cache_key not in cache:
-            cache[cache_key] = _resolve_indexed_audio_values(wav_index, str(raw_value), source_file=source_value, results_root=results_root)
+            cache[cache_key] = _resolve_audio_values_sqlite(wav_index, str(raw_value), source_file=source_value, results_root=results_root)
         matches = cache[cache_key]
         base_row = df_link.loc[idx_row].copy()
         if matches:

@@ -106,6 +106,68 @@ def _path_suffix_candidates(rel_folder: str, audio_name: str) -> List[str]:
     return keep
 
 
+
+def _sqlite_query_paths(index_db: Path, sql: str, params: Tuple[object, ...]) -> List[str]:
+    import sqlite3
+    if not index_db or not Path(index_db).exists():
+        return []
+    try:
+        with sqlite3.connect(str(index_db)) as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return list(dict.fromkeys([str(r[0]) for r in rows if r and _clean_identity_value(r[0])]))
+    except Exception:
+        return []
+
+
+def _match_audio_paths_sqlite(index_db: Path, raw_value: str, source_csv: str = "", csv_base: Optional[Path] = None) -> List[str]:
+    raw = _clean_identity_value(raw_value)
+    if not raw or not index_db or not Path(index_db).exists():
+        return []
+
+    raw_rel_lc = _key_text(raw).strip("/")
+    raw_name_lc = Path(raw).name.lower()
+    raw_stem_lc = re.sub(r"\.[^.]+$", "", raw_name_lc)
+
+    if raw.startswith("\\\\") or raw.startswith("//") or (len(raw) >= 3 and raw[1] == ":" and raw[2] in ("\\", "/")) or Path(raw).is_absolute():
+        m = _sqlite_query_paths(index_db, "SELECT path FROM audio_files WHERE path_lc = ?", (raw.replace("\\", "/").lower(),))
+        if m:
+            return m
+
+    m = _sqlite_query_paths(index_db, "SELECT path FROM audio_files WHERE rel_lc = ?", (raw_rel_lc,))
+    if m:
+        return m
+
+    if "/" in raw_rel_lc:
+        m = _sqlite_query_paths(index_db, "SELECT path FROM audio_files WHERE rel_lc = ? OR rel_lc LIKE ?", (raw_rel_lc, "%/" + raw_rel_lc))
+        if m:
+            return m
+
+    if source_csv and csv_base is not None:
+        try:
+            source_folder = Path(str(source_csv)).expanduser().resolve().parent
+            try:
+                rel_folder = source_folder.relative_to(csv_base).as_posix()
+            except Exception:
+                rel_folder = source_folder.name
+            for cand in _path_suffix_candidates(rel_folder, raw_name_lc):
+                m = _sqlite_query_paths(index_db, "SELECT path FROM audio_files WHERE rel_lc = ? OR rel_lc LIKE ?", (cand, "%/" + cand))
+                if m:
+                    return m
+        except Exception:
+            pass
+
+    m = _sqlite_query_paths(index_db, "SELECT path FROM audio_files WHERE filename_lc = ?", (raw_name_lc,))
+    if m:
+        return m
+
+    if raw_stem_lc:
+        m = _sqlite_query_paths(index_db, "SELECT path FROM audio_files WHERE stem_lc = ?", (raw_stem_lc,))
+        if m:
+            return m
+
+    return []
+
+
 def _match_audio_row(mp: pd.DataFrame, raw_value: str, source_csv: str = "", csv_base: Optional[Path] = None) -> str:
     raw = _clean_identity_value(raw_value)
     if not raw:
@@ -321,17 +383,25 @@ def _expand_rows_by_audio_matches(
     df: pd.DataFrame,
     audio_root: Optional[Path],
     csv_root: Optional[Path] = None,
+    audio_index_db: Optional[Path] = None,
 ) -> pd.DataFrame:
-    if df.empty or not audio_root or not Path(audio_root).exists():
+    if df.empty:
         out = df.copy()
         out["file_path"] = ""
         return out
 
-    mp = _index_audio_recursive(Path(audio_root))
-    if mp.empty:
-        out = df.copy()
-        out["file_path"] = ""
-        return out
+    use_sqlite = bool(audio_index_db and Path(audio_index_db).exists())
+    mp = None
+    if not use_sqlite:
+        if not audio_root or not Path(audio_root).exists():
+            out = df.copy()
+            out["file_path"] = ""
+            return out
+        mp = _index_audio_recursive(Path(audio_root))
+        if mp.empty:
+            out = df.copy()
+            out["file_path"] = ""
+            return out
 
     raw_file = df["file"].astype(str).str.strip() if "file" in df.columns else df["file_id"].astype(str).str.strip()
 
@@ -350,7 +420,10 @@ def _expand_rows_by_audio_matches(
         raw_value = str(raw_file.at[idx])
         key = (raw_value, source_csv)
         if key not in cache:
-            cache[key] = _match_audio_paths(mp, raw_value, source_csv=source_csv, csv_base=csv_base)
+            if use_sqlite:
+                cache[key] = _match_audio_paths_sqlite(Path(audio_index_db), raw_value, source_csv=source_csv, csv_base=csv_base)
+            else:
+                cache[key] = _match_audio_paths(mp, raw_value, source_csv=source_csv, csv_base=csv_base)
         matches = cache[key]
         if matches:
             for path in matches:
@@ -447,6 +520,7 @@ def ingest_birdnet(
     audio_root: Optional[Path] = None,
     min_conf: float = 0.0,
     keep_only_present: bool = True,
+    audio_index_db: Optional[Path] = None,
 ) -> pd.DataFrame:
     """
     Ingest BirdNET CSVs with columns:
@@ -509,7 +583,7 @@ def ingest_birdnet(
     if keep_only_present:
         df = df.loc[df["presence_label"] == "present"].copy()
 
-    df = _expand_rows_by_audio_matches(df, audio_root, csv_root=csv_root)
+    df = _expand_rows_by_audio_matches(df, audio_root, csv_root=csv_root, audio_index_db=audio_index_db)
     df["file_key"] = df.apply(_make_file_key, axis=1)
     df["detection_id"] = df.apply(_make_detection_id, axis=1)
 
