@@ -4,6 +4,7 @@ import os
 import io
 import math
 import re
+import warnings
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Tuple, Dict, List
@@ -151,22 +152,47 @@ def with_effective_labels(df_in: pd.DataFrame) -> pd.DataFrame:
 
 def parse_dt_full(s: pd.Series) -> pd.Series:
     s = s.astype(str).str.strip()
+    dt = pd.Series(pd.NaT, index=s.index, dtype="datetime64[ns]")
 
-    # First pass: generic parser for normal datetime strings
-    dt = pd.to_datetime(s, errors="coerce", dayfirst=True)
+    for fmt in (
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d",
+        "%d/%m/%Y %H:%M:%S",
+        "%d/%m/%Y %H:%M",
+        "%d/%m/%Y",
+        "%d-%m-%Y %H:%M:%S",
+        "%d-%m-%Y %H:%M",
+        "%d-%m-%Y",
+        "%Y/%m/%d %H:%M:%S",
+        "%Y/%m/%d %H:%M",
+        "%Y/%m/%d",
+        "%Y%m%d_%H%M%S",
+        "%Y%m%d%H%M%S",
+        "%Y%m%d",
+    ):
+        missing = dt.isna()
+        if not missing.any():
+            break
+        parsed = pd.to_datetime(s[missing], format=fmt, errors="coerce")
+        dt.loc[missing] = parsed
 
-    # Fallback: compact detector formats such as 20250705_015445 / 20250705015445
     missing = dt.isna()
     if missing.any():
         ss = s[missing].str.replace(r"\D", "", regex=True)
-
-        dt14 = pd.to_datetime(ss.str.slice(0, 14), format="%Y%m%d%H%M%S", errors="coerce")
-        still_missing = dt14.isna()
+        parsed14 = pd.to_datetime(ss.str.slice(0, 14), format="%Y%m%d%H%M%S", errors="coerce")
+        still_missing = parsed14.isna()
         if still_missing.any():
-            dt8 = pd.to_datetime(ss.str.slice(0, 8), format="%Y%m%d", errors="coerce")
-            dt14.loc[still_missing] = dt8.loc[still_missing]
+            parsed8 = pd.to_datetime(ss.str.slice(0, 8), format="%Y%m%d", errors="coerce")
+            parsed14.loc[still_missing] = parsed8.loc[still_missing]
+        dt.loc[missing] = parsed14
 
-        dt.loc[missing] = dt14
+    missing = dt.isna()
+    if missing.any():
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message="Could not infer format.*", category=UserWarning)
+            parsed = pd.to_datetime(s[missing], errors="coerce", dayfirst=True)
+        dt.loc[missing] = parsed
 
     return dt
 

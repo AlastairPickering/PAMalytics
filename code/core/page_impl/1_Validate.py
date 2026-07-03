@@ -84,6 +84,18 @@ def _safe_widget_key(prefix: str, *parts: object) -> str:
     return f"{prefix}_{h}"
 
 
+
+
+_ADD_SPECIES_OPTION = "* Add species..."
+
+def _clean_added_species(value: object) -> str:
+    s = str(value or "").strip()
+    s = " ".join(s.split())
+    if s.lower() in ("nan", "none", "<na>", "[absent]", _ADD_SPECIES_OPTION.lower()):
+        return ""
+    return s
+
+
 def _force_string_cols(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
     for c in cols:
         if c in df.columns:
@@ -313,11 +325,16 @@ def _apply_card_widget_state(
         if choice is None:
             choice = "[absent]" if (current_presence != "present" or current_species.strip() == "") else current_species
 
-        if choice == "[absent]":
+        if choice == _ADD_SPECIES_OPTION:
+            choice = _clean_added_species(st.session_state.get(f"{sp_key}_new", ""))
+            if choice:
+                st.session_state[sp_key] = choice
+
+        if choice == "[absent]" or not str(choice).strip():
             out.at[idx, "species_name"] = ""
             out.at[idx, "presence_label"] = "absent"
         else:
-            out.at[idx, "species_name"] = str(choice)
+            out.at[idx, "species_name"] = str(choice).strip()
             out.at[idx, "presence_label"] = "present"
 
         current_unc = st.session_state.get(unc_key, _bool_from_any(row.get("uncertain_flag", "")))
@@ -2280,10 +2297,17 @@ def _render_strategy_summary_bar(df: pd.DataFrame):
             """,
             unsafe_allow_html=True,
         )
+    def _open_validate_strategy_modal():
+        st.session_state["validate_strategy_modal_open"] = True
+
     with right:
         st.markdown("<div style='height:0.35rem'></div>", unsafe_allow_html=True)
-        if st.button("Change strategy", key="open_validate_strategy_modal", width="stretch"):
-            st.session_state["validate_strategy_modal_open"] = True
+        st.button(
+            "Change strategy",
+            key="open_validate_strategy_modal",
+            width="stretch",
+            on_click=_open_validate_strategy_modal,
+        )
 
 
 def _compact_preview_caption(goal: str, balance: str) -> str:
@@ -2346,9 +2370,14 @@ def _commit_card(
     cur_pl = card_rows_updated["presence_label"].astype(str).str.lower()
     orig_sp = card_rows_updated["species_name_original"].astype(str)
     orig_pl = card_rows_updated["presence_label_original"].astype(str).str.lower()
-    changed_mask = (cur_sp != orig_sp) | (cur_pl != orig_pl)
+    species_presence_changed_mask = (cur_sp != orig_sp) | (cur_pl != orig_pl)
+    uncertain_changed_mask = card_rows_updated.get(
+        "uncertain_flag",
+        pd.Series([""] * len(card_rows_updated), index=card_rows_updated.index)
+    ).map(_bool_from_any).astype(bool)
+    changed_mask = species_presence_changed_mask | uncertain_changed_mask
 
-    for i, changed_here in zip(card_rows_updated.index, changed_mask):
+    for i, changed_here, species_presence_changed_here in zip(card_rows_updated.index, changed_mask, species_presence_changed_mask):
         current_sp = str(det.at[i, "species_name"] or "")
         current_pl = str(det.at[i, "presence_label"] or "").strip().lower()
         original_sp = str(det.at[i, "species_name_original"] or "")
@@ -2363,7 +2392,7 @@ def _commit_card(
         if is_uncertain:
             det.at[i, "validation_state"] = "uncertain"
         else:
-            det.at[i, "validation_state"] = "incorrect" if changed_here else "correct"
+            det.at[i, "validation_state"] = "incorrect" if species_presence_changed_here else "correct"
 
         det.at[i, "validated_by"] = user_id
         det.at[i, "validated_at"] = now_iso
@@ -2753,24 +2782,24 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
             except Exception as e:
                 st.error(f"Interactive spectrogram error: {e}")
 
-        if st.session_state.get("validate_strategy_modal_open", False):
-            _strategy_dialog()
-
     _render_strategy_summary_bar(df_all)
+
+    if hasattr(st, "dialog") and st.session_state.get("validate_strategy_modal_open", False):
+        _strategy_dialog()
 
     top1, top2, top3 = st.columns([1, 1, 1])
     with top1:
         NUM_PER_PAGE = st.number_input(
             "Spectrograms per page",
-            min_value=4,
+            min_value=1,
             max_value=40,
-            step=2,
+            step=1,
             key="validate_num_per_page",
         )
     with top2:
         COLS_PER_ROW = st.slider(
             "Columns per row",
-            min_value=2,
+            min_value=1,
             max_value=5,
             key="validate_cols_per_row",
         )
@@ -2882,14 +2911,13 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
     orig_pl_all = df_all.get("presence_label_original", df_all.get("presence_label", "")).astype(str).str.lower()
     cur_sp_all = df_all.get("species_name", "").astype(str)
     cur_pl_all = df_all.get("presence_label", "").astype(str).str.lower()
-    df_all["changed_flag"] = (orig_sp_all != cur_sp_all) | (orig_pl_all != cur_pl_all)
-
     val_state_all = df_all.get("validation_state", pd.Series([""] * len(df_all))).astype(str).str.lower()
     df_all["reviewed_flag"] = val_state_all.replace({"nan": "", "<na>": ""}).ne("")
     df_all["uncertain_flag_bool"] = df_all.get(
         "uncertain_flag",
         pd.Series([""] * len(df_all), index=df_all.index)
     ).map(_bool_from_any)
+    df_all["changed_flag"] = (orig_sp_all != cur_sp_all) | (orig_pl_all != cur_pl_all) | df_all["uncertain_flag_bool"].astype(bool)
 
     df_candidates = df_all.copy()
 
@@ -3035,12 +3063,18 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
         pd.unique(
             pd.concat([
                 df_all.get("species_name", pd.Series([], dtype=object)).astype(str),
-                df_all.get("class", pd.Series([], dtype=object)).astype(str)
+                df_all.get("class", pd.Series([], dtype=object)).astype(str),
+                df_all.get("validation_species", pd.Series([], dtype=object)).astype(str),
             ], ignore_index=True)
         ).tolist()
     )
-    species_choices = [s for s in species_choices if s and s.lower() not in ("nan", "[absent]")]
+    species_choices = [
+        s.strip() for s in species_choices
+        if s and s.strip() and s.strip().lower() not in ("nan", "none", "<na>", "[absent]", _ADD_SPECIES_OPTION.lower())
+    ]
+    species_choices = sorted(pd.unique(pd.Series(species_choices, dtype=object)).tolist(), key=lambda x: x.lower())
     species_choices.insert(0, "[absent]")
+    species_select_options = species_choices + [_ADD_SPECIES_OPTION]
 
     n_rows = math.ceil(len(page_keys) / int(COLS_PER_ROW))
     for r in range(n_rows):
@@ -3154,7 +3188,62 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                         freqs_hz = np.linspace(0.0, sr * 0.5, S.shape[0])
                         dur = max(1e-6, len(y) / sr)
                         tpad = dur * 0.01
-                        xmin, xmax = 0 - tpad, dur + tpad
+                        time_state_key = _safe_widget_key("validate_time_window_state", base, species_orig)
+                        time_key_start = _safe_widget_key("validate_time_xmin_input", base, species_orig)
+                        time_key_end = _safe_widget_key("validate_time_xmax_input", base, species_orig)
+                        stored_window = st.session_state.get(time_state_key, {})
+                        stored_start = float(min(max(0.0, _num(stored_window.get("xmin", st.session_state.get(time_key_start, 0.0)))), float(dur)))
+                        stored_end = float(min(max(0.0, _num(stored_window.get("xmax", st.session_state.get(time_key_end, float(dur))))), float(dur)))
+                        if stored_end <= stored_start:
+                            stored_start, stored_end = 0.0, float(dur)
+
+                        tw1, tw2, tw3 = st.columns([1.0, 1.0, 0.16])
+                        with tw3:
+                            st.markdown("<div style='height:1.65rem'></div>", unsafe_allow_html=True)
+                            reset_window = st.button(
+                                "↺",
+                                key=_safe_widget_key("validate_time_reset", base, species_orig),
+                                help="Reset x-axis to full clip",
+                            )
+                        if reset_window:
+                            st.session_state[time_state_key] = {"xmin": 0.0, "xmax": float(dur)}
+                            st.session_state[time_key_start] = 0.0
+                            st.session_state[time_key_end] = float(dur)
+                            if hasattr(st, "rerun"):
+                                st.rerun()
+                            elif hasattr(st, "experimental_rerun"):
+                                st.experimental_rerun()
+
+                        if time_key_start not in st.session_state:
+                            st.session_state[time_key_start] = stored_start
+                        if time_key_end not in st.session_state:
+                            st.session_state[time_key_end] = stored_end
+
+                        with tw1:
+                            x_start = st.number_input(
+                                "X min (s)",
+                                min_value=0.0,
+                                max_value=float(dur),
+                                step=0.1,
+                                format="%.3f",
+                                key=time_key_start,
+                            )
+                        with tw2:
+                            x_end = st.number_input(
+                                "X max (s)",
+                                min_value=0.0,
+                                max_value=float(dur),
+                                step=0.1,
+                                format="%.3f",
+                                key=time_key_end,
+                            )
+                        if float(x_end) <= float(x_start):
+                            x_start = 0.0
+                            x_end = float(dur)
+                        xmin, xmax = max(0.0, float(x_start)), min(float(dur), float(x_end))
+                        st.session_state[time_state_key] = {"xmin": float(xmin), "xmax": float(xmax)}
+                        if xmax <= xmin:
+                            xmin, xmax = 0 - tpad, dur + tpad
                     except Exception as e:
                         st.error(f"Spectrogram setup error: {e}")
                         times = np.arange(2)
@@ -3164,9 +3253,24 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
 
                     try:
                         fig, ax = plt.subplots(figsize=(8.6, 5.2), dpi=280, constrained_layout=False)
-                        extent = [times.min(), times.max(), freqs_hz.min(), freqs_hz.max()]
+                        plot_xmin, plot_xmax = float(xmin), float(xmax)
+                        if not (np.isfinite(plot_xmin) and np.isfinite(plot_xmax) and plot_xmax > plot_xmin):
+                            plot_xmin, plot_xmax = 0.0, float(dur)
+                        plot_span = max(1e-6, plot_xmax - plot_xmin)
+                        plot_S = S_dB
+                        if len(times) > 1:
+                            time_mask = (times >= plot_xmin) & (times <= plot_xmax)
+                            if int(np.count_nonzero(time_mask)) >= 2:
+                                plot_S = S_dB[:, time_mask]
+                            else:
+                                left_idx = int(np.searchsorted(times, plot_xmin, side="left"))
+                                right_idx = int(np.searchsorted(times, plot_xmax, side="right"))
+                                left_idx = max(0, min(left_idx, len(times) - 2))
+                                right_idx = max(left_idx + 2, min(right_idx, len(times)))
+                                plot_S = S_dB[:, left_idx:right_idx]
+                        extent = [0.0, plot_span, freqs_hz.min(), freqs_hz.max()]
                         ax.imshow(
-                            S_dB,
+                            plot_S,
                             origin="lower",
                             aspect="auto",
                             interpolation="nearest",
@@ -3174,19 +3278,31 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                             vmin=S_dB.max() - 90,
                             vmax=S_dB.max(),
                         )
-                        ax.set_xlim(xmin, xmax)
+                        ax.set_xlim(0.0, plot_span)
                         ax.set_ylim(ymin, ymax)
                         ax.set_xlabel("Time (s)")
                         ax.set_ylabel("Frequency (kHz)")
                         ax.yaxis.set_major_formatter(FuncFormatter(lambda ytick, pos: f"{ytick/1000:.0f}"))
+                        tick_count = 6 if plot_span >= 5.0 else 5
+                        tick_positions = np.linspace(0.0, plot_span, tick_count)
+                        ax.set_xticks(tick_positions)
+                        ax.set_xticklabels([f"{plot_xmin + t:.1f}" for t in tick_positions])
 
                         for b in boxes:
                             x0, x1 = b["start_s"], b["end_s"]
+                            if not (np.isfinite(x0) and np.isfinite(x1)):
+                                continue
+                            clipped_x0 = max(float(x0), plot_xmin)
+                            clipped_x1 = min(float(x1), plot_xmax)
+                            if clipped_x1 <= clipped_x0:
+                                continue
+                            rel_x0 = clipped_x0 - plot_xmin
+                            rel_width = clipped_x1 - clipped_x0
                             prob = b["prob"]
                             ax.add_patch(
                                 Rectangle(
-                                    (x0, ymin),
-                                    x1 - x0,
+                                    (rel_x0, ymin),
+                                    rel_width,
                                     ymax - ymin,
                                     facecolor=(1, 1, 1, 0.06),
                                     edgecolor=(1, 1, 1, 0.12),
@@ -3194,7 +3310,7 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                                 )
                             )
                             if np.isfinite(prob):
-                                xm = (x0 + x1) * 0.5
+                                xm = rel_x0 + rel_width * 0.5
                                 ym = ymin + 0.88 * (ymax - ymin)
                                 ax.text(
                                     xm,
@@ -3298,23 +3414,43 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                         ts = row.get("start_s", row.get("detection_start_s", np.nan))
                         ts_str = f"{float(ts):.2f}s" if np.isfinite(_num(ts)) else "—"
 
-                        cur_sp_row = str(row.get("species_name", "") or "")
+                        cur_sp_row = str(row.get("species_name", "") or "").strip()
                         cur_pl_row = str(row.get("presence_label", "") or "").lower()
                         current_species_choice = "[absent]" if (cur_pl_row != "present" or cur_sp_row.strip() == "") else cur_sp_row
+                        select_key = f"sp_{base}_{species_orig}_{ridx}"
+                        new_species_key = f"{select_key}_new"
+                        options_for_row = list(species_select_options)
+                        if current_species_choice not in options_for_row and current_species_choice != "[absent]":
+                            options_for_row.insert(1, current_species_choice)
                         try:
-                            idx_choice = species_choices.index(current_species_choice)
+                            idx_choice = options_for_row.index(current_species_choice)
                         except ValueError:
                             idx_choice = 0
 
                         row_left, row_right = st.columns([4.0, 1.2])
 
                         with row_left:
-                            st.selectbox(
-                                f"Detection {ridx+1} @ {ts_str}",
-                                options=species_choices,
-                                index=idx_choice,
-                                key=f"sp_{base}_{species_orig}_{ridx}",
-                            )
+                            if select_key in st.session_state:
+                                if st.session_state.get(select_key) not in options_for_row:
+                                    st.session_state[select_key] = current_species_choice
+                                selected_species_choice = st.selectbox(
+                                    f"Detection {ridx+1} @ {ts_str}",
+                                    options=options_for_row,
+                                    key=select_key,
+                                )
+                            else:
+                                selected_species_choice = st.selectbox(
+                                    f"Detection {ridx+1} @ {ts_str}",
+                                    options=options_for_row,
+                                    index=idx_choice,
+                                    key=select_key,
+                                )
+                            if selected_species_choice == _ADD_SPECIES_OPTION:
+                                st.text_input(
+                                    "New species",
+                                    key=new_species_key,
+                                    placeholder="Type species name",
+                                )
 
                         with row_right:
                             current_uncertain = _bool_from_any(row.get("uncertain_flag", ""))
@@ -3376,7 +3512,11 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
         orig_pl_all = df_all.get("presence_label_original", df_all.get("presence_label", "")).astype(str).str.lower()
         cur_sp_all = df_all.get("species_name", "").astype(str)
         cur_pl_all = df_all.get("presence_label", "").astype(str).str.lower()
-        change_mask_all = (orig_sp_all != cur_sp_all) | (orig_pl_all != cur_pl_all)
+        uncertain_all = df_all.get(
+            "uncertain_flag",
+            pd.Series([""] * len(df_all), index=df_all.index)
+        ).map(_bool_from_any).astype(bool)
+        change_mask_all = (orig_sp_all != cur_sp_all) | (orig_pl_all != cur_pl_all) | uncertain_all
 
         if change_mask_all.any():
             changed_df = df_all.loc[change_mask_all, [

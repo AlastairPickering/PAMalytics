@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional, List, Dict, Tuple
+from typing import Optional, List, Dict, Tuple, Any
 import os
+import sqlite3
 import numpy as np
 import pandas as pd
 
@@ -14,7 +15,9 @@ RECOMMENDED: List[str] = ["recorder_id", "date_time"]
 
 def _read_all_csvs(root: Path) -> pd.DataFrame:
     parts: List[pd.DataFrame] = []
-    for p in Path(root).rglob("*.csv"):
+    root = Path(root)
+    paths = [root] if root.is_file() and root.suffix.lower() == ".csv" else list(root.rglob("*.csv"))
+    for p in paths:
         try:
             df = pd.read_csv(p, low_memory=False)
             if not df.empty:
@@ -158,6 +161,68 @@ def _attach_paths_by_filename(df: pd.DataFrame, audio_root: Optional[Path]) -> p
     return out.fillna("")
 
 
+def _audio_index_query_paths(index_db: Path, raw_sql: str, params: Tuple[Any, ...]) -> List[str]:
+    if not index_db or not Path(index_db).exists():
+        return []
+    try:
+        with sqlite3.connect(str(index_db)) as conn:
+            rows = conn.execute(raw_sql, params).fetchall()
+        out = []
+        seen = set()
+        for row in rows:
+            val = str(row[0] or "")
+            if val and val not in seen:
+                seen.add(val)
+                out.append(val)
+        return out
+    except Exception:
+        return []
+
+
+def _match_audio_paths_sqlite(index_db: Path, value: str) -> List[str]:
+    raw = _safe_path_str(value)
+    if not raw:
+        return []
+
+    raw_name_lc = os.path.basename(raw).strip().lower()
+    if raw_name_lc:
+        matches = _audio_index_query_paths(index_db, "SELECT path FROM audio_files WHERE filename_lc = ?", (raw_name_lc,))
+        if matches:
+            return matches
+
+    raw_stem_lc = Path(raw_name_lc).stem.strip().lower()
+    if raw_stem_lc:
+        matches = _audio_index_query_paths(index_db, "SELECT path FROM audio_files WHERE stem_lc = ?", (raw_stem_lc,))
+        if matches:
+            return matches
+
+    return []
+
+
+def _expand_rows_by_audio_index(df: pd.DataFrame, audio_index_db: Optional[Path]) -> pd.DataFrame:
+    if df.empty or not audio_index_db or not Path(audio_index_db).exists() or "file_id" not in df.columns:
+        return df
+
+    cache: Dict[str, List[str]] = {}
+    expanded = []
+    for _, row in df.iterrows():
+        fid = _safe_path_str(row.get("file_id", ""))
+        if fid not in cache:
+            cache[fid] = _match_audio_paths_sqlite(Path(audio_index_db), fid)
+        matches = cache[fid]
+        if matches:
+            for match in matches:
+                r = row.copy()
+                r["file_path"] = match
+                expanded.append(r)
+        else:
+            r = row.copy()
+            r["file_path"] = ""
+            expanded.append(r)
+
+    return pd.DataFrame(expanded).reset_index(drop=True) if expanded else df.head(0).copy()
+
+
 def _drop_legacy_mapped_columns(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
@@ -260,6 +325,7 @@ def ingest_batdetect2(
     keep_only_present: bool = True,
     prob_source: Optional[str] = None,
     presence_rule: str = "det_or_class",
+    audio_index_db: Optional[Path] = None,
 ) -> pd.DataFrame:
     csv_root = Path(csv_root)
     if not csv_root.exists():
@@ -346,8 +412,13 @@ def ingest_batdetect2(
         recorder_id_raw = recorder_id_raw.loc[df.index]
         date_time_raw = date_time_raw.loc[df.index]
 
-    # file paths
-    df["file_path"] = _attach_paths_by_filename(df, audio_root)
+    df["_pama_recorder_id_raw"] = recorder_id_raw.reindex(df.index).fillna("").astype(str)
+    df["_pama_date_time_raw"] = date_time_raw.reindex(df.index).fillna("").astype(str)
+
+    if audio_index_db and Path(audio_index_db).exists():
+        df = _expand_rows_by_audio_index(df, audio_index_db)
+    else:
+        df["file_path"] = _attach_paths_by_filename(df, audio_root)
 
     # detection_id
     def _det_id(row) -> str:
@@ -385,9 +456,17 @@ def ingest_batdetect2(
     df = drop_mapped_columns(df, mapped_sources)
     df = _drop_legacy_mapped_columns(df)
 
-    # Reapply recommended metadata after cleanup so it cannot be dropped.
-    df["recorder_id"] = recorder_id_raw.reindex(df.index).fillna("").astype(str)
-    df["date_time"] = date_time_raw.reindex(df.index).fillna("").astype(str)
+    if "_pama_recorder_id_raw" in df.columns:
+        df["recorder_id"] = df["_pama_recorder_id_raw"].fillna("").astype(str)
+        df = df.drop(columns=["_pama_recorder_id_raw"], errors="ignore")
+    else:
+        df["recorder_id"] = recorder_id_raw.reindex(df.index).fillna("").astype(str)
+
+    if "_pama_date_time_raw" in df.columns:
+        df["date_time"] = df["_pama_date_time_raw"].fillna("").astype(str)
+        df = df.drop(columns=["_pama_date_time_raw"], errors="ignore")
+    else:
+        df["date_time"] = date_time_raw.reindex(df.index).fillna("").astype(str)
 
     df = _finalise_order(df)
 
