@@ -247,27 +247,204 @@ def resolve_project_path(proj_path: Path, maybe_rel: str) -> Path:
 
 
 def resolve_input_audio_path(audio_root: Optional[Path], p: str) -> Path:
-    """Resolve an input audio path or filename against an optional audio root."""
     s = (p or "").strip()
     if not s:
         return Path("")
+
+    candidate = Path(s).expanduser()
+
     if _is_abs_like(s):
-        return Path(s)
+        return candidate
+
     if audio_root:
         try:
-            cand = (audio_root / s).resolve()
+            cand = (Path(audio_root).expanduser() / s).resolve()
             if cand.exists():
                 return cand
         except Exception:
             pass
-        try:
-            cand2 = (audio_root / Path(s).name).resolve()
-            if cand2.exists():
-                return cand2
-        except Exception:
-            pass
+
     return Path("")
 
+
+
+def _pa_clean_value(x) -> str:
+    import pandas as pd
+    try:
+        if pd.isna(x):
+            return ""
+    except Exception:
+        pass
+    s = str(x).strip()
+    if s.lower() in {"nan", "none", "null", "<na>"}:
+        return ""
+    return s
+
+
+def make_file_key(value: str) -> str:
+    return _pa_clean_value(value).replace("\\", "/").lower()
+
+
+def _pa_choose_single(values) -> str:
+    vals = [str(v) for v in values if _pa_clean_value(v)]
+    vals = list(dict.fromkeys(vals))
+    return vals[0] if len(vals) == 1 else ""
+
+
+def _pa_suffix_candidates(folder: str, name: str) -> List[str]:
+    folder = make_file_key(folder).strip("/")
+    name = Path(_pa_clean_value(name)).name.lower()
+    if not name:
+        return []
+    out = []
+    if folder:
+        parts = [p for p in folder.split("/") if p]
+        for i in range(len(parts)):
+            out.append("/".join(parts[i:] + [name]))
+    out.append(name)
+    return list(dict.fromkeys([x for x in out if x]))
+
+
+def _resolve_indexed_audio_value(wav_index, value: str, source_file: str = "", results_root: Optional[Path] = None) -> str:
+    import re as _re
+    raw = _pa_clean_value(value)
+    if wav_index is None or getattr(wav_index, "empty", True) or not raw:
+        return ""
+    raw_path_lc = str(Path(raw).expanduser()).lower()
+    raw_rel_lc = make_file_key(raw)
+    raw_name_lc = Path(raw).name.lower()
+    raw_stem_lc = _re.sub(r"\.[^.]+$", "", raw_name_lc)
+
+    m = wav_index.loc[wav_index["path_lc"].eq(raw_path_lc), "path"]
+    hit = _pa_choose_single(m)
+    if hit:
+        return hit
+
+    m = wav_index.loc[wav_index["rel_lc"].eq(raw_rel_lc), "path"]
+    hit = _pa_choose_single(m)
+    if hit:
+        return hit
+
+    if "/" in raw_rel_lc:
+        m = wav_index.loc[wav_index["rel_lc"].eq(raw_rel_lc) | wav_index["rel_lc"].str.endswith("/" + raw_rel_lc), "path"]
+        hit = _pa_choose_single(m)
+        if hit:
+            return hit
+
+    if source_file and results_root is not None:
+        try:
+            src_parent = Path(source_file).expanduser().resolve().parent
+            try:
+                folder = src_parent.relative_to(Path(results_root).expanduser().resolve()).as_posix()
+            except Exception:
+                folder = src_parent.name
+            for cand in _pa_suffix_candidates(folder, raw_name_lc):
+                m = wav_index.loc[wav_index["rel_lc"].eq(cand) | wav_index["rel_lc"].str.endswith("/" + cand), "path"]
+                hit = _pa_choose_single(m)
+                if hit:
+                    return hit
+        except Exception:
+            pass
+
+    m = wav_index.loc[wav_index["basename_lc"].eq(raw_name_lc), "path"]
+    hit = _pa_choose_single(m)
+    if hit:
+        return hit
+
+    m = wav_index.loc[wav_index["stem_lc"].eq(raw_stem_lc), "path"]
+    hit = _pa_choose_single(m)
+    if hit:
+        return hit
+
+    return ""
+
+
+def _pa_unique_paths(values) -> List[str]:
+    try:
+        return values.dropna().astype(str).drop_duplicates().tolist()
+    except Exception:
+        return []
+
+
+def _resolve_indexed_audio_values(wav_index, value: str, source_file: str = "", results_root: Optional[Path] = None) -> List[str]:
+    import re as _re
+    raw = _pa_clean_value(value)
+    if wav_index is None or getattr(wav_index, "empty", True) or not raw:
+        return []
+    raw_path_lc = str(Path(raw).expanduser()).lower()
+    raw_rel_lc = make_file_key(raw)
+    raw_name_lc = Path(raw).name.lower()
+    raw_stem_lc = _re.sub(r"\.[^.]+$", "", raw_name_lc)
+
+    m = _pa_unique_paths(wav_index.loc[wav_index["path_lc"].eq(raw_path_lc), "path"])
+    if m:
+        return m
+
+    m = _pa_unique_paths(wav_index.loc[wav_index["rel_lc"].eq(raw_rel_lc), "path"])
+    if m:
+        return m
+
+    if "/" in raw_rel_lc:
+        m = _pa_unique_paths(wav_index.loc[wav_index["rel_lc"].eq(raw_rel_lc) | wav_index["rel_lc"].str.endswith("/" + raw_rel_lc), "path"])
+        if m:
+            return m
+
+    if source_file and results_root is not None:
+        try:
+            src_parent = Path(source_file).expanduser().resolve().parent
+            try:
+                folder = src_parent.relative_to(Path(results_root).expanduser().resolve()).as_posix()
+            except Exception:
+                folder = src_parent.name
+            for cand in _pa_suffix_candidates(folder, raw_name_lc):
+                m = _pa_unique_paths(wav_index.loc[wav_index["rel_lc"].eq(cand) | wav_index["rel_lc"].str.endswith("/" + cand), "path"])
+                if m:
+                    return m
+        except Exception:
+            pass
+
+    m = _pa_unique_paths(wav_index.loc[wav_index["basename_lc"].eq(raw_name_lc), "path"])
+    if m:
+        return m
+
+    if raw_stem_lc:
+        m = _pa_unique_paths(wav_index.loc[wav_index["stem_lc"].eq(raw_stem_lc), "path"])
+        if m:
+            return m
+
+    return []
+
+
+def _pa_detection_id(row) -> str:
+    import numpy as _np
+    f = make_file_key(row.get("file_key", "")) or make_file_key(row.get("file_path", "")) or make_file_key(row.get("file_path_original", "")) or make_file_key(row.get("file_id", ""))
+    try:
+        s = float(row.get("detection_start_s"))
+        e = float(row.get("detection_end_s"))
+        species = make_file_key(row.get("species_name", ""))
+        if not (_np.isfinite(s) and _np.isfinite(e)):
+            return f"{f}:nan-nan:{species}"
+        return f"{f}:{s:.3f}-{e:.3f}:{species}"
+    except Exception:
+        return f"{f}:nan-nan:{make_file_key(row.get('species_name', ''))}"
+
+
+def _pa_rebuild_file_keys_and_detection_ids(df):
+    if df is None or getattr(df, "empty", True):
+        return df
+    source = df["file_path"] if "file_path" in df.columns else df["file_id"]
+    df["file_key"] = source.astype(str).map(make_file_key)
+    if "file_path_original" in df.columns:
+        missing = df["file_key"].astype(str).str.strip().eq("")
+        if missing.any():
+            df.loc[missing, "file_key"] = df.loc[missing, "file_path_original"].astype(str).map(make_file_key)
+    df["detection_id"] = df.apply(_pa_detection_id, axis=1)
+    d = df["detection_id"].astype(str)
+    n = d.groupby(d).cumcount()
+    dup = d.duplicated(keep=False)
+    if dup.any():
+        df.loc[dup, "detection_id"] = d.loc[dup] + ":" + n.loc[dup].astype(str)
+    return df
 
 def stage_audio_into_project(
     proj_path: Path,
@@ -501,7 +678,12 @@ def compute_import_stats(
     det["_stem_lower"] = det["_name_lower"].apply(lambda s: _os.path.splitext(s)[0])
 
     stats["detections_rows"] = int(len(det))
-    stats["unique_files_in_detections"] = int(det["_basename"].nunique())
+    if "file_key" in det.columns:
+        stats["unique_files_in_detections"] = int(det["file_key"].astype(str).str.strip().replace("", pd.NA).dropna().nunique())
+    elif "file_path" in det.columns:
+        stats["unique_files_in_detections"] = int(det["file_path"].astype(str).str.strip().replace("", pd.NA).dropna().nunique())
+    else:
+        stats["unique_files_in_detections"] = int(det["_basename"].nunique())
 
     if "file_path" in det.columns:
         fp = det["file_path"].astype(str)
@@ -514,9 +696,14 @@ def compute_import_stats(
             mp = mp.copy()
             mp["_filename_lc"] = mp["filename"].astype(str).str.strip().str.lower()
             mp["_stem_lc"] = mp["_filename_lc"].apply(lambda s: _os.path.splitext(s)[0])
-            stats["audio_files_indexed"] = int(mp["_filename_lc"].nunique())
+            if "file_key" in mp.columns:
+                stats["audio_files_indexed"] = int(mp["file_key"].astype(str).str.strip().replace("", pd.NA).dropna().nunique())
+            elif "path" in mp.columns:
+                stats["audio_files_indexed"] = int(mp["path"].astype(str).str.strip().replace("", pd.NA).dropna().nunique())
+            else:
+                stats["audio_files_indexed"] = int(mp["_filename_lc"].nunique())
 
-            if ("file_path" not in det.columns) or (stats["detections_with_audio"] == 0):
+            if "file_path" not in det.columns:
                 name_set = set(mp["_filename_lc"].unique())
                 mask = det["_name_lower"].isin(name_set)
 
@@ -626,7 +813,8 @@ PAMA_OPTIONAL = ["recorder_id", "date_time"]
 
 def _mk_detection_id(file_id: str, start: float, end: float) -> str:
     try:
-        return f"{Path(str(file_id)).name}:{float(start):.3f}-{float(end):.3f}"
+        key = make_file_key(file_id)
+        return f"{key}:{float(start):.3f}-{float(end):.3f}"
     except Exception:
         return f"{str(file_id)}:{start}-{end}"
 
@@ -767,11 +955,23 @@ def build_analysis_dataset(proj_path: Path, use_stem_fallback: bool = True):
                 _mp = mp.copy()
                 _mp["_filename_lc"] = _mp["filename"].astype(str).str.strip().str.lower()
                 _mp["_stem_lc"] = _mp["_filename_lc"].str.replace(r"\.[^.]+$", "", regex=True)
+                _mp["_file_key"] = (_mp["file_key"] if "file_key" in _mp.columns else _mp["path"]).astype(str).map(make_file_key)
 
                 _fid_lc = df["file_id"].astype(str).str.strip().str.lower()
                 _stem_lc = _fid_lc.str.replace(r"\.[^.]+$", "", regex=True)
+                _df_key = (df["file_key"] if "file_key" in df.columns else df["file_path"]).astype(str).map(make_file_key)
+                key_to_path = dict(zip(_mp["_file_key"], _mp["path"]))
+                need = (df["file_path"].astype(str).str.strip() == "")
+                if need.any():
+                    df.loc[need, "file_path"] = _df_key[need].map(key_to_path)
 
-                name_to_path = dict(zip(_mp["_filename_lc"], _mp["path"]))
+                filename_counts = _mp["_filename_lc"].value_counts()
+                unique_filenames = set(filename_counts[filename_counts == 1].index)
+
+                name_to_path = dict(zip(
+                    _mp.loc[_mp["_filename_lc"].isin(unique_filenames), "_filename_lc"],
+                    _mp.loc[_mp["_filename_lc"].isin(unique_filenames), "path"]
+                ))
 
                 need = (df["file_path"].astype(str).str.strip() == "")
                 if need.any():
@@ -824,19 +1024,16 @@ def build_analysis_dataset(proj_path: Path, use_stem_fallback: bool = True):
         if "file_path_original" in df.columns:
             try:
                 _abs = df["file_path"].astype(str)
-                _orig = df["file_path_original"].astype(str).str.strip()
 
-                def _pick_abs(a: str, o: str) -> str:
+                def _pick_abs(a: str) -> str:
                     try:
                         if a and Path(a).exists():
                             return a
-                        if o and Path(o).exists():
-                            return o
                     except Exception:
                         pass
                     return a
 
-                df["file_path"] = [_pick_abs(a, o) for a, o in zip(_abs, _orig)]
+                df["file_path"] = [_pick_abs(a) for a in _abs]
             except Exception:
                 pass
 
@@ -849,18 +1046,9 @@ def build_analysis_dataset(proj_path: Path, use_stem_fallback: bool = True):
 
 
 # per-detection clip builder
-def ensure_detection_clips(proj_path: Path, detections_df, audio_map_df):
-    """
-    For every detection (file_id/source_file, start_s/end_s or detection_start_s/detection_end_s),
-    write a WAV clip [start_s, end_s] with no cap. Returns DataFrame:
-    filename, clip_path, start_s, end_s, duration_s.
-    """
+def ensure_detection_clips(proj_path: Path, detections_df, audio_map_df=None):
     import soundfile as sf
     import pandas as pd
-
-    mp = audio_map_df.copy()
-    mp["_filename"] = mp["filename"].astype(str).str.strip().str.lower()
-    name_to_path = dict(zip(mp["_filename"], mp["path"]))
 
     clips_dir = project_path(proj_path, "workspace") / "clips"
     clips_dir.mkdir(parents=True, exist_ok=True)
@@ -868,28 +1056,22 @@ def ensure_detection_clips(proj_path: Path, detections_df, audio_map_df):
     rows = []
     det = detections_df.copy()
 
-    if "source_file" in det.columns:
-        det_basename = det["source_file"].astype(str).map(lambda s: Path(s).name)
-    else:
-        det_basename = det["file_id"].astype(str).map(lambda s: Path(s).name if s else "")
-
-    det_name_lower = det_basename.str.lower()
-
-    start_vals = det.get("detection_start_s", det.get("start_s"))
-    end_vals = det.get("detection_end_s", det.get("end_s"))
-
-    for (_idx, (nm_lower, nm, s, e)) in enumerate(zip(det_name_lower, det_basename, start_vals, end_vals)):
+    for idx, row in det.iterrows():
         try:
-            start_s = float(s)
-            end_s = float(e)
+            start_s = float(row.get("detection_start_s", row.get("start_s")))
+            end_s = float(row.get("detection_end_s", row.get("end_s")))
         except Exception:
             continue
+
         if not (end_s > start_s):
             continue
 
-        src = name_to_path.get(str(nm_lower))
-        src_path = resolve_project_path(proj_path, str(src)) if src else Path("")
-        if (not src_path) or (not src_path.exists()):
+        src_value = str(row.get("file_path_rel", row.get("file_path", ""))).strip()
+        if not src_value:
+            continue
+
+        src_path = resolve_project_path(proj_path, src_value)
+        if not src_path.exists():
             continue
 
         try:
@@ -905,17 +1087,17 @@ def ensure_detection_clips(proj_path: Path, detections_df, audio_map_df):
             frames = end_f - start_f
             y, _ = sf.read(str(src_path), start=start_f, frames=frames, dtype="float32", always_2d=False)
 
-            safe_stem = Path(nm).stem
-            clip_name = f"{safe_stem}_{start_f}_{end_f}.wav"
+            safe_stem = Path(src_path).stem
+            clip_name = f"{safe_stem}_{idx}_{start_f}_{end_f}.wav"
             clip_path = clips_dir / clip_name
             sf.write(clip_path, y, sr)
 
             rows.append({
-                "filename": nm,
+                "filename": src_path.name,
                 "clip_path": str(clip_path),
                 "start_s": start_s,
                 "end_s": end_s,
-                "duration_s": frames / sr
+                "duration_s": frames / sr,
             })
         except Exception:
             continue
@@ -1109,29 +1291,225 @@ def _read_result_inputs(path: Path):
     return pd.concat(frames, ignore_index=True), files
 
 
-@st.cache_data(show_spinner=False)
-def _index_audio_inputs(path_str: str):
-    import pandas as pd
 
-    root = Path(path_str)
-    rows = []
+def _audio_index_db_path(proj_path: Path) -> Path:
+    return project_path(proj_path, "workspace") / "audio_index.sqlite"
 
-    if not root.exists():
-        return pd.DataFrame(columns=["basename_lc", "stem_lc", "path"])
 
-    if root.is_file():
-        candidates = [root] if root.suffix.lower() in AUDIO_EXTS else []
-    else:
-        candidates = [p for p in root.rglob("*") if p.is_file() and p.suffix.lower() in AUDIO_EXTS]
+def _audio_index_norm_path(p: str) -> str:
+    return _pa_clean_value(p).replace("\\", "/").lower()
 
-    for p in candidates:
-        rows.append({
-            "basename_lc": p.name.lower(),
-            "stem_lc": p.stem.lower(),
-            "path": str(p),
+
+def _audio_index_status(index_db: Path, audio_root: Optional[Path]) -> Dict[str, Any]:
+    import sqlite3
+    out = {"ready": False, "file_count": 0, "audio_root": "", "index_db": str(index_db), "created_at": ""}
+    if not index_db or not Path(index_db).exists():
+        return out
+    try:
+        root_abs = os.path.abspath(os.path.expanduser(str(audio_root))) if audio_root else ""
+        with sqlite3.connect(str(index_db)) as conn:
+            meta = dict(conn.execute("SELECT key, value FROM audio_index_meta").fetchall())
+            cnt = conn.execute("SELECT COUNT(*) FROM audio_files").fetchone()[0]
+        out.update({
+            "ready": bool(cnt and (not root_abs or meta.get("audio_root", "") == root_abs)),
+            "file_count": int(cnt or 0),
+            "audio_root": meta.get("audio_root", ""),
+            "created_at": meta.get("created_at", ""),
         })
+    except Exception:
+        return {"ready": False, "file_count": 0, "audio_root": "", "index_db": str(index_db), "created_at": ""}
+    return out
 
-    return pd.DataFrame(rows)
+
+def _format_elapsed(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h:02d}:{m:02d}:{s:02d}"
+
+
+def _build_audio_index_sqlite(audio_root: Path, index_db: Path, progress_callback=None, batch_size: int = 10000) -> Dict[str, Any]:
+    import sqlite3
+    import time
+
+    root_abs = os.path.abspath(os.path.expanduser(str(audio_root)))
+    index_db = Path(index_db)
+    index_db.parent.mkdir(parents=True, exist_ok=True)
+    tmp_db = index_db.with_suffix(index_db.suffix + ".building")
+    if tmp_db.exists():
+        tmp_db.unlink()
+
+    audio_exts = {e.lower() for e in AUDIO_EXTS}
+    started = time.monotonic()
+    count = 0
+    batch = []
+
+    conn = sqlite3.connect(str(tmp_db))
+    try:
+        cur = conn.cursor()
+        cur.execute("PRAGMA journal_mode=OFF")
+        cur.execute("PRAGMA synchronous=OFF")
+        cur.execute("PRAGMA temp_store=MEMORY")
+        cur.execute("CREATE TABLE audio_files (id INTEGER PRIMARY KEY, audio_root TEXT NOT NULL, filename TEXT NOT NULL, filename_lc TEXT NOT NULL, stem_lc TEXT NOT NULL, suffix_lc TEXT NOT NULL, path TEXT NOT NULL, path_lc TEXT NOT NULL, rel_lc TEXT NOT NULL, parent_lc TEXT NOT NULL)")
+        cur.execute("CREATE TABLE audio_index_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+
+        for root, _, names in os.walk(root_abs):
+            for nm in names:
+                suffix = os.path.splitext(nm)[1].lower()
+                if suffix not in audio_exts:
+                    continue
+                full = os.path.abspath(os.path.join(root, nm))
+                try:
+                    rel = os.path.relpath(full, root_abs).replace(os.sep, "/")
+                except Exception:
+                    rel = nm
+                filename_lc = nm.lower()
+                stem_lc = os.path.splitext(filename_lc)[0]
+                path_lc = full.replace("\\", "/").lower()
+                rel_lc = rel.replace("\\", "/").lower()
+                parent_lc = os.path.dirname(rel_lc).replace("\\", "/").lower()
+                batch.append((root_abs, nm, filename_lc, stem_lc, suffix, full, path_lc, rel_lc, parent_lc))
+                count += 1
+                if len(batch) >= batch_size:
+                    cur.executemany("INSERT INTO audio_files (audio_root, filename, filename_lc, stem_lc, suffix_lc, path, path_lc, rel_lc, parent_lc) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", batch)
+                    conn.commit()
+                    batch.clear()
+                    if progress_callback:
+                        progress_callback(count, root, time.monotonic() - started, False)
+
+        if batch:
+            cur.executemany("INSERT INTO audio_files (audio_root, filename, filename_lc, stem_lc, suffix_lc, path, path_lc, rel_lc, parent_lc) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", batch)
+            conn.commit()
+            batch.clear()
+            if progress_callback:
+                progress_callback(count, root_abs, time.monotonic() - started, False)
+
+        cur.execute("CREATE INDEX idx_audio_filename_lc ON audio_files(filename_lc)")
+        cur.execute("CREATE INDEX idx_audio_stem_lc ON audio_files(stem_lc)")
+        cur.execute("CREATE INDEX idx_audio_path_lc ON audio_files(path_lc)")
+        cur.execute("CREATE INDEX idx_audio_rel_lc ON audio_files(rel_lc)")
+        cur.execute("CREATE INDEX idx_audio_parent_lc ON audio_files(parent_lc)")
+        cur.execute("INSERT OR REPLACE INTO audio_index_meta (key, value) VALUES (?, ?)", ("audio_root", root_abs))
+        cur.execute("INSERT OR REPLACE INTO audio_index_meta (key, value) VALUES (?, ?)", ("file_count", str(count)))
+        cur.execute("INSERT OR REPLACE INTO audio_index_meta (key, value) VALUES (?, ?)", ("created_at", datetime.now(dt_timezone.utc).isoformat()))
+        conn.commit()
+    finally:
+        conn.close()
+
+    if index_db.exists():
+        index_db.unlink()
+    tmp_db.replace(index_db)
+    elapsed = time.monotonic() - started
+    if progress_callback:
+        progress_callback(count, root_abs, elapsed, True)
+    return {"ready": True, "file_count": int(count), "elapsed_s": float(elapsed), "index_db": str(index_db), "audio_root": root_abs}
+
+
+def _ensure_audio_index_ui(proj_path: Path, audio_root: Optional[Path], key_prefix: str, auto_build: bool = False) -> Dict[str, Any]:
+    if not audio_root or not Path(audio_root).exists():
+        return {"ready": False, "file_count": 0, "index_db": ""}
+
+    index_db = _audio_index_db_path(proj_path)
+    status = _audio_index_status(index_db, audio_root)
+
+    st.subheader("Audio index")
+    if status.get("ready"):
+        c1, c2 = st.columns([1, 2])
+        c1.metric("Indexed audio files", f"{int(status.get('file_count', 0)):,}")
+        c2.caption(f"Using `{index_db}`")
+        rebuild = st.button("Rebuild audio index", key=f"{key_prefix}_rebuild_audio_index")
+        if not rebuild:
+            status["index_db"] = str(index_db)
+            return status
+    else:
+        st.info("Build the project audio index before linking detections. This reads every supported audio file under the selected audio root.")
+        rebuild = auto_build or st.button("Build audio index", key=f"{key_prefix}_build_audio_index")
+        if not rebuild:
+            status["index_db"] = str(index_db)
+            return status
+
+    status_box = st.empty()
+    metric_box = st.empty()
+    folder_box = st.empty()
+
+    def _progress(n: int, folder: str, elapsed: float, done: bool):
+        rate = (float(n) / elapsed) if elapsed > 0 else 0.0
+        label = "Audio index complete" if done else "Indexing audio files"
+        status_box.info(f"{label}: {int(n):,} files | elapsed {_format_elapsed(elapsed)} | {rate:,.0f} files/sec")
+        metric_box.metric("Files indexed", f"{int(n):,}")
+        folder_box.caption(f"Current folder: `{folder}`")
+
+    try:
+        result = _build_audio_index_sqlite(Path(audio_root), index_db, progress_callback=_progress)
+        set_status(proj_path, "audio_resolver", "ready")
+        st.success(f"Indexed {int(result.get('file_count', 0)):,} audio files in {_format_elapsed(float(result.get('elapsed_s', 0)))}.")
+        return {"ready": True, "file_count": int(result.get("file_count", 0)), "index_db": str(index_db), "audio_root": result.get("audio_root", "")}
+    except Exception as e:
+        st.error(f"Audio indexing failed: {e}")
+        return {"ready": False, "file_count": 0, "index_db": str(index_db)}
+
+
+def _audio_index_query_paths(index_db: Path, raw_sql: str, params: Tuple[Any, ...]) -> List[str]:
+    import sqlite3
+    if not index_db or not Path(index_db).exists():
+        return []
+    try:
+        with sqlite3.connect(str(index_db)) as conn:
+            rows = conn.execute(raw_sql, params).fetchall()
+        return list(dict.fromkeys([str(r[0]) for r in rows if r and _pa_clean_value(r[0])]))
+    except Exception:
+        return []
+
+
+def _resolve_audio_values_sqlite(index_db: Path, value: str, source_file: str = "", results_root: Optional[Path] = None) -> List[str]:
+    import re as _re
+    raw = _pa_clean_value(value)
+    if not raw or not index_db or not Path(index_db).exists():
+        return []
+
+    raw_rel_lc = make_file_key(raw).strip("/")
+    raw_name_lc = Path(raw).name.lower()
+    raw_stem_lc = _re.sub(r"\.[^.]+$", "", raw_name_lc)
+
+    if _is_abs_like(raw):
+        raw_path_lc = raw.replace("\\", "/").lower()
+        m = _audio_index_query_paths(index_db, "SELECT path FROM audio_files WHERE path_lc = ?", (raw_path_lc,))
+        if m:
+            return m
+
+    m = _audio_index_query_paths(index_db, "SELECT path FROM audio_files WHERE rel_lc = ?", (raw_rel_lc,))
+    if m:
+        return m
+
+    if "/" in raw_rel_lc:
+        m = _audio_index_query_paths(index_db, "SELECT path FROM audio_files WHERE rel_lc = ? OR rel_lc LIKE ?", (raw_rel_lc, "%/" + raw_rel_lc))
+        if m:
+            return m
+
+    if source_file and results_root is not None:
+        try:
+            src_parent = Path(source_file).expanduser().resolve().parent
+            try:
+                folder = src_parent.relative_to(Path(results_root).expanduser().resolve()).as_posix()
+            except Exception:
+                folder = src_parent.name
+            for cand in _pa_suffix_candidates(folder, raw_name_lc):
+                m = _audio_index_query_paths(index_db, "SELECT path FROM audio_files WHERE rel_lc = ? OR rel_lc LIKE ?", (cand, "%/" + cand))
+                if m:
+                    return m
+        except Exception:
+            pass
+
+    m = _audio_index_query_paths(index_db, "SELECT path FROM audio_files WHERE filename_lc = ?", (raw_name_lc,))
+    if m:
+        return m
+
+    if raw_stem_lc:
+        m = _audio_index_query_paths(index_db, "SELECT path FROM audio_files WHERE stem_lc = ?", (raw_stem_lc,))
+        if m:
+            return m
+
+    return []
 
 
 # Views
@@ -1519,7 +1897,7 @@ def view_import_results() -> None:
                         _uniq = df_norm["file_path_original"].fillna("").astype(str).unique()
                         _rel_map = {}
                         for _p0 in _uniq:
-                            _p0s = str(_p0).strip()
+                            _p0s = _pa_clean_value(_p0)
                             if not _p0s:
                                 _rel_map[_p0] = ""
                                 continue
@@ -1535,10 +1913,13 @@ def view_import_results() -> None:
                 except Exception:
                     pass
 
+                df_norm = _pa_rebuild_file_keys_and_detection_ids(df_norm)
                 df_norm.to_csv(norm_csv, index=False)
 
                 if {"file_id", "file_path"} <= set(df_norm.columns):
                     cols = ["file_id", "file_path"]
+                    if "file_key" in df_norm.columns:
+                        cols.append("file_key")
                     if "file_path_original" in df_norm.columns:
                         cols.append("file_path_original")
                     mp = df_norm.loc[df_norm["file_path"].astype(str).str.strip().ne(""), cols].drop_duplicates()
@@ -1616,12 +1997,19 @@ def view_import_results() -> None:
             st.info("Select a valid BirdNET results folder or CSV to enable ingestion.")
 
         if run_btn and can_run:
+            audio_index_db = None
+            if audio_base and Path(audio_base).exists():
+                audio_index = _ensure_audio_index_ui(proj_path, audio_base, key_prefix="bn", auto_build=True)
+                if not audio_index.get("ready"):
+                    return
+                audio_index_db = Path(str(audio_index.get("index_db")))
             with st.spinner("Ingesting BirdNET results and normalising…"):
                 df_norm = ingest_birdnet(
                     csv_root=bn_csv_root,
                     audio_root=audio_base,
                     min_conf=float(min_conf),
                     keep_only_present=bool(keep_present_only),
+                    audio_index_db=audio_index_db,
                 )
 
             if df_norm.empty:
@@ -1638,7 +2026,7 @@ def view_import_results() -> None:
                         _uniq = df_norm["file_path_original"].fillna("").astype(str).unique()
                         _rel_map = {}
                         for _p0 in _uniq:
-                            _p0s = str(_p0).strip()
+                            _p0s = _pa_clean_value(_p0)
                             if not _p0s:
                                 _rel_map[_p0] = ""
                                 continue
@@ -1654,10 +2042,13 @@ def view_import_results() -> None:
                 except Exception:
                     pass
 
+                df_norm = _pa_rebuild_file_keys_and_detection_ids(df_norm)
                 df_norm.to_csv(norm_csv, index=False)
 
                 if {"file_id", "file_path"} <= set(df_norm.columns):
                     cols = ["file_id", "file_path"]
+                    if "file_key" in df_norm.columns:
+                        cols.append("file_key")
                     if "file_path_original" in df_norm.columns:
                         cols.append("file_path_original")
                     mp = df_norm.loc[
@@ -1787,31 +2178,46 @@ def view_import_results() -> None:
         st.warning("Choose the audio column to proceed.")
         return
 
-    wav_index = _index_audio_inputs(str(audio_base))
-    if wav_index.empty:
+    audio_index = _ensure_audio_index_ui(proj_path, audio_base, key_prefix="manual", auto_build=False)
+    if not audio_index.get("ready"):
+        return
+    if int(audio_index.get("file_count", 0)) <= 0:
         st.error("No supported audio files found in the selected audio location.")
         return
+    wav_index = Path(str(audio_index.get("index_db")))
 
     df_link = df.copy()
 
-    vals = df_link[audio_col].astype(str)
-    basenames = vals.apply(lambda s: _os.path.basename(s).strip().lower())
-    stems = basenames.str.replace(r"\.[^.]+$", "", regex=True)
+    results_root = None
+    try:
+        results_root = results_path if results_path and Path(results_path).is_dir() else Path(results_path).parent
+    except Exception:
+        results_root = None
 
-    name_to_path = dict(zip(wav_index["basename_lc"], wav_index["path"]))
-    df_link["file_path_original"] = basenames.map(name_to_path)
-    df_link["file_path"] = df_link["file_path_original"]
+    vals = df_link[audio_col].astype(str).str.strip()
+    sources = df_link["_ingest_source_file"].astype(str) if "_ingest_source_file" in df_link.columns else pd.Series([""] * len(df_link), index=df_link.index)
+    cache = {}
+    expanded_rows = []
+    for idx_row, raw_value in vals.items():
+        source_value = str(sources.loc[idx_row]) if idx_row in sources.index else ""
+        cache_key = (str(raw_value), source_value)
+        if cache_key not in cache:
+            cache[cache_key] = _resolve_audio_values_sqlite(wav_index, str(raw_value), source_file=source_value, results_root=results_root)
+        matches = cache[cache_key]
+        base_row = df_link.loc[idx_row].copy()
+        if matches:
+            for match in matches:
+                r = base_row.copy()
+                r["file_path_original"] = match
+                r["file_path"] = match
+                expanded_rows.append(r)
+        else:
+            base_row["file_path_original"] = ""
+            base_row["file_path"] = ""
+            expanded_rows.append(base_row)
 
-    need = df_link["file_path_original"].isna() | df_link["file_path_original"].astype(str).str.strip().eq("")
-    if need.any():
-        stem_counts = wav_index["stem_lc"].value_counts()
-        uniq_stems = set(stem_counts[stem_counts == 1].index)
-        stem_to_path = dict(zip(
-            wav_index.loc[wav_index["stem_lc"].isin(uniq_stems), "stem_lc"],
-            wav_index.loc[wav_index["stem_lc"].isin(uniq_stems), "path"]
-        ))
-        df_link.loc[need, "file_path_original"] = stems[need].map(stem_to_path)
-        df_link.loc[need, "file_path"] = df_link.loc[need, "file_path_original"]
+    df_link = pd.DataFrame(expanded_rows).reset_index(drop=True)
+    df_link["file_key"] = df_link["file_path"].astype(str).map(make_file_key)
 
     matched_mask = df_link["file_path"].notna() & df_link["file_path"].astype(str).str.strip().ne("")
     total_rows = int(len(df_link))
@@ -2021,22 +2427,12 @@ def view_import_results() -> None:
             cn["file_path_original"] = df_av.loc[idx, "file_path"].astype(str)
             cn["file_path"] = df_av.loc[idx, "file_path"].astype(str)
 
-        if "detection_id" not in cn.columns or cn["detection_id"].isna().any():
-            def _det_id(row) -> str:
-                f = str(row.get("file_id", ""))
-                try:
-                    s = float(row.get("detection_start_s"))
-                    e = float(row.get("detection_end_s"))
-                    if not (_np.isfinite(s) and _np.isfinite(e)):
-                        return f"{f}:nan-nan"
-                    return f"{f}:{s:.3f}-{e:.3f}"
-                except Exception:
-                    return f"{f}:nan-nan"
-            cn["detection_id"] = cn.apply(_det_id, axis=1)
+        cn = _pa_rebuild_file_keys_and_detection_ids(cn)
 
         if callable(normalise_schema):
             try:
-                cn = normalise_schema(cn, build_detection_id=True)
+                cn = normalise_schema(cn, build_detection_id=False)
+                cn = _pa_rebuild_file_keys_and_detection_ids(cn)
             except Exception as e:
                 st.warning(f"Schema normalisation failed on preview: {e}")
 
@@ -2080,7 +2476,7 @@ def view_import_results() -> None:
 
             if callable(normalise_schema):
                 try:
-                    out_df = normalise_schema(edited.copy(), build_detection_id=True)
+                    out_df = normalise_schema(edited.copy(), build_detection_id=False)
                 except Exception as e:
                     st.warning(f"Schema normalisation failed on save (writing edited table as-is): {e}")
                     out_df = edited.copy()
@@ -2088,7 +2484,7 @@ def view_import_results() -> None:
                 out_df = edited.copy()
 
             canonical_cols = [
-                "file_id", "file_path", "detection_id",
+                "file_id", "file_path", "file_key", "detection_id",
                 "detection_start_s", "detection_end_s",
                 "presence_label", "species_name", "detection_probability",
             ]
@@ -2171,6 +2567,7 @@ def view_import_results() -> None:
                         _rel_map[_p0] = ""
 
                 out_df["file_path"] = _orig.map(_rel_map).fillna("")
+                out_df = _pa_rebuild_file_keys_and_detection_ids(out_df)
 
                 missing_stage = (_orig.str.strip().ne("")) & (out_df["file_path"].astype(str).str.strip().eq(""))
                 if missing_stage.any():
@@ -2224,6 +2621,8 @@ def view_import_results() -> None:
                 ws_dir = project_path(proj_path, "workspace")
                 ws_dir.mkdir(parents=True, exist_ok=True)
                 cols = ["file_id", "file_path"]
+                if "file_key" in out_df.columns:
+                    cols.append("file_key")
                 if "file_path_original" in out_df.columns:
                     cols.append("file_path_original")
                 mp = out_df.loc[out_df["file_path"].astype(str).str.strip().ne(""), cols].drop_duplicates()
