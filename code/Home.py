@@ -1598,7 +1598,7 @@ def _ensure_audio_index_ui(proj_path: Path, audio_root: Optional[Path], key_pref
                 "Use an existing saved audio index",
                 value=use_existing,
                 key=use_existing_key,
-                help="Leave this unticked for the normal import path. PAMalytics will use this project’s own index, building it automatically if needed.",
+                help="Select this only when you want to reuse an audio_index.sqlite file that was already created by PAMalytics.",
             )
             use_existing = bool(st.session_state.get(use_existing_key, False))
             if use_existing:
@@ -1615,8 +1615,6 @@ def _ensure_audio_index_ui(proj_path: Path, audio_root: Optional[Path], key_pref
                 if cand:
                     selected_status = _audio_index_status(cand, audio_root, allow_root_mismatch=False, check_samples=True)
                     _display_audio_index_status(selected_status, label="Selected index")
-            else:
-                st.caption("Normal users should leave this unticked.")
 
     use_existing = bool(st.session_state.get(use_existing_key, False))
     if use_existing:

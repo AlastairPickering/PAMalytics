@@ -243,6 +243,7 @@ def _ensure_validation_ready(df_in: pd.DataFrame) -> pd.DataFrame:
     for c, default in [
         ("validation_state", ""), ("validation_label", ""), ("validation_species", ""),
         ("validated_by", ""), ("validated_at", ""), ("validation_method", ""),
+        ("validation_notes", ""),
         ("user_changed", ""), ("user_changed_by", ""), ("user_changed_at", ""),
         ("uncertain_flag", "")
     ]:
@@ -254,6 +255,7 @@ def _ensure_validation_ready(df_in: pd.DataFrame) -> pd.DataFrame:
         "species_name_original", "presence_label_original",
         "validation_state", "validation_label", "validation_species",
         "validated_by", "validated_at", "validation_method",
+        "validation_notes",
         "user_changed", "user_changed_by", "user_changed_at",
         "uncertain_flag",
         "path", "file_path", "basename", "filename_stem",
@@ -317,6 +319,7 @@ def _apply_card_widget_state(
 
         sp_key = f"sp_{base}_{species_orig}_{ridx}"
         unc_key = f"unc_{base}_{species_orig}_{ridx}"
+        note_key = f"note_{base}_{species_orig}_{ridx}"
 
         current_presence = str(row.get("presence_label", "") or "").strip().lower()
         current_species = str(row.get("species_name", "") or "")
@@ -339,6 +342,9 @@ def _apply_card_widget_state(
 
         current_unc = st.session_state.get(unc_key, _bool_from_any(row.get("uncertain_flag", "")))
         out.at[idx, "uncertain_flag"] = "1" if bool(current_unc) else ""
+
+        current_note = st.session_state.get(note_key, row.get("validation_notes", ""))
+        out.at[idx, "validation_notes"] = str(current_note or "").strip()
 
     return out
 
@@ -2342,6 +2348,7 @@ def _commit_card(
         "species_name_original", "presence_label_original",
         "validation_state", "validation_label", "validation_species",
         "validated_by", "validated_at", "validation_method",
+        "validation_notes",
         "user_changed", "user_changed_by", "user_changed_at",
         "uncertain_flag",
     ])
@@ -2375,7 +2382,11 @@ def _commit_card(
         "uncertain_flag",
         pd.Series([""] * len(card_rows_updated), index=card_rows_updated.index)
     ).map(_bool_from_any).astype(bool)
-    changed_mask = species_presence_changed_mask | uncertain_changed_mask
+    notes_changed_mask = card_rows_updated.get(
+        "validation_notes",
+        pd.Series([""] * len(card_rows_updated), index=card_rows_updated.index)
+    ).astype(str).str.strip().ne("")
+    changed_mask = species_presence_changed_mask | uncertain_changed_mask | notes_changed_mask
 
     for i, changed_here, species_presence_changed_here in zip(card_rows_updated.index, changed_mask, species_presence_changed_mask):
         current_sp = str(det.at[i, "species_name"] or "")
@@ -3460,6 +3471,18 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                                 key=f"unc_{base}_{species_orig}_{ridx}",
                             )
 
+                        note_key = f"note_{base}_{species_orig}_{ridx}"
+                        existing_note = str(row.get("validation_notes", "") or "")
+                        if note_key not in st.session_state:
+                            st.session_state[note_key] = existing_note
+                        with st.expander("Notes", expanded=bool(existing_note.strip())):
+                            st.text_area(
+                                "Optional note for this detection",
+                                key=note_key,
+                                height=80,
+                                placeholder="Add context for uncertainty, species changes, or other validation decisions.",
+                            )
+
                         summary = acoustic_lookup.get(int(ridx))
                         if summary:
                             st.markdown(
@@ -3516,7 +3539,11 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
             "uncertain_flag",
             pd.Series([""] * len(df_all), index=df_all.index)
         ).map(_bool_from_any).astype(bool)
-        change_mask_all = (orig_sp_all != cur_sp_all) | (orig_pl_all != cur_pl_all) | uncertain_all
+        notes_all = df_all.get(
+            "validation_notes",
+            pd.Series([""] * len(df_all), index=df_all.index)
+        ).astype(str).str.strip().ne("")
+        change_mask_all = (orig_sp_all != cur_sp_all) | (orig_pl_all != cur_pl_all) | uncertain_all | notes_all
 
         if change_mask_all.any():
             changed_df = df_all.loc[change_mask_all, [
@@ -3528,6 +3555,7 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                     "species_name",
                     "presence_label",
                     "uncertain_flag",
+                    "validation_notes",
                 ] if col in df_all.columns
             ]].copy()
             st.dataframe(changed_df, width="stretch")
@@ -3564,7 +3592,7 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
 
     export_df = df_all.copy()
 
-    for c in ["validation_state", "validation_label", "validation_species", "validated_by", "validated_at", "uncertain_flag"]:
+    for c in ["validation_state", "validation_label", "validation_species", "validated_by", "validated_at", "uncertain_flag", "validation_notes"]:
         if c not in export_df.columns:
             export_df[c] = ""
 
