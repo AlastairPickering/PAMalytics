@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -76,6 +77,13 @@ def _make_export_filename(proj_root: Path, user_name: str) -> str:
     safe_user = safe_user or "reviewer"
     proj = proj_root.name or "project"
     return f"{proj}_validated_{safe_user}_{ts}.csv"
+
+
+def _make_export_xlsx_filename(csv_filename: str) -> str:
+    base = str(csv_filename or "validated_export.csv")
+    if base.lower().endswith(".csv"):
+        return base[:-4] + ".xlsx"
+    return base + ".xlsx"
 
 
 def _safe_widget_key(prefix: str, *parts: object) -> str:
@@ -981,6 +989,11 @@ def _strategy_state_payload() -> Dict[str, object]:
         "validate_strategy_target_value",
         "validate_strategy_bins",
         "validate_strategy_seed",
+        "validate_strategy_available",
+        "validate_strategy_selected",
+        "validate_strategy_strata",
+        "validate_strategy_undersized",
+        "validate_strategy_metrics_source",
         "validate_strategy_dont_auto_show",
         "validate_strategy_prompt_seen",
     ]
@@ -1017,6 +1030,11 @@ def _load_strategy_state(proj_root: Path) -> None:
                 "validate_strategy_target_value",
                 "validate_strategy_bins",
                 "validate_strategy_seed",
+                "validate_strategy_available",
+                "validate_strategy_selected",
+                "validate_strategy_strata",
+                "validate_strategy_undersized",
+                "validate_strategy_metrics_source",
                 "validate_strategy_dont_auto_show",
                 "validate_strategy_prompt_seen",
             }
@@ -1281,6 +1299,95 @@ def _strategy_summary(df: pd.DataFrame) -> str:
     if "confidence" in balance:
         return f"{goal_text} across {balance_text} • {target_text} • {bins} bands"
     return f"{goal_text} across {balance_text} • {target_text}"
+
+
+
+
+def _validation_card_group_count(df: pd.DataFrame) -> int:
+    if df is None or df.empty:
+        return 0
+    if "basename" in df.columns and "species_display_original" in df.columns:
+        return int(df[["basename", "species_display_original"]].astype(str).drop_duplicates().shape[0])
+    if "detection_id" in df.columns:
+        return int(df["detection_id"].astype(str).nunique())
+    return int(len(df))
+
+
+def _strategy_export_summary_df(df: pd.DataFrame, proj_root: Path, user_name: str) -> pd.DataFrame:
+    goal, balance, target_mode, target_value, bins, seed = _effective_strategy_settings(len(df), df)
+    selected_df, meta = _compute_strategy_plan(df.copy(), goal, balance, target_mode, target_value, bins, seed)
+
+    stored_available = st.session_state.get("validate_strategy_available")
+    stored_selected = st.session_state.get("validate_strategy_selected")
+    stored_strata = st.session_state.get("validate_strategy_strata")
+    stored_undersized = st.session_state.get("validate_strategy_undersized")
+    metrics_source = st.session_state.get("validate_strategy_metrics_source")
+
+    preview_metrics = {
+        "available": int(len(df)),
+        "selected": int(len(selected_df)),
+        "strata": int(len(meta)),
+        "undersized": _strategy_shortfall_count(
+            df_scope=df,
+            df_selected=selected_df,
+            goal=goal,
+            balance=balance,
+            target_mode=target_mode,
+            target_value=target_value,
+        ),
+    }
+
+    use_stored_metrics = metrics_source == "wizard_preview_metrics"
+
+    available_count = int(stored_available) if use_stored_metrics and stored_available not in (None, "") else int(preview_metrics["available"])
+    selected_count = int(stored_selected) if use_stored_metrics and stored_selected not in (None, "") else int(preview_metrics["selected"])
+    group_count = int(stored_strata) if use_stored_metrics and stored_strata not in (None, "") else int(preview_metrics["strata"])
+    below_target = int(stored_undersized) if use_stored_metrics and stored_undersized not in (None, "") else int(preview_metrics["undersized"])
+
+    rows = [
+        ("Project", proj_root.name),
+        ("Reviewer", str(user_name or "")),
+        ("Selected strategy", _strategy_goal_label(goal)),
+        ("Balance across", _strategy_balance_label(balance, df, goal)),
+        ("Selection target", _strategy_target_summary(target_value, target_mode)),
+    ]
+
+    if goal == "equal_allocation" or "confidence" in str(balance):
+        rows.append(("Confidence bands", int(bins)))
+
+    rows.extend([
+        ("Random seed", int(seed)),
+        ("Available detections", available_count),
+        ("Selected for review", selected_count),
+        ("Groups / strata", group_count),
+        ("Groups below requested target", below_target),
+    ])
+
+    rows.extend([
+        ("Summary", _strategy_summary(df)),
+        ("Exported at", _now_iso()),
+    ])
+    return pd.DataFrame(rows, columns=["field", "value"])
+
+
+def _validated_workbook_bytes(export_df: pd.DataFrame, strategy_df: pd.DataFrame) -> bytes:
+    bio = io.BytesIO()
+    with pd.ExcelWriter(bio, engine="openpyxl") as writer:
+        export_df.to_excel(writer, index=False, sheet_name="validated_detections")
+        strategy_df.to_excel(writer, index=False, sheet_name="validation_strategy")
+        try:
+            for ws in writer.book.worksheets:
+                ws.freeze_panes = "A2"
+                for col_cells in ws.columns:
+                    max_len = 0
+                    for cell in col_cells[:200]:
+                        value = "" if cell.value is None else str(cell.value)
+                        max_len = max(max_len, len(value))
+                    ws.column_dimensions[col_cells[0].column_letter].width = min(max(max_len + 2, 10), 48)
+        except Exception:
+            pass
+    bio.seek(0)
+    return bio.getvalue()
 
 
 def _strategy_review_summary_text(
@@ -2762,6 +2869,11 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                     st.session_state["validate_strategy_target_value"] = int(target_value)
                     st.session_state["validate_strategy_bins"] = int(bins_value)
                     st.session_state["validate_strategy_seed"] = int(seed_value)
+                    st.session_state["validate_strategy_available"] = int(preview_metrics.get("available", 0))
+                    st.session_state["validate_strategy_selected"] = int(preview_metrics.get("selected", 0))
+                    st.session_state["validate_strategy_strata"] = int(preview_metrics.get("strata", 0))
+                    st.session_state["validate_strategy_undersized"] = int(preview_metrics.get("undersized", 0))
+                    st.session_state["validate_strategy_metrics_source"] = "wizard_preview_metrics"
                     st.session_state["validate_strategy_modal_open"] = False
                     st.session_state["validate_strategy_dont_auto_show"] = bool(dont_show)
                     st.session_state["validate_strategy_prompt_seen"] = True
@@ -3576,10 +3688,10 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
 
     st.divider()
     st.subheader("Download validated data")
-    st.write(
-        "Download the currently selected dataset as a CSV file. "
-        "If a validated dataset exists and is selected above, that will be exported; "
-        "otherwise the current in-memory detections are exported."
+    st.markdown(
+        "CSV exports the validated detections only.  \
+"
+        "Excel exports the validated detections plus a validation strategy summary."
     )
 
     user_name = (
@@ -3599,10 +3711,21 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
     export_df = export_df.drop(columns=UNWANTED, errors="ignore")
 
     csv_bytes = export_df.to_csv(index=False).encode("utf-8")
+    strategy_export_df = _strategy_export_summary_df(df_all.copy(), proj_root, user_name)
+    xlsx_bytes = _validated_workbook_bytes(export_df, strategy_export_df)
 
-    st.download_button(
-        "Download CSV",
-        data=csv_bytes,
-        file_name=export_filename,
-        mime="text/csv",
-    )
+    dl_cols = st.columns(2)
+    with dl_cols[0]:
+        st.download_button(
+            "Download CSV",
+            data=csv_bytes,
+            file_name=export_filename,
+            mime="text/csv",
+        )
+    with dl_cols[1]:
+        st.download_button(
+            "Download Excel workbook",
+            data=xlsx_bytes,
+            file_name=_make_export_xlsx_filename(export_filename),
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
