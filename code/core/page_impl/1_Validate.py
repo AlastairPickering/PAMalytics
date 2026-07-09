@@ -441,6 +441,39 @@ def _resolve_audio_path(proj_root: Path, row_or_df, df_all: pd.DataFrame) -> Opt
     return None
 
 
+
+def _rows_for_resolved_audio(proj_root: Path, df: pd.DataFrame, apath: Optional[Path]) -> pd.DataFrame:
+    if apath is None or df is None or df.empty:
+        return df
+    try:
+        target = apath.resolve()
+    except Exception:
+        target = Path(os.path.normpath(str(apath)))
+    path_cols = [c for c in ("file_path", "path", "file_path_rel", "file_path_abs", "file_path_original", "original_path") if c in df.columns]
+    if not path_cols:
+        return df
+    keep = []
+    for _, row in df.iterrows():
+        matched = False
+        for col in path_cols:
+            val = row.get(col)
+            if isinstance(val, str) and val.strip():
+                cand = _resolve_audio_candidate(proj_root, val)
+                if cand is None:
+                    continue
+                try:
+                    if cand.resolve() == target:
+                        matched = True
+                        break
+                except Exception:
+                    if os.path.normcase(os.path.normpath(str(cand))) == os.path.normcase(os.path.normpath(str(target))):
+                        matched = True
+                        break
+        keep.append(matched)
+    if any(keep):
+        return df.loc[keep].copy()
+    return df
+
 def _estimate_low_edge_hz_for_group(gdf: pd.DataFrame) -> Optional[float]:
     vals: List[float] = []
     for _, row in gdf.iterrows():
@@ -1055,6 +1088,22 @@ def _sync_validate_page_input_from_page():
 
 def _on_validate_page_input_change():
     st.session_state["validate_page"] = int(st.session_state.get("validate_page_input", 1))
+
+
+def _clear_validate_time_window_state():
+    for k in list(st.session_state.keys()):
+        if str(k).startswith((
+            "validate_time_window_state_",
+            "validate_time_xmin_input_",
+            "validate_time_xmax_input_",
+        )):
+            del st.session_state[k]
+
+
+def _mark_validate_time_window_override(state_key: str):
+    state = dict(st.session_state.get(state_key, {}))
+    state["user_override"] = True
+    st.session_state[state_key] = state
 
 
 def _go_to_previous_validate_page():
@@ -2545,6 +2594,8 @@ def _init_filter_state():
         "validate_te_override": 10,
         "validate_use_fft_override": False,
         "validate_fft_size": 4096,
+        "validate_auto_zoom_single_detection": True,
+        "validate_auto_zoom_window_s": 5.0,
         "validate_interactive_card": None,
     }
     for k, v in defaults.items():
@@ -2988,6 +3039,26 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                 disabled=not use_te_override,
             )
 
+        zrow1, zrow2 = st.columns([1.2, 0.8])
+        with zrow1:
+            auto_zoom_single_detection = st.checkbox(
+                "Auto-fit single-detection cards",
+                key="validate_auto_zoom_single_detection",
+                help="When a validation card contains exactly one detection, open the spectrogram around that detection by default. Cards with multiple detections keep the full window.",
+                on_change=_clear_validate_time_window_state,
+            )
+        with zrow2:
+            auto_zoom_window_s = st.number_input(
+                "Single-detection window (s)",
+                min_value=1.0,
+                max_value=120.0,
+                step=0.5,
+                format="%.1f",
+                disabled=not auto_zoom_single_detection,
+                key="validate_auto_zoom_window_s",
+                on_change=_clear_validate_time_window_state,
+            )
+
         fft_col1, fft_col2 = st.columns([1.0, 1.2])
         with fft_col1:
             use_fft_override = st.checkbox("Set FFT size", key="validate_use_fft_override")
@@ -3213,12 +3284,28 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
             if "detection_probability" not in gdf.columns:
                 gdf["detection_probability"] = gdf.apply(_best_prob_from_row, axis=1)
 
-            n_det = int(len(gdf))
-            max_cp = _group_max_prob(gdf)
+            apath = _resolve_audio_path(proj_root, gdf, df_all)
+            gdf_plot = _rows_for_resolved_audio(proj_root, gdf, apath)
+
+            all_detectable_boxes: List[Dict[str, float]] = []
+            for _, row in gdf_plot.iterrows():
+                b = {
+                    "start_s": _num(row.get("start_s", row.get("detection_start_s"))),
+                    "end_s": _num(row.get("end_s", row.get("detection_end_s"))),
+                    "low_freq": _num(row.get("low_freq")),
+                    "high_freq": _num(row.get("high_freq")),
+                    "prob": _num(row.get("detection_probability")),
+                }
+                if np.isfinite(b["start_s"]) and np.isfinite(b["end_s"]) and b["end_s"] > b["start_s"]:
+                    all_detectable_boxes.append(b)
+            boxes = sorted(all_detectable_boxes, key=lambda b: (b["prob"] if np.isfinite(b["prob"]) else -1.0), reverse=True)[:10]
+            n_displayed_det = int(len(boxes))
+
+            max_cp = _group_max_prob(gdf_plot)
             title_html = (
                 f"<div style='margin-bottom:2px'><strong>{base}</strong>"
                 f"<br>{species_orig}"
-                f"<br>Selected detections: {n_det}"
+                f"<br>Displayed detections: {n_displayed_det}"
             )
             if np.isfinite(max_cp):
                 title_html += f"<br>Max probability: {max_cp:.2f}"
@@ -3254,7 +3341,6 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                         elif hasattr(st, "experimental_rerun"):
                             st.experimental_rerun()
 
-                apath = _resolve_audio_path(proj_root, gdf, df_all)
                 if not (apath and apath.exists()):
                     st.error("Audio not found")
                     y, sr = np.array([], dtype=np.float32), 1
@@ -3264,21 +3350,6 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                     except Exception as e:
                         st.error(f"Audio read error: {e}")
                         y, sr = np.array([], dtype=np.float32), 1
-
-                boxes: List[Dict[str, float]] = []
-                for _, row in gdf.iterrows():
-                    b = {
-                        "start_s": _num(row.get("start_s", row.get("detection_start_s"))),
-                        "end_s": _num(row.get("end_s", row.get("detection_end_s"))),
-                        "low_freq": _num(row.get("low_freq")),
-                        "high_freq": _num(row.get("high_freq")),
-                        "prob": _num(row.get("detection_probability")),
-                    }
-                    if np.isfinite(b["start_s"]) and np.isfinite(b["end_s"]) and b["end_s"] > b["start_s"]:
-                        boxes.append(b)
-
-                if boxes:
-                    boxes = sorted(boxes, key=lambda b: (b["prob"] if np.isfinite(b["prob"]) else -1.0), reverse=True)[:10]
 
                 n_fft = _get_validate_n_fft(sr)
                 hop = max(1, n_fft // 8)
@@ -3314,11 +3385,52 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                         time_state_key = _safe_widget_key("validate_time_window_state", base, species_orig)
                         time_key_start = _safe_widget_key("validate_time_xmin_input", base, species_orig)
                         time_key_end = _safe_widget_key("validate_time_xmax_input", base, species_orig)
-                        stored_window = st.session_state.get(time_state_key, {})
-                        stored_start = float(min(max(0.0, _num(stored_window.get("xmin", st.session_state.get(time_key_start, 0.0)))), float(dur)))
-                        stored_end = float(min(max(0.0, _num(stored_window.get("xmax", st.session_state.get(time_key_end, float(dur))))), float(dur)))
-                        if stored_end <= stored_start:
-                            stored_start, stored_end = 0.0, float(dur)
+                        stored_window = dict(st.session_state.get(time_state_key, {}))
+                        default_start, default_end = 0.0, float(dur)
+                        default_signature = ("full", round(float(dur), 3))
+                        if bool(st.session_state.get("validate_auto_zoom_single_detection", True)) and len(boxes) == 1:
+                            single_box = boxes[0]
+                            centre = 0.5 * (float(single_box["start_s"]) + float(single_box["end_s"]))
+                            width = min(float(dur), max(1.0, float(st.session_state.get("validate_auto_zoom_window_s", 5.0))))
+                            default_start = centre - width * 0.5
+                            default_end = centre + width * 0.5
+                            if default_start < 0.0:
+                                default_end = min(float(dur), default_end - default_start)
+                                default_start = 0.0
+                            if default_end > float(dur):
+                                shift = default_end - float(dur)
+                                default_start = max(0.0, default_start - shift)
+                                default_end = float(dur)
+                            if default_end <= default_start:
+                                default_start, default_end = 0.0, float(dur)
+                            default_signature = (
+                                "single",
+                                round(float(single_box["start_s"]), 3),
+                                round(float(single_box["end_s"]), 3),
+                                round(float(width), 3),
+                                round(float(dur), 3),
+                            )
+
+                        user_override = bool(stored_window.get("user_override", False))
+                        previous_signature = stored_window.get("default_signature")
+                        if (not user_override) or previous_signature != default_signature:
+                            st.session_state[time_key_start] = float(default_start)
+                            st.session_state[time_key_end] = float(default_end)
+                            st.session_state[time_state_key] = {
+                                "xmin": float(default_start),
+                                "xmax": float(default_end),
+                                "user_override": False,
+                                "default_signature": default_signature,
+                            }
+                        else:
+                            stored_start = float(min(max(0.0, _num(stored_window.get("xmin", st.session_state.get(time_key_start, default_start)))), float(dur)))
+                            stored_end = float(min(max(0.0, _num(stored_window.get("xmax", st.session_state.get(time_key_end, default_end)))), float(dur)))
+                            if stored_end <= stored_start:
+                                stored_start, stored_end = float(default_start), float(default_end)
+                            if time_key_start not in st.session_state:
+                                st.session_state[time_key_start] = stored_start
+                            if time_key_end not in st.session_state:
+                                st.session_state[time_key_end] = stored_end
 
                         tw1, tw2, tw3 = st.columns([1.0, 1.0, 0.16])
                         with tw3:
@@ -3326,21 +3438,21 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                             reset_window = st.button(
                                 "↺",
                                 key=_safe_widget_key("validate_time_reset", base, species_orig),
-                                help="Reset x-axis to full clip",
+                                help="Reset x-axis to current default",
                             )
                         if reset_window:
-                            st.session_state[time_state_key] = {"xmin": 0.0, "xmax": float(dur)}
-                            st.session_state[time_key_start] = 0.0
-                            st.session_state[time_key_end] = float(dur)
+                            st.session_state[time_key_start] = float(default_start)
+                            st.session_state[time_key_end] = float(default_end)
+                            st.session_state[time_state_key] = {
+                                "xmin": float(default_start),
+                                "xmax": float(default_end),
+                                "user_override": False,
+                                "default_signature": default_signature,
+                            }
                             if hasattr(st, "rerun"):
                                 st.rerun()
                             elif hasattr(st, "experimental_rerun"):
                                 st.experimental_rerun()
-
-                        if time_key_start not in st.session_state:
-                            st.session_state[time_key_start] = stored_start
-                        if time_key_end not in st.session_state:
-                            st.session_state[time_key_end] = stored_end
 
                         with tw1:
                             x_start = st.number_input(
@@ -3350,6 +3462,8 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                                 step=0.1,
                                 format="%.3f",
                                 key=time_key_start,
+                                on_change=_mark_validate_time_window_override,
+                                args=(time_state_key,),
                             )
                         with tw2:
                             x_end = st.number_input(
@@ -3359,12 +3473,20 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                                 step=0.1,
                                 format="%.3f",
                                 key=time_key_end,
+                                on_change=_mark_validate_time_window_override,
+                                args=(time_state_key,),
                             )
                         if float(x_end) <= float(x_start):
                             x_start = 0.0
                             x_end = float(dur)
                         xmin, xmax = max(0.0, float(x_start)), min(float(dur), float(x_end))
-                        st.session_state[time_state_key] = {"xmin": float(xmin), "xmax": float(xmax)}
+                        current_state = dict(st.session_state.get(time_state_key, {}))
+                        st.session_state[time_state_key] = {
+                            "xmin": float(xmin),
+                            "xmax": float(xmax),
+                            "user_override": bool(current_state.get("user_override", False)),
+                            "default_signature": default_signature,
+                        }
                         if xmax <= xmin:
                             xmin, xmax = 0 - tpad, dur + tpad
                     except Exception as e:
