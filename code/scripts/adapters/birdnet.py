@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional, List, Dict, Tuple
+from typing import Optional, List, Dict, Tuple, Any, Callable
 import os
 import re
 import numpy as np
@@ -45,20 +45,94 @@ def _safe_float(x, default=np.nan):
         return default
 
 
+def _column_lookup(df: pd.DataFrame) -> Dict[str, str]:
+    return {str(c).strip().lower(): c for c in df.columns}
+
+
+def _first_existing_col(df: pd.DataFrame, names: Tuple[str, ...]) -> Optional[str]:
+    lookup = _column_lookup(df)
+    for name in names:
+        hit = lookup.get(str(name).strip().lower())
+        if hit is not None:
+            return hit
+    return None
+
+
+def _existing_cols(df: pd.DataFrame, names: Tuple[str, ...]) -> List[str]:
+    lookup = _column_lookup(df)
+    out: List[str] = []
+    for name in names:
+        hit = lookup.get(str(name).strip().lower())
+        if hit is not None and hit not in out:
+            out.append(hit)
+    return out
+
+
+def _audio_path_cols(df: pd.DataFrame) -> List[str]:
+    return _existing_cols(df, (
+        "path", "filepath", "file_path", "audio_path", "source_path",
+        "recording_path", "audio file path", "audio_filepath", "full_path",
+        "fullpath", "absolute_path", "absolute path"
+    ))
+
+
+def _audio_filename_cols(df: pd.DataFrame) -> List[str]:
+    return _existing_cols(df, (
+        "file", "source_file", "source filename", "source_filename", "sourcefile",
+        "filename", "file_name", "wav_filename", "wav_file", "audio_filename",
+        "audio_file", "recording_file", "recording", "audio file", "audiofile", "name"
+    ))
+
+
+def _audio_reference_col(df: pd.DataFrame) -> Optional[str]:
+    cols = _audio_path_cols(df) + _audio_filename_cols(df)
+    return cols[0] if cols else None
+
+
+def _audio_reference_series(df: pd.DataFrame) -> pd.Series:
+    out = pd.Series([""] * len(df), index=df.index, dtype="object")
+    for col in _audio_path_cols(df) + _audio_filename_cols(df):
+        vals = df[col].map(_clean_identity_value)
+        mask = out.map(_clean_identity_value).eq("") & vals.ne("")
+        if mask.any():
+            out.loc[mask] = vals.loc[mask]
+    if out.map(_clean_identity_value).eq("").any() and "file_id" in df.columns:
+        vals = df["file_id"].map(_clean_identity_value)
+        mask = out.map(_clean_identity_value).eq("") & vals.ne("")
+        if mask.any():
+            out.loc[mask] = vals.loc[mask]
+    return out
+
+
+def _file_id_col(df: pd.DataFrame) -> Optional[str]:
+    return _first_existing_col(df, (
+        "source_file", "file", "filename", "file_name", "source_filename",
+        "source filename", "sourcefile", "wav_filename", "wav_file",
+        "audio_filename", "audio_file", "recording_file", "recording"
+    ))
+
+
 def _derive_file_id(df: pd.DataFrame) -> pd.Series:
-    """BirdNET: prefer basename of the 'file' column."""
-    if "file" in df.columns:
-        return df["file"].astype(str).map(os.path.basename)
-    # Fallbacks, just in case
-    for cand in ("wav_filename", "filename", "audio_filename", "source_file", "name"):
-        if cand in df.columns:
-            return df[cand].astype(str).map(os.path.basename)
+    col = _file_id_col(df)
+    if col is None:
+        col = _audio_reference_col(df)
+    if col is not None:
+        return df[col].astype(str).map(os.path.basename)
 
     def from_csv(s: str) -> str:
         b = os.path.basename(s)
         return b[:-4] if b.lower().endswith(".csv") else b
 
     return df.get("_source_csv", "").astype(str).map(from_csv)
+
+
+def _progress(progress_callback: Optional[Callable[[Dict[str, Any]], None]], **payload: Any) -> None:
+    if progress_callback is None:
+        return
+    try:
+        progress_callback(payload)
+    except Exception:
+        pass
 
 
 
@@ -106,6 +180,27 @@ def _path_suffix_candidates(rel_folder: str, audio_name: str) -> List[str]:
     return keep
 
 
+def _raw_path_tail_candidates(raw_value: str, min_parts: int = 2) -> List[str]:
+    raw = _key_text(raw_value).strip("/")
+    if not raw:
+        return []
+    parts = [p for p in raw.split("/") if p and ":" not in p]
+    if not parts:
+        return []
+    out: List[str] = []
+    max_parts = len(parts)
+    min_keep = min(max(1, min_parts), max_parts)
+    for n in range(max_parts, min_keep - 1, -1):
+        out.append("/".join(parts[-n:]))
+    seen = set()
+    keep = []
+    for item in out:
+        if item and item not in seen:
+            seen.add(item)
+            keep.append(item)
+    return keep
+
+
 
 def _sqlite_query_paths(index_db: Path, sql: str, params: Tuple[object, ...]) -> List[str]:
     import sqlite3
@@ -119,28 +214,49 @@ def _sqlite_query_paths(index_db: Path, sql: str, params: Tuple[object, ...]) ->
         return []
 
 
-def _match_audio_paths_sqlite(index_db: Path, raw_value: str, source_csv: str = "", csv_base: Optional[Path] = None) -> List[str]:
+def _is_path_like(value: str) -> bool:
+    raw = _clean_identity_value(value).replace("\\", "/")
+    return bool(raw.startswith("//") or (len(raw) >= 3 and raw[1] == ":" and raw[2] == "/") or "/" in raw or Path(raw).is_absolute())
+
+
+def _classify_matches(matches: List[str], method: str) -> Tuple[List[str], str, int, str]:
+    n = len(matches)
+    if n == 1:
+        return matches, "matched", n, method
+    if n > 1:
+        return [], f"ambiguous_{method}", n, method
+    return [], "unmatched", 0, method
+
+
+def _match_audio_paths_sqlite_status(index_db: Path, raw_value: str, source_csv: str = "", csv_base: Optional[Path] = None) -> Tuple[List[str], str, int, str]:
     raw = _clean_identity_value(raw_value)
     if not raw or not index_db or not Path(index_db).exists():
-        return []
+        return [], "missing_audio_reference", 0, "none"
 
     raw_rel_lc = _key_text(raw).strip("/")
     raw_name_lc = Path(raw).name.lower()
     raw_stem_lc = re.sub(r"\.[^.]+$", "", raw_name_lc)
+    path_like = _is_path_like(raw)
 
-    if raw.startswith("\\\\") or raw.startswith("//") or (len(raw) >= 3 and raw[1] == ":" and raw[2] in ("\\", "/")) or Path(raw).is_absolute():
+    if raw.startswith("\\") or raw.startswith("//") or (len(raw) >= 3 and raw[1] == ":" and raw[2] in ("\\", "/")) or Path(raw).is_absolute():
         m = _sqlite_query_paths(index_db, "SELECT path FROM audio_files WHERE path_lc = ?", (raw.replace("\\", "/").lower(),))
         if m:
-            return m
+            return _classify_matches(m, "exact_path")
 
     m = _sqlite_query_paths(index_db, "SELECT path FROM audio_files WHERE rel_lc = ?", (raw_rel_lc,))
     if m:
-        return m
+        return _classify_matches(m, "relative_path")
 
     if "/" in raw_rel_lc:
         m = _sqlite_query_paths(index_db, "SELECT path FROM audio_files WHERE rel_lc = ? OR rel_lc LIKE ?", (raw_rel_lc, "%/" + raw_rel_lc))
         if m:
-            return m
+            return _classify_matches(m, "path_suffix")
+
+    if path_like:
+        for cand in _raw_path_tail_candidates(raw, min_parts=2):
+            m = _sqlite_query_paths(index_db, "SELECT path FROM audio_files WHERE rel_lc = ? OR rel_lc LIKE ?", (cand, "%/" + cand))
+            if m:
+                return _classify_matches(m, "path_tail")
 
     if source_csv and csv_base is not None:
         try:
@@ -152,20 +268,26 @@ def _match_audio_paths_sqlite(index_db: Path, raw_value: str, source_csv: str = 
             for cand in _path_suffix_candidates(rel_folder, raw_name_lc):
                 m = _sqlite_query_paths(index_db, "SELECT path FROM audio_files WHERE rel_lc = ? OR rel_lc LIKE ?", (cand, "%/" + cand))
                 if m:
-                    return m
+                    return _classify_matches(m, "csv_relative_path")
         except Exception:
             pass
 
     m = _sqlite_query_paths(index_db, "SELECT path FROM audio_files WHERE filename_lc = ?", (raw_name_lc,))
     if m:
-        return m
+        return _classify_matches(m, "filename")
 
     if raw_stem_lc:
         m = _sqlite_query_paths(index_db, "SELECT path FROM audio_files WHERE stem_lc = ?", (raw_stem_lc,))
         if m:
-            return m
+            return _classify_matches(m, "stem")
 
-    return []
+    return [], "unmatched_filename", 0, "filename"
+
+
+def _match_audio_paths_sqlite(index_db: Path, raw_value: str, source_csv: str = "", csv_base: Optional[Path] = None) -> List[str]:
+    matches, _, _, _ = _match_audio_paths_sqlite_status(index_db, raw_value, source_csv=source_csv, csv_base=csv_base)
+    return matches
+
 
 
 def _match_audio_row(mp: pd.DataFrame, raw_value: str, source_csv: str = "", csv_base: Optional[Path] = None) -> str:
@@ -379,11 +501,87 @@ def _match_audio_paths(mp: pd.DataFrame, raw_value: str, source_csv: str = "", c
     return []
 
 
+
+def _match_audio_paths_frame_status(mp: pd.DataFrame, raw_value: str, source_csv: str = "", csv_base: Optional[Path] = None) -> Tuple[List[str], str, int, str]:
+    raw = _clean_identity_value(raw_value)
+    if not raw:
+        return [], "missing_audio_reference", 0, "none"
+    path_like = _is_path_like(raw)
+    matches = _match_audio_paths(mp, raw, source_csv=source_csv, csv_base=csv_base)
+    if len(matches) == 1:
+        return matches, "matched", 1, "file_lookup"
+    if len(matches) > 1:
+        method = "path" if path_like else "filename"
+        return [], f"ambiguous_{method}", len(matches), method
+    return [], "unmatched_path" if path_like else "unmatched_filename", 0, "path" if path_like else "filename"
+
+def _audio_reference_candidates_for_row(row: pd.Series, path_cols: List[str], filename_cols: List[str]) -> List[str]:
+    values: List[str] = []
+    seen = set()
+
+    def add(value: Any) -> None:
+        cleaned = _clean_identity_value(value)
+        if not cleaned:
+            return
+        key = cleaned.strip().lower()
+        if key in seen:
+            return
+        seen.add(key)
+        values.append(cleaned)
+
+    for col in path_cols:
+        if col in row.index:
+            add(row.get(col, ""))
+    for col in filename_cols:
+        if col in row.index:
+            add(row.get(col, ""))
+    if "file_id" in row.index:
+        add(row.get("file_id", ""))
+    return values
+
+
+def _resolve_audio_candidates_sqlite_status(index_db: Path, values: List[str], source_csv: str = "", csv_base: Optional[Path] = None) -> Tuple[List[str], str, int, str, str]:
+    first_ambiguous: Optional[Tuple[List[str], str, int, str, str]] = None
+    first_unmatched: Optional[Tuple[List[str], str, int, str, str]] = None
+    for raw_value in values:
+        matches, status, match_count, method = _match_audio_paths_sqlite_status(index_db, raw_value, source_csv=source_csv, csv_base=csv_base)
+        if len(matches) == 1 and status == "matched":
+            return matches, status, match_count, method, raw_value
+        if status.startswith("ambiguous_") and first_ambiguous is None:
+            first_ambiguous = (matches, status, match_count, method, raw_value)
+        elif first_unmatched is None:
+            first_unmatched = (matches, status, match_count, method, raw_value)
+    if first_ambiguous is not None:
+        return first_ambiguous
+    if first_unmatched is not None:
+        return first_unmatched
+    return [], "missing_audio_reference", 0, "none", ""
+
+
+def _resolve_audio_candidates_frame_status(mp: pd.DataFrame, values: List[str], source_csv: str = "", csv_base: Optional[Path] = None) -> Tuple[List[str], str, int, str, str]:
+    first_ambiguous: Optional[Tuple[List[str], str, int, str, str]] = None
+    first_unmatched: Optional[Tuple[List[str], str, int, str, str]] = None
+    for raw_value in values:
+        matches, status, match_count, method = _match_audio_paths_frame_status(mp, raw_value, source_csv=source_csv, csv_base=csv_base)
+        if len(matches) == 1 and status == "matched":
+            return matches, status, match_count, method, raw_value
+        if status.startswith("ambiguous_") and first_ambiguous is None:
+            first_ambiguous = (matches, status, match_count, method, raw_value)
+        elif first_unmatched is None:
+            first_unmatched = (matches, status, match_count, method, raw_value)
+    if first_ambiguous is not None:
+        return first_ambiguous
+    if first_unmatched is not None:
+        return first_unmatched
+    return [], "missing_audio_reference", 0, "none", ""
+
+
 def _expand_rows_by_audio_matches(
     df: pd.DataFrame,
     audio_root: Optional[Path],
     csv_root: Optional[Path] = None,
     audio_index_db: Optional[Path] = None,
+    progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> pd.DataFrame:
     if df.empty:
         out = df.copy()
@@ -396,14 +594,20 @@ def _expand_rows_by_audio_matches(
         if not audio_root or not Path(audio_root).exists():
             out = df.copy()
             out["file_path"] = ""
+            out["_audio_match_status"] = "no_audio_index"
+            out["_audio_match_count"] = 0
             return out
+        _progress(progress_callback, stage="Indexing selected audio folder", processed=0, total=None)
         mp = _index_audio_recursive(Path(audio_root))
         if mp.empty:
             out = df.copy()
             out["file_path"] = ""
+            out["_audio_match_status"] = "no_audio_files_found"
+            out["_audio_match_count"] = 0
             return out
 
-    raw_file = df["file"].astype(str).str.strip() if "file" in df.columns else df["file_id"].astype(str).str.strip()
+    path_cols = _audio_path_cols(df)
+    filename_cols = _audio_filename_cols(df)
 
     csv_base = None
     if csv_root is not None:
@@ -414,28 +618,50 @@ def _expand_rows_by_audio_matches(
             csv_base = None
 
     rows = []
-    cache: Dict[Tuple[str, str], List[str]] = {}
-    for idx, row in df.iterrows():
+    cache: Dict[Tuple[str, str], Tuple[List[str], str, int, str, str]] = {}
+    total = int(len(df))
+    matched_count = 0
+    ambiguous_count = 0
+    unmatched_count = 0
+    unique_matched_paths = set()
+    for n, (idx, row) in enumerate(df.iterrows(), start=1):
         source_csv = str(row.get("_source_csv", ""))
-        raw_value = str(raw_file.at[idx])
-        key = (raw_value, source_csv)
+        candidate_values = _audio_reference_candidates_for_row(row, path_cols, filename_cols)
+        key = ("||".join(candidate_values), source_csv)
         if key not in cache:
             if use_sqlite:
-                cache[key] = _match_audio_paths_sqlite(Path(audio_index_db), raw_value, source_csv=source_csv, csv_base=csv_base)
+                cache[key] = _resolve_audio_candidates_sqlite_status(Path(audio_index_db), candidate_values, source_csv=source_csv, csv_base=csv_base)
             else:
-                cache[key] = _match_audio_paths(mp, raw_value, source_csv=source_csv, csv_base=csv_base)
-        matches = cache[key]
-        if matches:
-            for path in matches:
-                r = row.copy()
-                r["file_path"] = path
-                rows.append(r)
+                cache[key] = _resolve_audio_candidates_frame_status(mp, candidate_values, source_csv=source_csv, csv_base=csv_base)
+        matches, status, match_count, method, used_value = cache[key]
+        if len(matches) == 1 and status == "matched":
+            matched_count += 1
+            unique_matched_paths.add(str(matches[0]))
+        elif str(status).startswith("ambiguous_"):
+            ambiguous_count += 1
         else:
-            r = row.copy()
-            r["file_path"] = ""
-            rows.append(r)
+            unmatched_count += 1
+        r = row.copy()
+        r["file_path"] = matches[0] if len(matches) == 1 else ""
+        r["_audio_match_status"] = status
+        r["_audio_match_count"] = int(match_count)
+        r["_audio_match_method"] = method
+        r["_audio_match_value"] = used_value
+        rows.append(r)
+        if n == total or n % 100 == 0:
+            _progress(
+                progress_callback,
+                stage="Matching detections to indexed audio",
+                processed=n,
+                total=total,
+                matched=matched_count,
+                ambiguous=ambiguous_count,
+                unmatched=unmatched_count,
+                unique_files=len(unique_matched_paths),
+            )
 
     return pd.DataFrame(rows).reset_index(drop=True)
+
 
 
 def _attach_paths_by_filename(
@@ -521,6 +747,7 @@ def ingest_birdnet(
     min_conf: float = 0.0,
     keep_only_present: bool = True,
     audio_index_db: Optional[Path] = None,
+    progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> pd.DataFrame:
     """
     Ingest BirdNET CSVs with columns:
@@ -539,35 +766,49 @@ def ingest_birdnet(
     if not csv_root.exists():
         return pd.DataFrame()
 
+    _progress(progress_callback, stage="Reading BirdNET CSVs", processed=0, total=None)
     raw = _read_all_csvs(csv_root)
     if raw.empty:
         return raw
+    _progress(progress_callback, stage="Reading BirdNET CSVs", processed=int(len(raw)), total=int(len(raw)))
 
     df = raw.copy()
 
     # file_id from basename of the BirdNET file path
     df["file_id"] = _derive_file_id(df)
 
-    # times -> seconds
-    if "start_time" in df.columns:
-        df["detection_start_s"] = _time_to_seconds(df["start_time"])
-    else:
-        df["detection_start_s"] = np.nan
+    start_col = _first_existing_col(df, (
+        "start_time", "start time", "start_sec", "start seconds", "start_seconds",
+        "start_s", "start", "begin", "onset", "Begin Time (s)",
+        "Begin File Offset (s)", "Selection Begin Time (s)"
+    ))
+    end_col = _first_existing_col(df, (
+        "end_time", "end time", "end_sec", "end seconds", "end_seconds",
+        "end_s", "end", "offset", "stop", "Begin Time (s) + Duration (s)",
+        "End Time (s)", "End File Offset (s)", "Selection End Time (s)"
+    ))
 
-    if "end_time" in df.columns:
-        df["detection_end_s"] = _time_to_seconds(df["end_time"])
-    else:
-        df["detection_end_s"] = np.nan
+    df["detection_start_s"] = _time_to_seconds(df[start_col]) if start_col else np.nan
+    df["detection_end_s"] = _time_to_seconds(df[end_col]) if end_col else np.nan
 
-    # species_name
-    if "scientific_name" in df.columns:
-        df["species_name"] = df["scientific_name"].astype(str)
-    elif "common_name" in df.columns:
-        df["species_name"] = df["common_name"].astype(str)
+    sci_col = _first_existing_col(df, (
+        "scientific_name", "SciName", "scientific name", "scientificName", "species", "species_name", "species name", "Latin", "latin_name"
+    ))
+    common_col = _first_existing_col(df, (
+        "common_name", "CommonName", "common name", "commonName", "label", "class", "species_label"
+    ))
+    if sci_col:
+        df["species_name"] = df[sci_col].astype(str)
+    elif common_col:
+        df["species_name"] = df[common_col].astype(str)
 
-    # detection_probability from confidence
-    if "confidence" in df.columns:
-        df["detection_probability"] = pd.to_numeric(df["confidence"], errors="coerce")
+    prob_col = _first_existing_col(df, (
+        "confidence", "Confidence", "score", "Score", "probability", "Probability",
+        "prob", "class_prob", "class probability", "detection_probability",
+        "detection probability"
+    ))
+    if prob_col:
+        df["detection_probability"] = pd.to_numeric(df[prob_col], errors="coerce")
     else:
         df["detection_probability"] = np.nan
     df["detection_probability"] = df["detection_probability"].clip(lower=0.0, upper=1.0)
@@ -583,7 +824,7 @@ def ingest_birdnet(
     if keep_only_present:
         df = df.loc[df["presence_label"] == "present"].copy()
 
-    df = _expand_rows_by_audio_matches(df, audio_root, csv_root=csv_root, audio_index_db=audio_index_db)
+    df = _expand_rows_by_audio_matches(df, audio_root, csv_root=csv_root, audio_index_db=audio_index_db, progress_callback=progress_callback)
     df["file_key"] = df.apply(_make_file_key, axis=1)
     df["detection_id"] = df.apply(_make_detection_id, axis=1)
 
@@ -597,25 +838,48 @@ def ingest_birdnet(
     mapped_sources = []
 
     # file id sources
-    for cand in ("file", "wav_filename", "filename", "audio_filename", "source_file", "name"):
-        if cand in raw.columns:
-            mapped_sources.append(cand)
+    for cand in (
+        "file", "path", "filepath", "file_path", "audio_path", "source_path",
+        "recording_path", "recording_file", "recording", "audio_file",
+        "source_file", "source filename", "source_filename", "sourcefile",
+        "wav_filename", "wav_file", "filename", "file_name",
+        "audio_filename", "audio file", "audiofile", "name"
+    ):
+        hit = _first_existing_col(raw, (cand,))
+        if hit:
+            mapped_sources.append(hit)
 
     # time sources
-    for cand in ("start_time", "end_time"):
-        if cand in raw.columns:
-            mapped_sources.append(cand)
+    for cand in (
+        "start_time", "start time", "end_time", "end time",
+        "start_sec", "end_sec", "start_seconds", "end_seconds",
+        "start_s", "end_s", "start", "end", "begin", "onset", "offset", "stop",
+        "Begin Time (s)", "Begin File Offset (s)", "End Time (s)",
+        "End File Offset (s)", "Selection Begin Time (s)", "Selection End Time (s)"
+    ):
+        hit = _first_existing_col(raw, (cand,))
+        if hit:
+            mapped_sources.append(hit)
 
     # species sources
-    for cand in ("scientific_name", "common_name"):
-        if cand in raw.columns:
-            mapped_sources.append(cand)
+    for cand in (
+        "scientific_name", "common_name", "SciName", "CommonName",
+        "scientific name", "common name", "scientificName", "commonName",
+        "species", "species_name", "species name", "Latin", "latin_name",
+        "label", "class", "species_label"
+    ):
+        hit = _first_existing_col(raw, (cand,))
+        if hit:
+            mapped_sources.append(hit)
 
-    # probability / label sources
-    if "confidence" in raw.columns:
-        mapped_sources.append("confidence")
-    if "label" in raw.columns:
-        mapped_sources.append("label")
+    for cand in (
+        "confidence", "Confidence", "score", "Score", "probability", "Probability",
+        "prob", "class_prob", "class probability", "detection_probability",
+        "detection probability", "label"
+    ):
+        hit = _first_existing_col(raw, (cand,))
+        if hit:
+            mapped_sources.append(hit)
 
     # Drop mapped sources using the shared helper
     df = drop_mapped_columns(df, mapped_sources)

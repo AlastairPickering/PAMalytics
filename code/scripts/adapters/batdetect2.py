@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional, List, Dict, Tuple, Any
+from typing import Optional, List, Dict, Tuple, Any, Callable
 import os
 import sqlite3
 import numpy as np
@@ -50,6 +50,41 @@ def _safe_basename(x) -> str:
     return os.path.basename(s) if s else ""
 
 
+def _is_path_like(value: str) -> bool:
+    raw = _safe_path_str(value).replace("\\", "/")
+    return bool(raw.startswith("//") or (len(raw) >= 3 and raw[1] == ":" and raw[2] == "/") or "/" in raw or Path(raw).is_absolute())
+
+
+def _raw_path_tail_candidates(raw_value: str, min_parts: int = 2) -> List[str]:
+    raw = _safe_path_str(raw_value).replace("\\", "/").strip().lower().strip("/")
+    if not raw:
+        return []
+    parts = [p for p in raw.split("/") if p and ":" not in p]
+    if not parts:
+        return []
+    out: List[str] = []
+    max_parts = len(parts)
+    min_keep = min(max(1, min_parts), max_parts)
+    for n in range(max_parts, min_keep - 1, -1):
+        out.append("/".join(parts[-n:]))
+    seen = set()
+    keep = []
+    for item in out:
+        if item and item not in seen:
+            seen.add(item)
+            keep.append(item)
+    return keep
+
+
+def _progress(progress_callback: Optional[Callable[[Dict[str, Any]], None]], **payload: Any) -> None:
+    if progress_callback is None:
+        return
+    try:
+        progress_callback(payload)
+    except Exception:
+        pass
+
+
 def _valid_audio_filename(x) -> bool:
     s = _safe_path_str(x)
     if not s:
@@ -67,8 +102,14 @@ def _derive_audio_ref(df: pd.DataFrame) -> pd.Series:
     """
     out = pd.Series([""] * len(df), index=df.index, dtype="object")
 
+    for cand in ("file", "path", "filepath", "file_path", "audio_path", "source_path", "source_file", "filename", "wav_filename", "audio_filename"):
+        if cand in df.columns:
+            vals = df[cand].map(_safe_path_str)
+            need = out.eq("")
+            out.loc[need] = vals.loc[need]
+
     if "clip_id" in df.columns:
-        vals = df["clip_id"].map(_safe_basename)
+        vals = df["clip_id"].map(_safe_path_str)
         need = out.eq("")
         out.loc[need] = vals.loc[need]
 
@@ -179,48 +220,108 @@ def _audio_index_query_paths(index_db: Path, raw_sql: str, params: Tuple[Any, ..
         return []
 
 
-def _match_audio_paths_sqlite(index_db: Path, value: str) -> List[str]:
+def _classify_matches(matches: List[str], method: str) -> Tuple[List[str], str, int, str]:
+    n = len(matches)
+    if n == 1:
+        return matches, "matched", n, method
+    if n > 1:
+        return [], f"ambiguous_{method}", n, method
+    return [], "unmatched", 0, method
+
+
+def _match_audio_paths_sqlite_status(index_db: Path, value: str) -> Tuple[List[str], str, int, str]:
     raw = _safe_path_str(value)
     if not raw:
-        return []
+        return [], "missing_audio_reference", 0, "none"
 
-    raw_name_lc = os.path.basename(raw).strip().lower()
+    raw_norm = raw.replace("\\", "/")
+    raw_lc = raw_norm.lower().strip("/")
+    raw_name_lc = os.path.basename(raw_norm).strip().lower()
+    raw_stem_lc = Path(raw_name_lc).stem.strip().lower()
+    path_like = _is_path_like(raw)
+
+    if raw.startswith("\\") or raw.startswith("//") or (len(raw) >= 3 and raw[1] == ":" and raw[2] in ("\\", "/")) or Path(raw).is_absolute():
+        matches = _audio_index_query_paths(index_db, "SELECT path FROM audio_files WHERE path_lc = ?", (raw_norm.lower(),))
+        if matches:
+            return _classify_matches(matches, "exact_path")
+
+    if raw_lc:
+        matches = _audio_index_query_paths(index_db, "SELECT path FROM audio_files WHERE rel_lc = ?", (raw_lc,))
+        if matches:
+            return _classify_matches(matches, "relative_path")
+        if "/" in raw_lc:
+            matches = _audio_index_query_paths(index_db, "SELECT path FROM audio_files WHERE rel_lc = ? OR rel_lc LIKE ?", (raw_lc, "%/" + raw_lc))
+            if matches:
+                return _classify_matches(matches, "path_suffix")
+
+    if path_like:
+        for cand in _raw_path_tail_candidates(raw, min_parts=2):
+            matches = _audio_index_query_paths(index_db, "SELECT path FROM audio_files WHERE rel_lc = ? OR rel_lc LIKE ?", (cand, "%/" + cand))
+            if matches:
+                return _classify_matches(matches, "path_tail")
+
     if raw_name_lc:
         matches = _audio_index_query_paths(index_db, "SELECT path FROM audio_files WHERE filename_lc = ?", (raw_name_lc,))
         if matches:
-            return matches
+            return _classify_matches(matches, "filename")
 
-    raw_stem_lc = Path(raw_name_lc).stem.strip().lower()
     if raw_stem_lc:
         matches = _audio_index_query_paths(index_db, "SELECT path FROM audio_files WHERE stem_lc = ?", (raw_stem_lc,))
         if matches:
-            return matches
+            return _classify_matches(matches, "stem")
 
-    return []
+    return [], "unmatched_filename", 0, "filename"
 
 
-def _expand_rows_by_audio_index(df: pd.DataFrame, audio_index_db: Optional[Path]) -> pd.DataFrame:
+def _match_audio_paths_sqlite(index_db: Path, value: str) -> List[str]:
+    matches, _, _, _ = _match_audio_paths_sqlite_status(index_db, value)
+    return matches
+
+
+def _expand_rows_by_audio_index(df: pd.DataFrame, audio_index_db: Optional[Path], progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None) -> pd.DataFrame:
     if df.empty or not audio_index_db or not Path(audio_index_db).exists() or "file_id" not in df.columns:
         return df
 
-    cache: Dict[str, List[str]] = {}
+    cache: Dict[str, Tuple[List[str], str, int, str]] = {}
     expanded = []
-    for _, row in df.iterrows():
+    total = int(len(df))
+    matched_count = 0
+    ambiguous_count = 0
+    unmatched_count = 0
+    unique_matched_paths = set()
+    for n, (_, row) in enumerate(df.iterrows(), start=1):
         fid = _safe_path_str(row.get("file_id", ""))
         if fid not in cache:
-            cache[fid] = _match_audio_paths_sqlite(Path(audio_index_db), fid)
-        matches = cache[fid]
-        if matches:
-            for match in matches:
-                r = row.copy()
-                r["file_path"] = match
-                expanded.append(r)
+            cache[fid] = _match_audio_paths_sqlite_status(Path(audio_index_db), fid)
+        matches, status, match_count, method = cache[fid]
+        if len(matches) == 1 and status == "matched":
+            matched_count += 1
+            unique_matched_paths.add(str(matches[0]))
+        elif str(status).startswith("ambiguous_"):
+            ambiguous_count += 1
         else:
-            r = row.copy()
-            r["file_path"] = ""
-            expanded.append(r)
+            unmatched_count += 1
+        r = row.copy()
+        r["file_path"] = matches[0] if len(matches) == 1 else ""
+        r["_audio_match_status"] = status
+        r["_audio_match_count"] = int(match_count)
+        r["_audio_match_method"] = method
+        r["_audio_match_value"] = fid
+        expanded.append(r)
+        if n == total or n % 100 == 0:
+            _progress(
+                progress_callback,
+                stage="Matching detections to indexed audio",
+                processed=n,
+                total=total,
+                matched=matched_count,
+                ambiguous=ambiguous_count,
+                unmatched=unmatched_count,
+                unique_files=len(unique_matched_paths),
+            )
 
     return pd.DataFrame(expanded).reset_index(drop=True) if expanded else df.head(0).copy()
+
 
 
 def _drop_legacy_mapped_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -326,14 +427,17 @@ def ingest_batdetect2(
     prob_source: Optional[str] = None,
     presence_rule: str = "det_or_class",
     audio_index_db: Optional[Path] = None,
+    progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> pd.DataFrame:
     csv_root = Path(csv_root)
     if not csv_root.exists():
         return pd.DataFrame()
 
+    _progress(progress_callback, stage="Reading BatDetect2 CSVs", processed=0, total=None)
     raw = _read_all_csvs(csv_root)
     if raw.empty:
         return raw
+    _progress(progress_callback, stage="Reading BatDetect2 CSVs", processed=int(len(raw)), total=int(len(raw)))
 
     for col in ("det_prob", "class_prob", "score", "probability"):
         if col in raw.columns:
@@ -416,7 +520,7 @@ def ingest_batdetect2(
     df["_pama_date_time_raw"] = date_time_raw.reindex(df.index).fillna("").astype(str)
 
     if audio_index_db and Path(audio_index_db).exists():
-        df = _expand_rows_by_audio_index(df, audio_index_db)
+        df = _expand_rows_by_audio_index(df, audio_index_db, progress_callback=progress_callback)
     else:
         df["file_path"] = _attach_paths_by_filename(df, audio_root)
 

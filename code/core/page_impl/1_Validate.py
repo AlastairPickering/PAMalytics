@@ -1090,6 +1090,12 @@ def _on_validate_page_input_change():
     st.session_state["validate_page"] = int(st.session_state.get("validate_page_input", 1))
 
 
+def _reset_validate_page_for_sort_change():
+    st.session_state["validate_page"] = 1
+    st.session_state["validate_page_input"] = 1
+    st.session_state["validate_page_sync_pending"] = False
+
+
 def _clear_validate_time_window_state():
     for k in list(st.session_state.keys()):
         if str(k).startswith((
@@ -2587,6 +2593,7 @@ def _init_filter_state():
         "validate_page_sync_pending": False,
         "validate_show_label": "present",
         "validate_min_prob": 0.0,
+        "validate_conf_sort": "Strategy/default order",
         "validate_lock_freq": False,
         "validate_fmin_khz": 15.0,
         "validate_fmax_khz": 90.0,
@@ -2990,7 +2997,7 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
         )
 
     with st.expander("Advanced filters", expanded=False):
-        r1c1, r1c2 = st.columns([1, 1])
+        r1c1, r1c2, r1c3 = st.columns([1, 1, 1])
         with r1c1:
             show_label = st.selectbox(
                 "Show clips labelled",
@@ -3004,6 +3011,14 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                 max_value=1.0,
                 step=0.01,
                 key="validate_min_prob",
+            )
+        with r1c3:
+            conf_sort = st.selectbox(
+                "Sort spectrograms",
+                ["Strategy/default order", "Confidence high to low", "Confidence low to high"],
+                key="validate_conf_sort",
+                on_change=_reset_validate_page_for_sort_change,
+                help="Sorts only the detections selected by the current filters and sampling strategy.",
             )
 
         frow1, frow2, frow3, frow4, frow5 = st.columns([0.9, 0.7, 0.9, 0.9, 0.9])
@@ -3225,7 +3240,18 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
     grouped = df_view.groupby(["basename", "species_display_original"], dropna=False)
     groups: List[tuple[str, str]] = list(grouped.indices.keys())
 
-    if goal == "find_likely_mistakes":
+    conf_sort = str(st.session_state.get("validate_conf_sort", "Strategy/default order"))
+    if conf_sort in ("Confidence high to low", "Confidence low to high"):
+        g_scores = {k: _group_max_prob(grouped.get_group(k)) for k in groups}
+
+        def _confidence_sort_key(k):
+            score = g_scores.get(k, np.nan)
+            score = float(score) if np.isfinite(score) else -1.0
+            score_key = -score if conf_sort == "Confidence high to low" else score
+            return (score_key, str(k[0]).lower(), str(k[1]).lower())
+
+        groups = sorted(groups, key=_confidence_sort_key)
+    elif goal == "find_likely_mistakes":
         g_scores = {k: _group_max_prob(grouped.get_group(k)) for k in groups}
         groups = sorted(groups, key=lambda k: g_scores.get(k, -np.inf), reverse=False)
     elif goal == "review_strongest":
