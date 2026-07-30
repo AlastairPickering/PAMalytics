@@ -414,6 +414,74 @@ def _apply_time_expansion_for_playback(y: np.ndarray, sr: int, te: int) -> Tuple
     return y_out, psr
 
 
+def _audio_file_info(apath: Path) -> Tuple[int, float]:
+    info = sf.info(str(apath))
+    sr = int(info.samplerate)
+    frames = int(info.frames)
+    dur = float(frames / sr) if sr > 0 else 0.0
+    return sr, dur
+
+
+def _detection_window_from_boxes(boxes: List[Dict[str, float]], duration_s: float, padding_s: float = 2.0) -> Tuple[float, float]:
+    dur = max(0.0, float(duration_s or 0.0))
+    starts = [float(b["start_s"]) for b in boxes if np.isfinite(b.get("start_s", np.nan))]
+    ends = [float(b["end_s"]) for b in boxes if np.isfinite(b.get("end_s", np.nan))]
+    if starts and ends and max(ends) > min(starts):
+        xmin = max(0.0, min(starts) - float(padding_s))
+        xmax = min(dur, max(ends) + float(padding_s)) if dur > 0 else max(ends) + float(padding_s)
+    else:
+        xmin, xmax = 0.0, dur
+    if xmax <= xmin:
+        xmax = min(dur, xmin + 1.0) if dur > 0 else xmin + 1.0
+    return float(xmin), float(xmax)
+
+
+def _read_audio_window(apath: Path, start_s: float, end_s: float) -> Tuple[np.ndarray, int, float, float]:
+    sr, dur = _audio_file_info(apath)
+    if sr <= 0:
+        return np.asarray([], dtype=np.float32), sr, 0.0, dur
+
+    start_s = max(0.0, float(start_s))
+    end_s = float(end_s)
+    if not np.isfinite(end_s) or end_s <= start_s:
+        end_s = dur if dur > start_s else start_s + 1.0
+    if dur > 0:
+        end_s = min(float(dur), end_s)
+
+    start_frame = max(0, int(round(start_s * sr)))
+    end_frame = max(start_frame + 1, int(round(end_s * sr)))
+    if dur > 0:
+        end_frame = min(end_frame, int(round(dur * sr)))
+
+    try:
+        y, read_sr = sf.read(
+            str(apath),
+            start=start_frame,
+            frames=max(1, end_frame - start_frame),
+            dtype="float32",
+            always_2d=False,
+        )
+        sr = int(read_sr or sr)
+        y = np.asarray(y, dtype=np.float32)
+        if y.ndim > 1:
+            y = np.mean(y, axis=1).astype(np.float32, copy=False)
+        return y, sr, float(start_frame / sr), dur
+    except Exception:
+        y_full, sr = librosa.load(str(apath), sr=None, mono=True)
+        start_frame = max(0, int(round(start_s * sr)))
+        end_frame = min(len(y_full), max(start_frame + 1, int(round(end_s * sr))))
+        return y_full[start_frame:end_frame].astype(np.float32, copy=False), int(sr), float(start_frame / sr), float(len(y_full) / sr)
+
+
+def _safe_dashboard_fft(sr: int, n_samples: int) -> Optional[int]:
+    if sr <= 0 or n_samples < 32:
+        return None
+    requested = 4096 if sr <= 48_000 else 8192
+    allowed = [32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
+    valid = [v for v in allowed if v <= int(requested) and v <= int(n_samples)]
+    return max(valid) if valid else None
+
+
 def show_detection_examples(df_page: pd.DataFrame, df_all: pd.DataFrame, project_root: Path):
     st.header("Detection examples")
 
@@ -540,12 +608,6 @@ def show_detection_examples(df_page: pd.DataFrame, df_all: pd.DataFrame, project
                     st.error("Audio not found")
                     continue
 
-                try:
-                    y, sr = librosa.load(str(apath), sr=None, mono=True)
-                except Exception as e:
-                    st.error(f"Audio read error: {e}")
-                    continue
-
                 boxes: List[Dict[str, float]] = []
                 for _, row in gdf.iterrows():
                     b = {
@@ -564,6 +626,14 @@ def show_detection_examples(df_page: pd.DataFrame, df_all: pd.DataFrame, project
                         reverse=True,
                     )[:10]
 
+                try:
+                    sr_info, dur_info = _audio_file_info(apath)
+                    xmin, xmax = _detection_window_from_boxes(boxes, dur_info, padding_s=2.0)
+                    y, sr, segment_start_s, dur = _read_audio_window(apath, xmin, xmax)
+                except Exception as e:
+                    st.error(f"Audio read error: {e}")
+                    continue
+
                 highs = [b["high_freq"] for b in boxes if np.isfinite(b["high_freq"])]
                 lows = [b["low_freq"] for b in boxes if np.isfinite(b["low_freq"])]
                 if highs and lows and max(highs) > min(lows):
@@ -577,16 +647,16 @@ def show_detection_examples(df_page: pd.DataFrame, df_all: pd.DataFrame, project
                 ymax = min(nyq, fmax + pad)
 
                 try:
-                    n_fft = 4096 if sr <= 48_000 else 8192
-                    hop = n_fft // 8
+                    n_fft = _safe_dashboard_fft(sr, int(len(y)))
+                    if n_fft is None:
+                        st.error("Audio segment is too short for spectrogram rendering")
+                        continue
+                    hop = max(1, n_fft // 8)
                     D = librosa.stft(y=y, n_fft=n_fft, hop_length=hop)
                     S = np.abs(D) ** 2
                     S_dB = librosa.power_to_db(S, ref=np.max, top_db=90)
-                    times = librosa.frames_to_time(np.arange(S.shape[1]), sr=sr, hop_length=hop)
+                    times = librosa.frames_to_time(np.arange(S.shape[1]), sr=sr, hop_length=hop) + float(segment_start_s)
                     freqs_hz = np.linspace(0.0, sr * 0.5, S.shape[0])
-                    dur = max(1e-6, len(y) / sr)
-                    tpad = dur * 0.01
-                    xmin, xmax = 0 - tpad, dur + tpad
                 except Exception as e:
                     st.error(f"Spectrogram setup error: {e}")
                     continue
@@ -626,13 +696,10 @@ def show_detection_examples(df_page: pd.DataFrame, df_all: pd.DataFrame, project
                 except Exception as e:
                     st.error(f"Spectrogram error: {e}")
 
-                # Playback – full clip, TE applied if needed
                 try:
-                    y_seg = y
-
                     low_edge = _estimate_low_edge_hz_for_group(gdf)
                     te = _choose_te_for_group(low_edge, sr)
-                    y_play, psr = _apply_time_expansion_for_playback(y_seg, sr, te)
+                    y_play, psr = _apply_time_expansion_for_playback(y, sr, te)
 
                     abuf = io.BytesIO()
                     sf.write(abuf, y_play, psr, format="WAV")

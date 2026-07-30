@@ -575,6 +575,115 @@ def _match_frame_count(x: np.ndarray, n_frames: int) -> np.ndarray:
     pad = np.full(n_frames - arr.size, arr[-1], dtype=float)
     return np.concatenate([arr, pad])
 
+
+def _audio_info(apath: Path) -> Tuple[int, float]:
+    try:
+        info = sf.info(str(apath))
+        sr = int(info.samplerate or 0)
+        frames = int(info.frames or 0)
+        dur = float(frames / sr) if sr > 0 else 0.0
+        return sr, max(0.0, dur)
+    except Exception:
+        try:
+            y_tmp, sr_tmp = librosa.load(str(apath), sr=None, mono=True, duration=0.01)
+            sr = int(sr_tmp or 0)
+            return sr, float(max(0.0, len(y_tmp) / sr)) if sr > 0 else 0.0
+        except Exception:
+            return 0, 0.0
+
+
+def _load_audio_window(apath: Path, start_s: float, end_s: float, fallback_sr: int = 0) -> Tuple[np.ndarray, int, float, float]:
+    start_s = max(0.0, float(start_s)) if np.isfinite(_num(start_s)) else 0.0
+    end_s = max(start_s, float(end_s)) if np.isfinite(_num(end_s)) else start_s
+
+    try:
+        info = sf.info(str(apath))
+        sr = int(info.samplerate or fallback_sr or 0)
+        total_frames = int(info.frames or 0)
+        if sr <= 0 or total_frames <= 0:
+            raise ValueError("invalid audio metadata")
+
+        start_frame = int(max(0, min(total_frames, round(start_s * sr))))
+        end_frame = int(max(start_frame + 1, min(total_frames, round(end_s * sr))))
+        frames = int(max(1, end_frame - start_frame))
+        y, _ = sf.read(
+            str(apath),
+            start=start_frame,
+            frames=frames,
+            dtype="float32",
+            always_2d=False,
+        )
+        y = np.asarray(y, dtype=np.float32)
+        if y.ndim == 2:
+            y = y.mean(axis=1).astype(np.float32, copy=False)
+        actual_start = float(start_frame / sr)
+        actual_end = float((start_frame + len(y)) / sr)
+        return y, sr, actual_start, actual_end
+    except Exception:
+        duration = max(0.0, float(end_s - start_s)) if end_s > start_s else None
+        try:
+            y, sr = librosa.load(str(apath), sr=None, mono=True, offset=float(start_s), duration=duration)
+            return y.astype(np.float32, copy=False), int(sr), float(start_s), float(start_s + (len(y) / sr if sr else 0.0))
+        except Exception:
+            return np.array([], dtype=np.float32), int(fallback_sr or 1), float(start_s), float(start_s)
+
+
+def _default_detection_window(
+    boxes: List[Dict[str, float]],
+    duration_s: float,
+    default_single_window_s: float,
+    padding_s: float = 2.0,
+) -> Tuple[float, float, Tuple[object, ...]]:
+    dur = max(0.0, float(duration_s)) if np.isfinite(_num(duration_s)) else 0.0
+    valid_boxes = [
+        b for b in boxes
+        if np.isfinite(_num(b.get("start_s")))
+        and np.isfinite(_num(b.get("end_s")))
+        and float(b.get("end_s")) > float(b.get("start_s"))
+    ]
+
+    if dur <= 0.0 or not valid_boxes:
+        return 0.0, max(1e-6, dur), ("full", round(float(dur), 3))
+
+    if len(valid_boxes) == 1 and bool(st.session_state.get("validate_auto_zoom_single_detection", True)):
+        b = valid_boxes[0]
+        width = min(dur, max(1.0, float(default_single_window_s)))
+        centre = 0.5 * (float(b["start_s"]) + float(b["end_s"]))
+        start = centre - width * 0.5
+        end = centre + width * 0.5
+        mode = "single"
+    else:
+        start = min(float(b["start_s"]) for b in valid_boxes) - max(0.0, float(padding_s))
+        end = max(float(b["end_s"]) for b in valid_boxes) + max(0.0, float(padding_s))
+        mode = "detections"
+
+    if start < 0.0:
+        end = min(dur, end - start)
+        start = 0.0
+    if end > dur:
+        shift = end - dur
+        start = max(0.0, start - shift)
+        end = dur
+    if end <= start:
+        start, end = 0.0, dur
+
+    signature = (
+        mode,
+        tuple((round(float(b["start_s"]), 3), round(float(b["end_s"]), 3)) for b in valid_boxes),
+        round(float(default_single_window_s), 3),
+        round(float(padding_s), 3),
+        round(float(dur), 3),
+    )
+    return float(start), float(end), signature
+
+
+def _offset_detection_times(gdf: pd.DataFrame, offset_s: float) -> pd.DataFrame:
+    out = gdf.copy()
+    for col in ("start_s", "end_s", "detection_start_s", "detection_end_s"):
+        if col in out.columns:
+            out[col] = pd.to_numeric(out[col], errors="coerce") - float(offset_s)
+    return out
+
 def _compute_spectrogram_data(
     y: np.ndarray,
     sr: int,
@@ -802,12 +911,6 @@ def _render_interactive_validate_dialog(
         st.error("Audio not found for the selected card.")
         return
 
-    try:
-        y_int, sr_int = librosa.load(str(apath_int), sr=None, mono=True)
-    except Exception as e:
-        st.error(f"Audio read error: {e}")
-        return
-
     boxes_int: List[Dict[str, float]] = []
     for _, row in gdf_int.iterrows():
         b = {
@@ -826,6 +929,31 @@ def _render_interactive_validate_dialog(
             key=lambda b: (b["prob"] if np.isfinite(b["prob"]) else -1.0),
             reverse=True,
         )[:10]
+
+    try:
+        sr_int, dur_int = _audio_info(apath_int)
+        if sr_int <= 0 or dur_int <= 0:
+            raise ValueError("Audio metadata could not be read")
+
+        xmin_int, xmax_int, _ = _default_detection_window(
+            boxes=boxes_int,
+            duration_s=dur_int,
+            default_single_window_s=float(st.session_state.get("validate_auto_zoom_window_s", 5.0)),
+            padding_s=2.0,
+        )
+        y_int, sr_int, actual_start_int, actual_end_int = _load_audio_window(
+            apath_int,
+            xmin_int,
+            xmax_int,
+            fallback_sr=sr_int,
+        )
+        if y_int.size == 0 or sr_int <= 0:
+            raise ValueError("Audio window could not be read")
+        xmin_int = float(actual_start_int)
+        xmax_int = float(actual_end_int)
+    except Exception as e:
+        st.error(f"Audio read error: {e}")
+        return
 
     n_fft_int = _get_validate_n_fft(sr_int)
     hop_int = max(1, n_fft_int // 8)
@@ -856,7 +984,7 @@ def _render_interactive_validate_dialog(
     )
 
     S_dB_int = spec_int["S_dB"]
-    times_int = spec_int["times"]
+    times_int = spec_int["times"] + float(xmin_int)
     freqs_hz_int = spec_int["freqs_hz"]
     frame_peak_freq_hz_int = spec_int["frame_peak_freq_hz"]
     frame_centroid_hz_int = spec_int["frame_centroid_hz"]
@@ -865,10 +993,6 @@ def _render_interactive_validate_dialog(
     frame_flatness_int = spec_int["frame_flatness"]
     frame_rms_int = spec_int["frame_rms"]
     frame_zcr_int = spec_int["frame_zcr"]
-
-    dur_int = max(1e-6, len(y_int) / sr_int)
-    tpad_int = dur_int * 0.01
-    xmin_int, xmax_int = 0 - tpad_int, dur_int + tpad_int
 
     fig_int = _plotly_spectrogram_figure(
         S_dB=S_dB_int,
@@ -890,7 +1014,6 @@ def _render_interactive_validate_dialog(
 
     st.caption(f"{base} • {species_orig}")
     st.plotly_chart(fig_int, width='stretch', config={"displayModeBar": True})
-
 
 def _acoustic_metrics_for_detection(
     y: np.ndarray,
@@ -3059,7 +3182,7 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
             auto_zoom_single_detection = st.checkbox(
                 "Auto-fit single-detection cards",
                 key="validate_auto_zoom_single_detection",
-                help="When a validation card contains exactly one detection, open the spectrogram around that detection by default. Cards with multiple detections keep the full window.",
+                help="When a card contains one detection, the spectrogram opens around that detection. When it contains multiple detections, it opens around the smallest window covering those detections.",                
                 on_change=_clear_validate_time_window_state,
             )
         with zrow2:
@@ -3367,75 +3490,40 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                         elif hasattr(st, "experimental_rerun"):
                             st.experimental_rerun()
 
-                if not (apath and apath.exists()):
-                    st.error("Audio not found")
-                    y, sr = np.array([], dtype=np.float32), 1
-                else:
-                    try:
-                        y, sr = librosa.load(str(apath), sr=None, mono=True)
-                    except Exception as e:
-                        st.error(f"Audio read error: {e}")
-                        y, sr = np.array([], dtype=np.float32), 1
-
+                y, sr = np.array([], dtype=np.float32), 1
+                dur = 0.0
+                xmin, xmax = 0.0, 1.0
+                ymin, ymax = 0.0, 1.0
+                S_dB = np.zeros((2, 2))
+                times = np.arange(2, dtype=float)
+                freqs_hz = np.arange(2, dtype=float)
                 n_fft = _get_validate_n_fft(sr)
                 hop = max(1, n_fft // 8)
 
-                if apath and y.size > 0:
-                    if lock_freq and (fmax_khz > fmin_khz):
-                        ymin = max(0.0, float(fmin_khz) * 1000.0)
-                        ymax = float(fmax_khz) * 1000.0
-                        nyq = 0.5 * sr * 0.98
-                        ymax = min(ymax, nyq)
-                    else:
-                        highs = [b["high_freq"] for b in boxes if np.isfinite(b["high_freq"])]
-                        lows = [b["low_freq"] for b in boxes if np.isfinite(b["low_freq"])]
-                        if highs and lows and max(highs) > min(lows):
-                            fmin, fmax = min(lows), max(highs)
-                        else:
-                            fmin, fmax = 0.0, 0.5 * sr
-                        span = max(1.0, (fmax - fmin))
-                        pad = max(4_000.0, 0.30 * span)
-                        nyq = 0.5 * sr * 0.98
-                        ymin = max(0.0, fmin - pad)
-                        ymax = min(nyq, fmax + pad)
-
+                if not (apath and apath.exists()):
+                    st.error("Audio not found")
+                else:
                     try:
-                        D = librosa.stft(y=y, n_fft=n_fft, hop_length=hop)
-                        S = np.abs(D) ** 2
-                        S_dB = librosa.power_to_db(S, ref=np.max, top_db=90)
+                        sr_info, dur_info = _audio_info(apath)
+                        if sr_info <= 0 or dur_info <= 0:
+                            raise ValueError("Audio metadata could not be read")
 
-                        times = librosa.frames_to_time(np.arange(S.shape[1]), sr=sr, hop_length=hop)
-                        freqs_hz = np.linspace(0.0, sr * 0.5, S.shape[0])
-                        dur = max(1e-6, len(y) / sr)
-                        tpad = dur * 0.01
+                        sr = int(sr_info)
+                        dur = float(dur_info)
+                        n_fft = _get_validate_n_fft(sr)
+                        hop = max(1, n_fft // 8)
+
                         time_state_key = _safe_widget_key("validate_time_window_state", base, species_orig)
                         time_key_start = _safe_widget_key("validate_time_xmin_input", base, species_orig)
                         time_key_end = _safe_widget_key("validate_time_xmax_input", base, species_orig)
                         stored_window = dict(st.session_state.get(time_state_key, {}))
-                        default_start, default_end = 0.0, float(dur)
-                        default_signature = ("full", round(float(dur), 3))
-                        if bool(st.session_state.get("validate_auto_zoom_single_detection", True)) and len(boxes) == 1:
-                            single_box = boxes[0]
-                            centre = 0.5 * (float(single_box["start_s"]) + float(single_box["end_s"]))
-                            width = min(float(dur), max(1.0, float(st.session_state.get("validate_auto_zoom_window_s", 5.0))))
-                            default_start = centre - width * 0.5
-                            default_end = centre + width * 0.5
-                            if default_start < 0.0:
-                                default_end = min(float(dur), default_end - default_start)
-                                default_start = 0.0
-                            if default_end > float(dur):
-                                shift = default_end - float(dur)
-                                default_start = max(0.0, default_start - shift)
-                                default_end = float(dur)
-                            if default_end <= default_start:
-                                default_start, default_end = 0.0, float(dur)
-                            default_signature = (
-                                "single",
-                                round(float(single_box["start_s"]), 3),
-                                round(float(single_box["end_s"]), 3),
-                                round(float(width), 3),
-                                round(float(dur), 3),
-                            )
+
+                        default_start, default_end, default_signature = _default_detection_window(
+                            boxes=boxes,
+                            duration_s=dur,
+                            default_single_window_s=float(st.session_state.get("validate_auto_zoom_window_s", 5.0)),
+                            padding_s=2.0,
+                        )
 
                         user_override = bool(stored_window.get("user_override", False))
                         previous_signature = stored_window.get("default_signature")
@@ -3502,10 +3590,14 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                                 on_change=_mark_validate_time_window_override,
                                 args=(time_state_key,),
                             )
+
                         if float(x_end) <= float(x_start):
-                            x_start = 0.0
-                            x_end = float(dur)
+                            x_start = float(default_start)
+                            x_end = float(default_end)
+
                         xmin, xmax = max(0.0, float(x_start)), min(float(dur), float(x_end))
+                        if xmax <= xmin:
+                            xmin, xmax = float(default_start), float(default_end)
                         current_state = dict(st.session_state.get(time_state_key, {}))
                         st.session_state[time_state_key] = {
                             "xmin": float(xmin),
@@ -3513,14 +3605,50 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                             "user_override": bool(current_state.get("user_override", False)),
                             "default_signature": default_signature,
                         }
-                        if xmax <= xmin:
-                            xmin, xmax = 0 - tpad, dur + tpad
+
+                        y, sr, actual_start, actual_end = _load_audio_window(apath, xmin, xmax, fallback_sr=sr)
+                        if y.size == 0 or sr <= 0:
+                            raise ValueError("Audio window could not be read")
+                        xmin = float(actual_start)
+                        xmax = float(actual_end)
+
+                        if lock_freq and (fmax_khz > fmin_khz):
+                            ymin = max(0.0, float(fmin_khz) * 1000.0)
+                            ymax = float(fmax_khz) * 1000.0
+                            nyq = 0.5 * sr * 0.98
+                            ymax = min(ymax, nyq)
+                        else:
+                            highs = [b["high_freq"] for b in boxes if np.isfinite(b["high_freq"])]
+                            lows = [b["low_freq"] for b in boxes if np.isfinite(b["low_freq"])]
+                            if highs and lows and max(highs) > min(lows):
+                                fmin, fmax = min(lows), max(highs)
+                            else:
+                                fmin, fmax = 0.0, 0.5 * sr
+                            span = max(1.0, (fmax - fmin))
+                            pad = max(4_000.0, 0.30 * span)
+                            nyq = 0.5 * sr * 0.98
+                            ymin = max(0.0, fmin - pad)
+                            ymax = min(nyq, fmax + pad)
+
+                        spec = _compute_spectrogram_data(
+                            y=y,
+                            sr=sr,
+                            n_fft=n_fft,
+                            hop_length=hop,
+                        )
+                        S_dB = spec["S_dB"]
+                        times = spec["times"] + float(xmin)
+                        freqs_hz = spec["freqs_hz"]
                     except Exception as e:
                         st.error(f"Spectrogram setup error: {e}")
-                        times = np.arange(2)
-                        freqs_hz = np.arange(2)
+                        y, sr = np.array([], dtype=np.float32), 1
+                        dur = 0.0
+                        n_fft = _get_validate_n_fft(sr)
+                        hop = max(1, n_fft // 8)
+                        times = np.arange(2, dtype=float)
+                        freqs_hz = np.arange(2, dtype=float)
                         S_dB = np.zeros((2, 2))
-                        xmin, xmax = 0, 1
+                        xmin, xmax = 0.0, 1.0
 
                     try:
                         fig, ax = plt.subplots(figsize=(8.6, 5.2), dpi=280, constrained_layout=False)
@@ -3624,7 +3752,7 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                             te = max(1, int(te_auto))
 
                         y_play, psr = _apply_time_expansion_for_playback(y_seg, sr, te)
-                        tmp_wav = _tmp_audio_path(proj_root, base, species_orig, int(te), int(psr), int(y_play.size))
+                        tmp_wav = _tmp_audio_path(proj_root, base, f"{species_orig}|{float(xmin):.3f}-{float(xmax):.3f}", int(te), int(psr), int(y_play.size))
                         sf.write(str(tmp_wav), y_play, int(psr), format="WAV", subtype="PCM_16")
                         st.audio(str(tmp_wav))
                     except Exception as e:
@@ -3635,8 +3763,9 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
 
                     if y.size > 0 and sr > 1:
                         requested_metric_fft = int(n_fft)
+                        gdf_metric_source = _offset_detection_times(gdf, float(xmin))
                         metric_fft = _card_metric_fft(
-                            gdf=gdf,
+                            gdf=gdf_metric_source,
                             y=y,
                             sr=sr,
                             requested_n_fft=requested_metric_fft,
@@ -3645,7 +3774,7 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                         if metric_fft is not None:
                             metric_hop = max(1, metric_fft // 8)
 
-                            gdf_for_metrics = gdf.copy().sort_values("start_s").reset_index(drop=True)
+                            gdf_for_metrics = gdf_metric_source.copy().sort_values("start_s").reset_index(drop=True)
 
                             for ridx_metric, row_metric in gdf_for_metrics.iterrows():
                                 start_s_metric = _num(row_metric.get("start_s", row_metric.get("detection_start_s")))
