@@ -20,9 +20,9 @@ class ProjectManifest:
     created_by: Optional[str] = None
     created_at: str = field(default_factory=lambda: datetime.now(dt_timezone.utc).isoformat())
     last_opened: Optional[str] = None
-    paths: dict | None = None
-    status: dict | None = None
-    provenance: dict | None = None
+    paths: Optional[dict] = None
+    status: Optional[dict] = None
+    provenance: Optional[dict] = None
     def to_json(self) -> str:
         return json.dumps(asdict(self), indent=2)
 

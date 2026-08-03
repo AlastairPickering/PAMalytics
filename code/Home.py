@@ -38,7 +38,7 @@ import streamlit as st  # noqa
 
 DASHBOARD_PAGE = "pages/40_Dashboard.py"
 
-def _request_dashboard_launch(project_folder: str | None = None) -> None:
+def _request_dashboard_launch(project_folder: Optional[str] = None) -> None:
     if project_folder:
         project_path = Path(project_folder)
         st.session_state.current_project = str(project_path)
