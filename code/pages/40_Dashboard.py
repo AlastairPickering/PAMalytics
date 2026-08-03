@@ -4,7 +4,7 @@ import sys
 import json
 
 import streamlit as st
-from scripts.dashboard import render_dashboard
+from code.scripts.dashboard import render_dashboard
 from code.utils import build_analysis_dataset as build_ds
 
 THIS_FILE = Path(__file__).resolve()
