@@ -3682,7 +3682,17 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                     all_detectable_boxes.append(b)
             boxes = sorted(all_detectable_boxes, key=lambda b: (b["prob"] if np.isfinite(b["prob"]) else -1.0), reverse=True)[:10]
             displayed_indices = [b["row_index"] for b in boxes if b.get("row_index") in gdf.index]
-            gdf_card = gdf.loc[displayed_indices].copy() if displayed_indices else gdf.iloc[0:0].copy()
+
+            if displayed_indices:
+                gdf_card = gdf.loc[displayed_indices].copy()
+
+                # Use the current persisted dataframe for status, so reviewed/changed/uncertain
+                # pills match the live table after reload.
+                gdf_card_status = df_all.loc[displayed_indices].copy()
+            else:
+                gdf_card = gdf.iloc[0:0].copy()
+                gdf_card_status = gdf_card.copy()
+
             n_displayed_det = int(len(gdf_card))
 
             max_cp = _group_max_prob(gdf_card if not gdf_card.empty else gdf_plot)
@@ -3701,7 +3711,7 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                     with h1:
                         st.markdown(title_html, unsafe_allow_html=True)
                     with h2:
-                        _render_pills(gdf_card)
+                        _render_pills(gdf_card_status)
                     y, sr = np.array([], dtype=np.float32), 1
                     dur = 0.0
                     xmin, xmax = 0.0, 1.0
