@@ -52,4 +52,5 @@ nav:
   - Validate: validate.md
   - Recalculate: recalculate.md
   - Troubleshooting: troubleshooting.md
+  - Release testing: release-testing.md
 

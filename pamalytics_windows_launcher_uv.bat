@@ -103,7 +103,7 @@ if exist "%VENV_DIR%" (
 
 if not exist "%PY_EXE%" (
   set "SYS_PY="
-  for %%V in (3.11 3.10 3.9) do (
+  for %%V in (3.12) do (
     if not defined SYS_PY (
       for /f "usebackq delims=" %%P in (`"%UV_EXE%" python find --system --no-python-downloads %%V 2^>nul`) do (
         if not defined SYS_PY set "SYS_PY=%%P"
@@ -115,8 +115,8 @@ if not exist "%PY_EXE%" (
     echo Creating venv from system Python: !SYS_PY!
     "%UV_EXE%" venv --python "!SYS_PY!" "%VENV_DIR%" || goto :err
   ) else (
-    echo Creating venv with Python 3.11...
-    "%UV_EXE%" venv --python 3.11 "%VENV_DIR%" || goto :err
+    echo Creating venv with Python 3.12...
+    "%UV_EXE%" venv --python 3.12 "%VENV_DIR%" || goto :err
   )
 
   set "PY_EXE=%VENV_DIR%\Scripts\python.exe"
@@ -145,7 +145,6 @@ if errorlevel 1 (
 rem Install requirements
 
 set "REQ_FILE=%APP_DIR%\requirements.txt"
-if exist "%APP_DIR%\code\scripts\requirements.txt" set "REQ_FILE=%APP_DIR%\code\scripts\requirements.txt"
 
 if not exist "%REQ_FILE%" (
   echo Requirements file not found: %REQ_FILE%
@@ -156,37 +155,9 @@ echo Installing dependencies from:
 echo   %REQ_FILE%
 "%UV_EXE%" pip install --python "%PY_EXE%" -r "%REQ_FILE%" || goto :err
 
-rem librosa / Python 3.12 fallback
+rem Verify key dependencies
 
-"%PY_EXE%" -c "import librosa" >nul 2>&1
-if errorlevel 1 (
-  set "PY_MINOR="
-  for /f "usebackq delims=" %%V in (`"%PY_EXE%" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2^>nul`) do (
-    set "PY_MINOR=%%V"
-  )
-
-  if "!PY_MINOR!"=="3.12" (
-    echo librosa failed on Python 3.12, retrying with Python 3.11...
-    set "VENV_DIR=%APP_DIR%\.venv-win311"
-    set "PY_EXE=%VENV_DIR%\Scripts\python.exe"
-
-    if not exist "%PY_EXE%" (
-      "%UV_EXE%" venv --python 3.11 "%VENV_DIR%" || goto :err
-      set "PY_EXE=%VENV_DIR%\Scripts\python.exe"
-    )
-
-    "%PY_EXE%" -m pip --version >nul 2>&1
-    if errorlevel 1 (
-      "%PY_EXE%" -m ensurepip --upgrade || goto :err
-    )
-
-    "%UV_EXE%" pip install --python "%PY_EXE%" -r "%REQ_FILE%" || goto :err
-    "%PY_EXE%" -c "import librosa" >nul 2>&1 || goto :err
-  ) else (
-    echo librosa import failed on Python !PY_MINOR!.
-    goto :err
-  )
-)
+"%PY_EXE%" -c "import streamlit, pandas, librosa, soundfile" >nul 2>&1 || goto :err
 
 rem Launch app
 

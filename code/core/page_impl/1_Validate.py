@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -22,6 +23,137 @@ try:
     st.set_page_config(layout="wide", page_title="Validate")
 except Exception:
     pass
+
+
+st.markdown(
+    """
+    <style>
+    div[data-testid="stFormSubmitButton"] button {
+        background-color: #374151 !important;
+        border-color: #374151 !important;
+        color: white !important;
+        font-weight: 700 !important;
+        min-height: 3.0rem !important;
+        border-radius: 0.65rem !important;
+        margin-top: 0.35rem !important;
+        margin-bottom: 0.15rem !important;
+    }
+    .pam-card-header {
+        min-height: 6.15rem;
+        height: 6.15rem;
+        margin-bottom: 0.35rem;
+        overflow: hidden;
+    }
+    .pam-card-title {
+        line-height: 1.38;
+    }
+    .pam-status-panel {
+        min-height: 6.15rem;
+        height: 6.15rem;
+        display: flex;
+        flex-direction: column;
+        justify-content: flex-start;
+        align-items: flex-end;
+        gap: 0.35rem;
+        padding-top: 0.05rem;
+    }
+    .pam-status-label {
+        color: #6b7280;
+        font-size: 0.72rem;
+        font-weight: 700;
+        letter-spacing: 0.03em;
+        text-transform: uppercase;
+        margin-bottom: 0.05rem;
+    }
+    .pam-pill-row {
+        display: flex;
+        gap: 0.35rem;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+        align-items: flex-start;
+    }
+    .pam-pill {
+        padding: 0.24rem 0.64rem;
+        border-radius: 999px;
+        color: white;
+        font-size: 0.78rem;
+        font-weight: 700;
+        line-height: 1.1;
+        box-shadow: inset 0 0 0 1px rgba(255,255,255,0.18);
+        white-space: nowrap;
+    }
+    div[data-testid="stVerticalBlockBorderWrapper"] {
+        border-color: #d1d5db !important;
+        box-shadow: 0 1px 2px rgba(15, 23, 42, 0.05);
+    }
+    div[data-testid="stFormSubmitButton"] button:hover {
+        background-color: #1f2937 !important;
+        border-color: #1f2937 !important;
+        color: white !important;
+    }
+    div[data-testid="stAudio"] {
+        height: 2.75rem !important;
+        min-height: 2.75rem !important;
+        max-height: 2.75rem !important;
+        display: flex !important;
+        align-items: center !important;
+        margin-top: 0 !important;
+        margin-bottom: 0.35rem !important;
+        padding-top: 0 !important;
+        padding-bottom: 0 !important;
+        overflow: hidden !important;
+    }
+    div[data-testid="stAudio"] > div {
+        height: 2.75rem !important;
+        min-height: 2.75rem !important;
+        max-height: 2.75rem !important;
+        width: 100% !important;
+        margin: 0 !important;
+        padding: 0 !important;
+    }
+    div[data-testid="stAudio"] audio {
+        width: 100% !important;
+        height: 2.35rem !important;
+        min-height: 2.35rem !important;
+        max-height: 2.35rem !important;
+        margin: 0 !important;
+    }
+    div[data-testid="stForm"] {
+        margin-top: 0 !important;
+        padding-top: 0 !important;
+    }
+    div[data-testid="stForm"] div[data-testid="stFormSubmitButton"] {
+        margin-top: 0 !important;
+        padding-top: 0 !important;
+    }
+    div[data-testid="stForm"] div[data-testid="stFormSubmitButton"] button {
+        margin-top: 0 !important;
+    }
+    div[data-testid="stImage"] {
+        width: 100% !important;
+        margin-top: 0.15rem !important;
+        margin-bottom: 0.55rem !important;
+    }
+    div[data-testid="stImage"] img {
+        width: 100% !important;
+        height: auto !important;
+    }
+    div[data-testid="stExpander"] {
+        margin-top: 0.35rem !important;
+        margin-bottom: 0.50rem !important;
+    }
+    div[data-testid="stExpander"] details > summary {
+        min-height: 2.65rem !important;
+        display: flex !important;
+        align-items: center !important;
+    }
+    div[data-testid="stButton"] button {
+        min-height: 2.35rem !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 
 # Generic utilities
@@ -78,10 +210,29 @@ def _make_export_filename(proj_root: Path, user_name: str) -> str:
     return f"{proj}_validated_{safe_user}_{ts}.csv"
 
 
+def _make_export_xlsx_filename(csv_filename: str) -> str:
+    base = str(csv_filename or "validated_export.csv")
+    if base.lower().endswith(".csv"):
+        return base[:-4] + ".xlsx"
+    return base + ".xlsx"
+
+
 def _safe_widget_key(prefix: str, *parts: object) -> str:
     s = prefix + "|" + "|".join(str(p) for p in parts)
     h = hashlib.md5(s.encode("utf-8")).hexdigest()[:16]
     return f"{prefix}_{h}"
+
+
+
+
+_ADD_SPECIES_OPTION = "* Add species..."
+
+def _clean_added_species(value: object) -> str:
+    s = str(value or "").strip()
+    s = " ".join(s.split())
+    if s.lower() in ("nan", "none", "<na>", "[absent]", _ADD_SPECIES_OPTION.lower()):
+        return ""
+    return s
 
 
 def _force_string_cols(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
@@ -231,6 +382,7 @@ def _ensure_validation_ready(df_in: pd.DataFrame) -> pd.DataFrame:
     for c, default in [
         ("validation_state", ""), ("validation_label", ""), ("validation_species", ""),
         ("validated_by", ""), ("validated_at", ""), ("validation_method", ""),
+        ("validation_notes", ""),
         ("user_changed", ""), ("user_changed_by", ""), ("user_changed_at", ""),
         ("uncertain_flag", "")
     ]:
@@ -242,6 +394,7 @@ def _ensure_validation_ready(df_in: pd.DataFrame) -> pd.DataFrame:
         "species_name_original", "presence_label_original",
         "validation_state", "validation_label", "validation_species",
         "validated_by", "validated_at", "validation_method",
+        "validation_notes",
         "user_changed", "user_changed_by", "user_changed_at",
         "uncertain_flag",
         "path", "file_path", "basename", "filename_stem",
@@ -305,6 +458,7 @@ def _apply_card_widget_state(
 
         sp_key = f"sp_{base}_{species_orig}_{ridx}"
         unc_key = f"unc_{base}_{species_orig}_{ridx}"
+        note_key = f"note_{base}_{species_orig}_{ridx}"
 
         current_presence = str(row.get("presence_label", "") or "").strip().lower()
         current_species = str(row.get("species_name", "") or "")
@@ -313,15 +467,83 @@ def _apply_card_widget_state(
         if choice is None:
             choice = "[absent]" if (current_presence != "present" or current_species.strip() == "") else current_species
 
-        if choice == "[absent]":
+        if choice == _ADD_SPECIES_OPTION:
+            choice = _clean_added_species(st.session_state.get(f"{sp_key}_new", ""))
+            if choice:
+                st.session_state[sp_key] = choice
+
+        if choice == "[absent]" or not str(choice).strip():
             out.at[idx, "species_name"] = ""
             out.at[idx, "presence_label"] = "absent"
         else:
-            out.at[idx, "species_name"] = str(choice)
+            out.at[idx, "species_name"] = str(choice).strip()
             out.at[idx, "presence_label"] = "present"
 
         current_unc = st.session_state.get(unc_key, _bool_from_any(row.get("uncertain_flag", "")))
         out.at[idx, "uncertain_flag"] = "1" if bool(current_unc) else ""
+
+        current_note = st.session_state.get(note_key, row.get("validation_notes", ""))
+        out.at[idx, "validation_notes"] = str(current_note or "").strip()
+
+    return out
+
+
+def _apply_card_submitted_values(
+    det: pd.DataFrame,
+    base: str,
+    species_orig: str,
+    submitted_values: Dict[int, Dict[str, object]],
+    selected_indices: Optional[List[int]] = None,
+) -> pd.DataFrame:
+    out = det.copy()
+
+    out = _force_string_cols(out, [
+        "species_name", "presence_label", "uncertain_flag",
+        "species_name_original", "presence_label_original",
+        "basename", "species_display_original",
+    ])
+
+    mask_card = (
+        out["basename"].astype(str).eq(base)
+        & out["species_display_original"].astype(str).eq(species_orig)
+    )
+
+    if selected_indices is not None:
+        selected_idx_set = set(int(i) for i in selected_indices)
+        mask_card = mask_card & out.index.to_series().isin(selected_idx_set)
+
+    card_rows = out.loc[mask_card].copy()
+    if card_rows.empty:
+        return out
+
+    card_rows = card_rows.sort_values("start_s")
+    card_rows["__orig_index"] = card_rows.index
+    rgdf = card_rows.reset_index(drop=True)
+
+    for ridx, row in rgdf.iterrows():
+        idx = int(row["__orig_index"])
+        values = submitted_values.get(int(ridx), {}) if submitted_values else {}
+
+        current_presence = str(row.get("presence_label", "") or "").strip().lower()
+        current_species = str(row.get("species_name", "") or "")
+        default_choice = "[absent]" if (current_presence != "present" or current_species.strip() == "") else current_species
+
+        choice = values.get("species_value", default_choice)
+        if choice == _ADD_SPECIES_OPTION:
+            choice = _clean_added_species(values.get("new_species_value", ""))
+
+        if choice == "[absent]" or not str(choice).strip():
+            out.at[idx, "species_name"] = ""
+            out.at[idx, "presence_label"] = "absent"
+        else:
+            out.at[idx, "species_name"] = str(choice).strip()
+            out.at[idx, "presence_label"] = "present"
+
+        current_unc = values.get("uncertain_value", _bool_from_any(row.get("uncertain_flag", "")))
+        out.at[idx, "uncertain_flag"] = "1" if bool(current_unc) else ""
+
+        current_note = values.get("note_value", row.get("validation_notes", ""))
+        out.at[idx, "validation_notes"] = str(current_note or "").strip()
 
     return out
 
@@ -409,6 +631,39 @@ def _resolve_audio_path(proj_root: Path, row_or_df, df_all: pd.DataFrame) -> Opt
 
     return None
 
+
+
+def _rows_for_resolved_audio(proj_root: Path, df: pd.DataFrame, apath: Optional[Path]) -> pd.DataFrame:
+    if apath is None or df is None or df.empty:
+        return df
+    try:
+        target = apath.resolve()
+    except Exception:
+        target = Path(os.path.normpath(str(apath)))
+    path_cols = [c for c in ("file_path", "path", "file_path_rel", "file_path_abs", "file_path_original", "original_path") if c in df.columns]
+    if not path_cols:
+        return df
+    keep = []
+    for _, row in df.iterrows():
+        matched = False
+        for col in path_cols:
+            val = row.get(col)
+            if isinstance(val, str) and val.strip():
+                cand = _resolve_audio_candidate(proj_root, val)
+                if cand is None:
+                    continue
+                try:
+                    if cand.resolve() == target:
+                        matched = True
+                        break
+                except Exception:
+                    if os.path.normcase(os.path.normpath(str(cand))) == os.path.normcase(os.path.normpath(str(target))):
+                        matched = True
+                        break
+        keep.append(matched)
+    if any(keep):
+        return df.loc[keep].copy()
+    return df
 
 def _estimate_low_edge_hz_for_group(gdf: pd.DataFrame) -> Optional[float]:
     vals: List[float] = []
@@ -511,6 +766,152 @@ def _match_frame_count(x: np.ndarray, n_frames: int) -> np.ndarray:
     pad = np.full(n_frames - arr.size, arr[-1], dtype=float)
     return np.concatenate([arr, pad])
 
+
+def _audio_file_signature(apath: Path) -> Tuple[int, int]:
+    try:
+        stat = apath.stat()
+        return int(stat.st_size), int(stat.st_mtime_ns)
+    except Exception:
+        return 0, 0
+
+
+@st.cache_data(show_spinner=False, max_entries=256)
+def _audio_info_cached(apath_str: str, file_size: int, file_mtime_ns: int) -> Tuple[int, float]:
+    apath = Path(apath_str)
+    try:
+        info = sf.info(str(apath))
+        sr = int(info.samplerate or 0)
+        frames = int(info.frames or 0)
+        dur = float(frames / sr) if sr > 0 else 0.0
+        return sr, max(0.0, dur)
+    except Exception:
+        try:
+            y_tmp, sr_tmp = librosa.load(str(apath), sr=None, mono=True, duration=0.01)
+            sr = int(sr_tmp or 0)
+            return sr, float(max(0.0, len(y_tmp) / sr)) if sr > 0 else 0.0
+        except Exception:
+            return 0, 0.0
+
+
+def _audio_info(apath: Path) -> Tuple[int, float]:
+    file_size, file_mtime_ns = _audio_file_signature(apath)
+    return _audio_info_cached(str(apath), file_size, file_mtime_ns)
+
+
+@st.cache_data(show_spinner=False, max_entries=128)
+def _load_audio_window_cached(
+    apath_str: str,
+    start_s: float,
+    end_s: float,
+    fallback_sr: int,
+    file_size: int,
+    file_mtime_ns: int,
+) -> Tuple[np.ndarray, int, float, float]:
+    apath = Path(apath_str)
+    start_s = max(0.0, float(start_s)) if np.isfinite(_num(start_s)) else 0.0
+    end_s = max(start_s, float(end_s)) if np.isfinite(_num(end_s)) else start_s
+
+    try:
+        info = sf.info(str(apath))
+        sr = int(info.samplerate or fallback_sr or 0)
+        total_frames = int(info.frames or 0)
+        if sr <= 0 or total_frames <= 0:
+            raise ValueError("invalid audio metadata")
+
+        start_frame = int(max(0, min(total_frames, round(start_s * sr))))
+        end_frame = int(max(start_frame + 1, min(total_frames, round(end_s * sr))))
+        frames = int(max(1, end_frame - start_frame))
+        y, _ = sf.read(
+            str(apath),
+            start=start_frame,
+            frames=frames,
+            dtype="float32",
+            always_2d=False,
+        )
+        y = np.asarray(y, dtype=np.float32)
+        if y.ndim == 2:
+            y = y.mean(axis=1).astype(np.float32, copy=False)
+        actual_start = float(start_frame / sr)
+        actual_end = float((start_frame + len(y)) / sr)
+        return y, sr, actual_start, actual_end
+    except Exception:
+        duration = max(0.0, float(end_s - start_s)) if end_s > start_s else None
+        try:
+            y, sr = librosa.load(str(apath), sr=None, mono=True, offset=float(start_s), duration=duration)
+            return y.astype(np.float32, copy=False), int(sr), float(start_s), float(start_s + (len(y) / sr if sr else 0.0))
+        except Exception:
+            return np.array([], dtype=np.float32), int(fallback_sr or 1), float(start_s), float(start_s)
+
+
+def _load_audio_window(apath: Path, start_s: float, end_s: float, fallback_sr: int = 0) -> Tuple[np.ndarray, int, float, float]:
+    file_size, file_mtime_ns = _audio_file_signature(apath)
+    return _load_audio_window_cached(
+        str(apath),
+        round(float(start_s), 3) if np.isfinite(_num(start_s)) else 0.0,
+        round(float(end_s), 3) if np.isfinite(_num(end_s)) else 0.0,
+        int(fallback_sr or 0),
+        file_size,
+        file_mtime_ns,
+    )
+
+
+def _default_detection_window(
+    boxes: List[Dict[str, float]],
+    duration_s: float,
+    default_single_window_s: float,
+    padding_s: float = 2.0,
+) -> Tuple[float, float, Tuple[object, ...]]:
+    dur = max(0.0, float(duration_s)) if np.isfinite(_num(duration_s)) else 0.0
+    valid_boxes = [
+        b for b in boxes
+        if np.isfinite(_num(b.get("start_s")))
+        and np.isfinite(_num(b.get("end_s")))
+        and float(b.get("end_s")) > float(b.get("start_s"))
+    ]
+
+    if dur <= 0.0 or not valid_boxes:
+        return 0.0, max(1e-6, dur), ("full", round(float(dur), 3))
+
+    if len(valid_boxes) == 1 and bool(st.session_state.get("validate_auto_zoom_single_detection", True)):
+        b = valid_boxes[0]
+        width = min(dur, max(1.0, float(default_single_window_s)))
+        centre = 0.5 * (float(b["start_s"]) + float(b["end_s"]))
+        start = centre - width * 0.5
+        end = centre + width * 0.5
+        mode = "single"
+    else:
+        start = min(float(b["start_s"]) for b in valid_boxes) - max(0.0, float(padding_s))
+        end = max(float(b["end_s"]) for b in valid_boxes) + max(0.0, float(padding_s))
+        mode = "detections"
+
+    if start < 0.0:
+        end = min(dur, end - start)
+        start = 0.0
+    if end > dur:
+        shift = end - dur
+        start = max(0.0, start - shift)
+        end = dur
+    if end <= start:
+        start, end = 0.0, dur
+
+    signature = (
+        mode,
+        tuple((round(float(b["start_s"]), 3), round(float(b["end_s"]), 3)) for b in valid_boxes),
+        round(float(default_single_window_s), 3),
+        round(float(padding_s), 3),
+        round(float(dur), 3),
+    )
+    return float(start), float(end), signature
+
+
+def _offset_detection_times(gdf: pd.DataFrame, offset_s: float) -> pd.DataFrame:
+    out = gdf.copy()
+    for col in ("start_s", "end_s", "detection_start_s", "detection_end_s"):
+        if col in out.columns:
+            out[col] = pd.to_numeric(out[col], errors="coerce") - float(offset_s)
+    return out
+
+@st.cache_data(show_spinner=False, max_entries=128)
 def _compute_spectrogram_data(
     y: np.ndarray,
     sr: int,
@@ -738,12 +1139,6 @@ def _render_interactive_validate_dialog(
         st.error("Audio not found for the selected card.")
         return
 
-    try:
-        y_int, sr_int = librosa.load(str(apath_int), sr=None, mono=True)
-    except Exception as e:
-        st.error(f"Audio read error: {e}")
-        return
-
     boxes_int: List[Dict[str, float]] = []
     for _, row in gdf_int.iterrows():
         b = {
@@ -762,6 +1157,31 @@ def _render_interactive_validate_dialog(
             key=lambda b: (b["prob"] if np.isfinite(b["prob"]) else -1.0),
             reverse=True,
         )[:10]
+
+    try:
+        sr_int, dur_int = _audio_info(apath_int)
+        if sr_int <= 0 or dur_int <= 0:
+            raise ValueError("Audio metadata could not be read")
+
+        xmin_int, xmax_int, _ = _default_detection_window(
+            boxes=boxes_int,
+            duration_s=dur_int,
+            default_single_window_s=float(st.session_state.get("validate_auto_zoom_window_s", 5.0)),
+            padding_s=2.0,
+        )
+        y_int, sr_int, actual_start_int, actual_end_int = _load_audio_window(
+            apath_int,
+            xmin_int,
+            xmax_int,
+            fallback_sr=sr_int,
+        )
+        if y_int.size == 0 or sr_int <= 0:
+            raise ValueError("Audio window could not be read")
+        xmin_int = float(actual_start_int)
+        xmax_int = float(actual_end_int)
+    except Exception as e:
+        st.error(f"Audio read error: {e}")
+        return
 
     n_fft_int = _get_validate_n_fft(sr_int)
     hop_int = max(1, n_fft_int // 8)
@@ -792,7 +1212,7 @@ def _render_interactive_validate_dialog(
     )
 
     S_dB_int = spec_int["S_dB"]
-    times_int = spec_int["times"]
+    times_int = spec_int["times"] + float(xmin_int)
     freqs_hz_int = spec_int["freqs_hz"]
     frame_peak_freq_hz_int = spec_int["frame_peak_freq_hz"]
     frame_centroid_hz_int = spec_int["frame_centroid_hz"]
@@ -801,10 +1221,6 @@ def _render_interactive_validate_dialog(
     frame_flatness_int = spec_int["frame_flatness"]
     frame_rms_int = spec_int["frame_rms"]
     frame_zcr_int = spec_int["frame_zcr"]
-
-    dur_int = max(1e-6, len(y_int) / sr_int)
-    tpad_int = dur_int * 0.01
-    xmin_int, xmax_int = 0 - tpad_int, dur_int + tpad_int
 
     fig_int = _plotly_spectrogram_figure(
         S_dB=S_dB_int,
@@ -826,7 +1242,6 @@ def _render_interactive_validate_dialog(
 
     st.caption(f"{base} • {species_orig}")
     st.plotly_chart(fig_int, width='stretch', config={"displayModeBar": True})
-
 
 def _acoustic_metrics_for_detection(
     y: np.ndarray,
@@ -958,6 +1373,11 @@ def _strategy_state_payload() -> Dict[str, object]:
         "validate_strategy_target_value",
         "validate_strategy_bins",
         "validate_strategy_seed",
+        "validate_strategy_available",
+        "validate_strategy_selected",
+        "validate_strategy_strata",
+        "validate_strategy_undersized",
+        "validate_strategy_metrics_source",
         "validate_strategy_dont_auto_show",
         "validate_strategy_prompt_seen",
     ]
@@ -994,6 +1414,11 @@ def _load_strategy_state(proj_root: Path) -> None:
                 "validate_strategy_target_value",
                 "validate_strategy_bins",
                 "validate_strategy_seed",
+                "validate_strategy_available",
+                "validate_strategy_selected",
+                "validate_strategy_strata",
+                "validate_strategy_undersized",
+                "validate_strategy_metrics_source",
                 "validate_strategy_dont_auto_show",
                 "validate_strategy_prompt_seen",
             }
@@ -1014,6 +1439,28 @@ def _sync_validate_page_input_from_page():
 
 def _on_validate_page_input_change():
     st.session_state["validate_page"] = int(st.session_state.get("validate_page_input", 1))
+
+
+def _reset_validate_page_for_sort_change():
+    st.session_state["validate_page"] = 1
+    st.session_state["validate_page_input"] = 1
+    st.session_state["validate_page_sync_pending"] = False
+
+
+def _clear_validate_time_window_state():
+    for k in list(st.session_state.keys()):
+        if str(k).startswith((
+            "validate_time_window_state_",
+            "validate_time_xmin_input_",
+            "validate_time_xmax_input_",
+        )):
+            del st.session_state[k]
+
+
+def _mark_validate_time_window_override(state_key: str):
+    state = dict(st.session_state.get(state_key, {}))
+    state["user_override"] = True
+    st.session_state[state_key] = state
 
 
 def _go_to_previous_validate_page():
@@ -1258,6 +1705,95 @@ def _strategy_summary(df: pd.DataFrame) -> str:
     if "confidence" in balance:
         return f"{goal_text} across {balance_text} • {target_text} • {bins} bands"
     return f"{goal_text} across {balance_text} • {target_text}"
+
+
+
+
+def _validation_card_group_count(df: pd.DataFrame) -> int:
+    if df is None or df.empty:
+        return 0
+    if "basename" in df.columns and "species_display_original" in df.columns:
+        return int(df[["basename", "species_display_original"]].astype(str).drop_duplicates().shape[0])
+    if "detection_id" in df.columns:
+        return int(df["detection_id"].astype(str).nunique())
+    return int(len(df))
+
+
+def _strategy_export_summary_df(df: pd.DataFrame, proj_root: Path, user_name: str) -> pd.DataFrame:
+    goal, balance, target_mode, target_value, bins, seed = _effective_strategy_settings(len(df), df)
+    selected_df, meta = _compute_strategy_plan(df.copy(), goal, balance, target_mode, target_value, bins, seed)
+
+    stored_available = st.session_state.get("validate_strategy_available")
+    stored_selected = st.session_state.get("validate_strategy_selected")
+    stored_strata = st.session_state.get("validate_strategy_strata")
+    stored_undersized = st.session_state.get("validate_strategy_undersized")
+    metrics_source = st.session_state.get("validate_strategy_metrics_source")
+
+    preview_metrics = {
+        "available": int(len(df)),
+        "selected": int(len(selected_df)),
+        "strata": int(len(meta)),
+        "undersized": _strategy_shortfall_count(
+            df_scope=df,
+            df_selected=selected_df,
+            goal=goal,
+            balance=balance,
+            target_mode=target_mode,
+            target_value=target_value,
+        ),
+    }
+
+    use_stored_metrics = metrics_source == "wizard_preview_metrics"
+
+    available_count = int(stored_available) if use_stored_metrics and stored_available not in (None, "") else int(preview_metrics["available"])
+    selected_count = int(stored_selected) if use_stored_metrics and stored_selected not in (None, "") else int(preview_metrics["selected"])
+    group_count = int(stored_strata) if use_stored_metrics and stored_strata not in (None, "") else int(preview_metrics["strata"])
+    below_target = int(stored_undersized) if use_stored_metrics and stored_undersized not in (None, "") else int(preview_metrics["undersized"])
+
+    rows = [
+        ("Project", proj_root.name),
+        ("Reviewer", str(user_name or "")),
+        ("Selected strategy", _strategy_goal_label(goal)),
+        ("Balance across", _strategy_balance_label(balance, df, goal)),
+        ("Selection target", _strategy_target_summary(target_value, target_mode)),
+    ]
+
+    if goal == "equal_allocation" or "confidence" in str(balance):
+        rows.append(("Confidence bands", int(bins)))
+
+    rows.extend([
+        ("Random seed", int(seed)),
+        ("Available detections", available_count),
+        ("Selected for review", selected_count),
+        ("Groups / strata", group_count),
+        ("Groups below requested target", below_target),
+    ])
+
+    rows.extend([
+        ("Summary", _strategy_summary(df)),
+        ("Exported at", _now_iso()),
+    ])
+    return pd.DataFrame(rows, columns=["field", "value"])
+
+
+def _validated_workbook_bytes(export_df: pd.DataFrame, strategy_df: pd.DataFrame) -> bytes:
+    bio = io.BytesIO()
+    with pd.ExcelWriter(bio, engine="openpyxl") as writer:
+        export_df.to_excel(writer, index=False, sheet_name="validated_detections")
+        strategy_df.to_excel(writer, index=False, sheet_name="validation_strategy")
+        try:
+            for ws in writer.book.worksheets:
+                ws.freeze_panes = "A2"
+                for col_cells in ws.columns:
+                    max_len = 0
+                    for cell in col_cells[:200]:
+                        value = "" if cell.value is None else str(cell.value)
+                        max_len = max(max_len, len(value))
+                    ws.column_dimensions[col_cells[0].column_letter].width = min(max(max_len + 2, 10), 48)
+        except Exception:
+            pass
+    bio.seek(0)
+    return bio.getvalue()
 
 
 def _strategy_review_summary_text(
@@ -2280,10 +2816,17 @@ def _render_strategy_summary_bar(df: pd.DataFrame):
             """,
             unsafe_allow_html=True,
         )
+    def _open_validate_strategy_modal():
+        st.session_state["validate_strategy_modal_open"] = True
+
     with right:
         st.markdown("<div style='height:0.35rem'></div>", unsafe_allow_html=True)
-        if st.button("Change strategy", key="open_validate_strategy_modal", width="stretch"):
-            st.session_state["validate_strategy_modal_open"] = True
+        st.button(
+            "Change strategy",
+            key="open_validate_strategy_modal",
+            width="stretch",
+            on_click=_open_validate_strategy_modal,
+        )
 
 
 def _compact_preview_caption(goal: str, balance: str) -> str:
@@ -2310,6 +2853,7 @@ def _commit_card(
     base: str,
     species_orig: str,
     selected_indices: Optional[List[int]] = None,
+    submitted_values: Optional[Dict[int, Dict[str, object]]] = None,
 ) -> Tuple[pd.DataFrame, int, int]:
     det = df_all.copy()
 
@@ -2318,11 +2862,21 @@ def _commit_card(
         "species_name_original", "presence_label_original",
         "validation_state", "validation_label", "validation_species",
         "validated_by", "validated_at", "validation_method",
+        "validation_notes",
         "user_changed", "user_changed_by", "user_changed_at",
         "uncertain_flag",
     ])
 
-    det = _apply_card_widget_state(det, base, species_orig, selected_indices=selected_indices)
+    if submitted_values is not None:
+        det = _apply_card_submitted_values(
+            det,
+            base,
+            species_orig,
+            submitted_values,
+            selected_indices=selected_indices,
+        )
+    else:
+        det = _apply_card_widget_state(det, base, species_orig, selected_indices=selected_indices)
 
     mask_card = (
         det["basename"].astype(str).eq(base)
@@ -2346,9 +2900,10 @@ def _commit_card(
     cur_pl = card_rows_updated["presence_label"].astype(str).str.lower()
     orig_sp = card_rows_updated["species_name_original"].astype(str)
     orig_pl = card_rows_updated["presence_label_original"].astype(str).str.lower()
-    changed_mask = (cur_sp != orig_sp) | (cur_pl != orig_pl)
+    species_presence_changed_mask = (cur_sp != orig_sp) | (cur_pl != orig_pl)
+    changed_mask = species_presence_changed_mask
 
-    for i, changed_here in zip(card_rows_updated.index, changed_mask):
+    for i, changed_here, species_presence_changed_here in zip(card_rows_updated.index, changed_mask, species_presence_changed_mask):
         current_sp = str(det.at[i, "species_name"] or "")
         current_pl = str(det.at[i, "presence_label"] or "").strip().lower()
         original_sp = str(det.at[i, "species_name_original"] or "")
@@ -2363,7 +2918,7 @@ def _commit_card(
         if is_uncertain:
             det.at[i, "validation_state"] = "uncertain"
         else:
-            det.at[i, "validation_state"] = "incorrect" if changed_here else "correct"
+            det.at[i, "validation_state"] = "incorrect" if species_presence_changed_here else "correct"
 
         det.at[i, "validated_by"] = user_id
         det.at[i, "validated_at"] = now_iso
@@ -2391,6 +2946,7 @@ def _init_filter_state():
         "validate_page_sync_pending": False,
         "validate_show_label": "present",
         "validate_min_prob": 0.0,
+        "validate_conf_sort": "Strategy/default order",
         "validate_lock_freq": False,
         "validate_fmin_khz": 15.0,
         "validate_fmax_khz": 90.0,
@@ -2398,6 +2954,8 @@ def _init_filter_state():
         "validate_te_override": 10,
         "validate_use_fft_override": False,
         "validate_fft_size": 4096,
+        "validate_auto_zoom_single_detection": True,
+        "validate_auto_zoom_window_s": 5.0,
         "validate_interactive_card": None,
     }
     for k, v in defaults.items():
@@ -2459,24 +3017,26 @@ def _render_pills(gdf: pd.DataFrame):
     val_state = gdf.get("validation_state", pd.Series([""] * len(gdf))).astype(str).str.lower()
     reviewed = bool(total) and val_state.replace({"nan": "", "<na>": ""}).ne("").all()
 
-    review_colour = "#2e7d32" if reviewed else "#777777"
+    review_colour = "#2e7d32" if reviewed else "#6b7280"
     review_text = "Reviewed" if reviewed else "Not reviewed"
 
     cls_label, cls_colour = _card_classifier_label_and_colour(changed, total, reviewed)
 
     pills_html = (
-        "<div style='display:flex; gap:0.4rem; flex-wrap:wrap; justify-content:flex-end; align-items:center;'>"
-        f"<span style='padding:0.15rem 0.55rem; border-radius:999px; background-color:{review_colour}; color:white; font-size:0.72rem;'>{review_text}</span>"
-        f"<span style='padding:0.15rem 0.55rem; border-radius:999px; background-color:{cls_colour}; color:white; font-size:0.72rem;'>{cls_label}</span>"
+        "<div class='pam-status-panel'>"
+        "<div class='pam-status-label'>Card status</div>"
+        "<div class='pam-pill-row'>"
+        f"<span class='pam-pill' style='background-color:{review_colour};'>{review_text}</span>"
+        f"<span class='pam-pill' style='background-color:{cls_colour};'>{cls_label}</span>"
     )
 
     if uncertain_n > 0:
         tooltip = f"{uncertain_n} uncertain detection" + ("s" if uncertain_n != 1 else "")
         pills_html += (
-            f"<span title='{tooltip}' style='padding:0.10rem 0.40rem; border-radius:999px; background-color:#f9a825; color:white; font-size:0.78rem; font-weight:700;'>! {uncertain_n}</span>"
+            f"<span title='{tooltip}' class='pam-pill' style='background-color:#b7791f;'>! {uncertain_n}</span>"
         )
 
-    pills_html += "</div>"
+    pills_html += "</div></div>"
     st.markdown(pills_html, unsafe_allow_html=True)
 
 
@@ -2722,6 +3282,11 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                     st.session_state["validate_strategy_target_value"] = int(target_value)
                     st.session_state["validate_strategy_bins"] = int(bins_value)
                     st.session_state["validate_strategy_seed"] = int(seed_value)
+                    st.session_state["validate_strategy_available"] = int(preview_metrics.get("available", 0))
+                    st.session_state["validate_strategy_selected"] = int(preview_metrics.get("selected", 0))
+                    st.session_state["validate_strategy_strata"] = int(preview_metrics.get("strata", 0))
+                    st.session_state["validate_strategy_undersized"] = int(preview_metrics.get("undersized", 0))
+                    st.session_state["validate_strategy_metrics_source"] = "wizard_preview_metrics"
                     st.session_state["validate_strategy_modal_open"] = False
                     st.session_state["validate_strategy_dont_auto_show"] = bool(dont_show)
                     st.session_state["validate_strategy_prompt_seen"] = True
@@ -2753,24 +3318,24 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
             except Exception as e:
                 st.error(f"Interactive spectrogram error: {e}")
 
-        if st.session_state.get("validate_strategy_modal_open", False):
-            _strategy_dialog()
-
     _render_strategy_summary_bar(df_all)
+
+    if hasattr(st, "dialog") and st.session_state.get("validate_strategy_modal_open", False):
+        _strategy_dialog()
 
     top1, top2, top3 = st.columns([1, 1, 1])
     with top1:
         NUM_PER_PAGE = st.number_input(
             "Spectrograms per page",
-            min_value=4,
+            min_value=1,
             max_value=40,
-            step=2,
+            step=1,
             key="validate_num_per_page",
         )
     with top2:
         COLS_PER_ROW = st.slider(
             "Columns per row",
-            min_value=2,
+            min_value=1,
             max_value=5,
             key="validate_cols_per_row",
         )
@@ -2787,7 +3352,7 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
         )
 
     with st.expander("Advanced filters", expanded=False):
-        r1c1, r1c2 = st.columns([1, 1])
+        r1c1, r1c2, r1c3 = st.columns([1, 1, 1])
         with r1c1:
             show_label = st.selectbox(
                 "Show clips labelled",
@@ -2801,6 +3366,14 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                 max_value=1.0,
                 step=0.01,
                 key="validate_min_prob",
+            )
+        with r1c3:
+            conf_sort = st.selectbox(
+                "Sort spectrograms",
+                ["Strategy/default order", "Confidence high to low", "Confidence low to high"],
+                key="validate_conf_sort",
+                on_change=_reset_validate_page_for_sort_change,
+                help="Sorts only the detections selected by the current filters and sampling strategy.",
             )
 
         frow1, frow2, frow3, frow4, frow5 = st.columns([0.9, 0.7, 0.9, 0.9, 0.9])
@@ -2834,6 +3407,26 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                 step=1,
                 key="validate_te_override",
                 disabled=not use_te_override,
+            )
+
+        zrow1, zrow2 = st.columns([1.2, 0.8])
+        with zrow1:
+            auto_zoom_single_detection = st.checkbox(
+                "Auto-fit single-detection cards",
+                key="validate_auto_zoom_single_detection",
+                help="When a card contains one detection, the spectrogram opens around that detection. When it contains multiple detections, it opens around the smallest window covering those detections.",                
+                on_change=_clear_validate_time_window_state,
+            )
+        with zrow2:
+            auto_zoom_window_s = st.number_input(
+                "Single-detection window (s)",
+                min_value=1.0,
+                max_value=120.0,
+                step=0.5,
+                format="%.1f",
+                disabled=not auto_zoom_single_detection,
+                key="validate_auto_zoom_window_s",
+                on_change=_clear_validate_time_window_state,
             )
 
         fft_col1, fft_col2 = st.columns([1.0, 1.2])
@@ -2882,14 +3475,13 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
     orig_pl_all = df_all.get("presence_label_original", df_all.get("presence_label", "")).astype(str).str.lower()
     cur_sp_all = df_all.get("species_name", "").astype(str)
     cur_pl_all = df_all.get("presence_label", "").astype(str).str.lower()
-    df_all["changed_flag"] = (orig_sp_all != cur_sp_all) | (orig_pl_all != cur_pl_all)
-
     val_state_all = df_all.get("validation_state", pd.Series([""] * len(df_all))).astype(str).str.lower()
     df_all["reviewed_flag"] = val_state_all.replace({"nan": "", "<na>": ""}).ne("")
     df_all["uncertain_flag_bool"] = df_all.get(
         "uncertain_flag",
         pd.Series([""] * len(df_all), index=df_all.index)
     ).map(_bool_from_any)
+    df_all["changed_flag"] = (orig_sp_all != cur_sp_all) | (orig_pl_all != cur_pl_all)
 
     df_candidates = df_all.copy()
 
@@ -3003,7 +3595,18 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
     grouped = df_view.groupby(["basename", "species_display_original"], dropna=False)
     groups: List[tuple[str, str]] = list(grouped.indices.keys())
 
-    if goal == "find_likely_mistakes":
+    conf_sort = str(st.session_state.get("validate_conf_sort", "Strategy/default order"))
+    if conf_sort in ("Confidence high to low", "Confidence low to high"):
+        g_scores = {k: _group_max_prob(grouped.get_group(k)) for k in groups}
+
+        def _confidence_sort_key(k):
+            score = g_scores.get(k, np.nan)
+            score = float(score) if np.isfinite(score) else -1.0
+            score_key = -score if conf_sort == "Confidence high to low" else score
+            return (score_key, str(k[0]).lower(), str(k[1]).lower())
+
+        groups = sorted(groups, key=_confidence_sort_key)
+    elif goal == "find_likely_mistakes":
         g_scores = {k: _group_max_prob(grouped.get_group(k)) for k in groups}
         groups = sorted(groups, key=lambda k: g_scores.get(k, -np.inf), reverse=False)
     elif goal == "review_strongest":
@@ -3035,12 +3638,18 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
         pd.unique(
             pd.concat([
                 df_all.get("species_name", pd.Series([], dtype=object)).astype(str),
-                df_all.get("class", pd.Series([], dtype=object)).astype(str)
+                df_all.get("class", pd.Series([], dtype=object)).astype(str),
+                df_all.get("validation_species", pd.Series([], dtype=object)).astype(str),
             ], ignore_index=True)
         ).tolist()
     )
-    species_choices = [s for s in species_choices if s and s.lower() not in ("nan", "[absent]")]
+    species_choices = [
+        s.strip() for s in species_choices
+        if s and s.strip() and s.strip().lower() not in ("nan", "none", "<na>", "[absent]", _ADD_SPECIES_OPTION.lower())
+    ]
+    species_choices = sorted(pd.unique(pd.Series(species_choices, dtype=object)).tolist(), key=lambda x: x.lower())
     species_choices.insert(0, "[absent]")
+    species_select_options = species_choices + [_ADD_SPECIES_OPTION]
 
     n_rows = math.ceil(len(page_keys) / int(COLS_PER_ROW))
     for r in range(n_rows):
@@ -3056,296 +3665,494 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
             if "detection_probability" not in gdf.columns:
                 gdf["detection_probability"] = gdf.apply(_best_prob_from_row, axis=1)
 
-            n_det = int(len(gdf))
-            max_cp = _group_max_prob(gdf)
+            apath = _resolve_audio_path(proj_root, gdf, df_all)
+            gdf_plot = _rows_for_resolved_audio(proj_root, gdf, apath)
+
+            all_detectable_boxes: List[Dict[str, float]] = []
+            for _, row in gdf_plot.iterrows():
+                b = {
+                    "start_s": _num(row.get("start_s", row.get("detection_start_s"))),
+                    "end_s": _num(row.get("end_s", row.get("detection_end_s"))),
+                    "low_freq": _num(row.get("low_freq")),
+                    "high_freq": _num(row.get("high_freq")),
+                    "prob": _num(row.get("detection_probability")),
+                }
+                if np.isfinite(b["start_s"]) and np.isfinite(b["end_s"]) and b["end_s"] > b["start_s"]:
+                    all_detectable_boxes.append(b)
+            boxes = sorted(all_detectable_boxes, key=lambda b: (b["prob"] if np.isfinite(b["prob"]) else -1.0), reverse=True)[:10]
+            n_displayed_det = int(len(boxes))
+
+            max_cp = _group_max_prob(gdf_plot)
             title_html = (
-                f"<div style='margin-bottom:2px'><strong>{base}</strong>"
+                f"<div class='pam-card-header pam-card-title'><strong>{base}</strong>"
                 f"<br>{species_orig}"
-                f"<br>Selected detections: {n_det}"
+                f"<br>Displayed detections: {n_displayed_det}"
             )
             if np.isfinite(max_cp):
                 title_html += f"<br>Max probability: {max_cp:.2f}"
             title_html += "</div>"
 
             with cols[c]:
-                h1, h2 = st.columns([2.0, 1.0])
-                with h1:
-                    st.markdown(title_html, unsafe_allow_html=True)
-                with h2:
-                    _render_pills(gdf)
-                    st.markdown("<div style='height:0.4rem'></div>", unsafe_allow_html=True)
-                    if st.button("Mark card as reviewed", key=_safe_widget_key("mark_reviewed", base, species_orig), width="stretch"):
-                        selected_indices = gdf.index.tolist()
-                        updated_df, _, _ = _commit_card(
-                            proj_root,
-                            df_all,
-                            base,
-                            species_orig,
-                            selected_indices=selected_indices,
-                        )
-                        out = proj_root / "data_normalised" / "detections_validated.csv"
-                        out.parent.mkdir(parents=True, exist_ok=True)
-                        updated_df.to_csv(out, index=False)
-
-                        st.session_state["_force_validate_dataset"] = "Validated (published)"
-                        st.session_state["active_dataset_label"] = "Validated (published)"
-                        st.session_state["active_dataset_path"] = str(out)
-                        st.session_state["pa_df_det"] = updated_df
-
-                        if hasattr(st, "rerun"):
-                            st.rerun()
-                        elif hasattr(st, "experimental_rerun"):
-                            st.experimental_rerun()
-
-                apath = _resolve_audio_path(proj_root, gdf, df_all)
-                if not (apath and apath.exists()):
-                    st.error("Audio not found")
+                with st.container(border=True):
+                    h1, h2 = st.columns([2.0, 1.0])
+                    with h1:
+                        st.markdown(title_html, unsafe_allow_html=True)
+                    with h2:
+                        _render_pills(gdf)
                     y, sr = np.array([], dtype=np.float32), 1
-                else:
-                    try:
-                        y, sr = librosa.load(str(apath), sr=None, mono=True)
-                    except Exception as e:
-                        st.error(f"Audio read error: {e}")
-                        y, sr = np.array([], dtype=np.float32), 1
+                    dur = 0.0
+                    xmin, xmax = 0.0, 1.0
+                    ymin, ymax = 0.0, 1.0
+                    S_dB = np.zeros((2, 2))
+                    times = np.arange(2, dtype=float)
+                    freqs_hz = np.arange(2, dtype=float)
+                    n_fft = _get_validate_n_fft(sr)
+                    hop = max(1, n_fft // 8)
 
-                boxes: List[Dict[str, float]] = []
-                for _, row in gdf.iterrows():
-                    b = {
-                        "start_s": _num(row.get("start_s", row.get("detection_start_s"))),
-                        "end_s": _num(row.get("end_s", row.get("detection_end_s"))),
-                        "low_freq": _num(row.get("low_freq")),
-                        "high_freq": _num(row.get("high_freq")),
-                        "prob": _num(row.get("detection_probability")),
-                    }
-                    if np.isfinite(b["start_s"]) and np.isfinite(b["end_s"]) and b["end_s"] > b["start_s"]:
-                        boxes.append(b)
-
-                if boxes:
-                    boxes = sorted(boxes, key=lambda b: (b["prob"] if np.isfinite(b["prob"]) else -1.0), reverse=True)[:10]
-
-                n_fft = _get_validate_n_fft(sr)
-                hop = max(1, n_fft // 8)
-
-                if apath and y.size > 0:
-                    if lock_freq and (fmax_khz > fmin_khz):
-                        ymin = max(0.0, float(fmin_khz) * 1000.0)
-                        ymax = float(fmax_khz) * 1000.0
-                        nyq = 0.5 * sr * 0.98
-                        ymax = min(ymax, nyq)
+                    if not (apath and apath.exists()):
+                        st.error("Audio not found")
                     else:
-                        highs = [b["high_freq"] for b in boxes if np.isfinite(b["high_freq"])]
-                        lows = [b["low_freq"] for b in boxes if np.isfinite(b["low_freq"])]
-                        if highs and lows and max(highs) > min(lows):
-                            fmin, fmax = min(lows), max(highs)
-                        else:
-                            fmin, fmax = 0.0, 0.5 * sr
-                        span = max(1.0, (fmax - fmin))
-                        pad = max(4_000.0, 0.30 * span)
-                        nyq = 0.5 * sr * 0.98
-                        ymin = max(0.0, fmin - pad)
-                        ymax = min(nyq, fmax + pad)
+                        try:
+                            sr_info, dur_info = _audio_info(apath)
+                            if sr_info <= 0 or dur_info <= 0:
+                                raise ValueError("Audio metadata could not be read")
 
-                    try:
-                        D = librosa.stft(y=y, n_fft=n_fft, hop_length=hop)
-                        S = np.abs(D) ** 2
-                        S_dB = librosa.power_to_db(S, ref=np.max, top_db=90)
+                            sr = int(sr_info)
+                            dur = float(dur_info)
+                            n_fft = _get_validate_n_fft(sr)
+                            hop = max(1, n_fft // 8)
 
-                        times = librosa.frames_to_time(np.arange(S.shape[1]), sr=sr, hop_length=hop)
-                        freqs_hz = np.linspace(0.0, sr * 0.5, S.shape[0])
-                        dur = max(1e-6, len(y) / sr)
-                        tpad = dur * 0.01
-                        xmin, xmax = 0 - tpad, dur + tpad
-                    except Exception as e:
-                        st.error(f"Spectrogram setup error: {e}")
-                        times = np.arange(2)
-                        freqs_hz = np.arange(2)
-                        S_dB = np.zeros((2, 2))
-                        xmin, xmax = 0, 1
+                            time_state_key = _safe_widget_key("validate_time_window_state", base, species_orig)
+                            time_key_start = _safe_widget_key("validate_time_xmin_input", base, species_orig)
+                            time_key_end = _safe_widget_key("validate_time_xmax_input", base, species_orig)
+                            stored_window = dict(st.session_state.get(time_state_key, {}))
 
-                    try:
-                        fig, ax = plt.subplots(figsize=(8.6, 5.2), dpi=280, constrained_layout=False)
-                        extent = [times.min(), times.max(), freqs_hz.min(), freqs_hz.max()]
-                        ax.imshow(
-                            S_dB,
-                            origin="lower",
-                            aspect="auto",
-                            interpolation="nearest",
-                            extent=extent,
-                            vmin=S_dB.max() - 90,
-                            vmax=S_dB.max(),
-                        )
-                        ax.set_xlim(xmin, xmax)
-                        ax.set_ylim(ymin, ymax)
-                        ax.set_xlabel("Time (s)")
-                        ax.set_ylabel("Frequency (kHz)")
-                        ax.yaxis.set_major_formatter(FuncFormatter(lambda ytick, pos: f"{ytick/1000:.0f}"))
-
-                        for b in boxes:
-                            x0, x1 = b["start_s"], b["end_s"]
-                            prob = b["prob"]
-                            ax.add_patch(
-                                Rectangle(
-                                    (x0, ymin),
-                                    x1 - x0,
-                                    ymax - ymin,
-                                    facecolor=(1, 1, 1, 0.06),
-                                    edgecolor=(1, 1, 1, 0.12),
-                                    linewidth=0.6,
-                                )
+                            default_start, default_end, default_signature = _default_detection_window(
+                                boxes=boxes,
+                                duration_s=dur,
+                                default_single_window_s=float(st.session_state.get("validate_auto_zoom_window_s", 5.0)),
+                                padding_s=2.0,
                             )
-                            if np.isfinite(prob):
-                                xm = (x0 + x1) * 0.5
-                                ym = ymin + 0.88 * (ymax - ymin)
-                                ax.text(
-                                    xm,
-                                    ym,
-                                    f"{prob:.2f}",
-                                    ha="center",
-                                    va="center",
-                                    color="white",
-                                    fontsize=9,
-                                    bbox=dict(
-                                        boxstyle="round,pad=0.18",
-                                        fc=(0, 0, 0, 0.55),
-                                        ec=(1, 1, 1, 0.25),
-                                        lw=0.5,
-                                    ),
+
+                            user_override = bool(stored_window.get("user_override", False))
+                            previous_signature = stored_window.get("default_signature")
+                            if (not user_override) or previous_signature != default_signature:
+                                st.session_state[time_key_start] = float(default_start)
+                                st.session_state[time_key_end] = float(default_end)
+                                st.session_state[time_state_key] = {
+                                    "xmin": float(default_start),
+                                    "xmax": float(default_end),
+                                    "user_override": False,
+                                    "default_signature": default_signature,
+                                }
+                            else:
+                                stored_start = float(min(max(0.0, _num(stored_window.get("xmin", st.session_state.get(time_key_start, default_start)))), float(dur)))
+                                stored_end = float(min(max(0.0, _num(stored_window.get("xmax", st.session_state.get(time_key_end, default_end)))), float(dur)))
+                                if stored_end <= stored_start:
+                                    stored_start, stored_end = float(default_start), float(default_end)
+                                if time_key_start not in st.session_state:
+                                    st.session_state[time_key_start] = stored_start
+                                if time_key_end not in st.session_state:
+                                    st.session_state[time_key_end] = stored_end
+
+                            tw1, tw2, tw3 = st.columns([1.0, 1.0, 0.16])
+                            with tw3:
+                                st.markdown("<div style='height:1.65rem'></div>", unsafe_allow_html=True)
+                                reset_window = st.button(
+                                    "↺",
+                                    key=_safe_widget_key("validate_time_reset", base, species_orig),
+                                    help="Reset x-axis to current default",
+                                )
+                            if reset_window:
+                                st.session_state[time_key_start] = float(default_start)
+                                st.session_state[time_key_end] = float(default_end)
+                                st.session_state[time_state_key] = {
+                                    "xmin": float(default_start),
+                                    "xmax": float(default_end),
+                                    "user_override": False,
+                                    "default_signature": default_signature,
+                                }
+                                if hasattr(st, "rerun"):
+                                    st.rerun()
+                                elif hasattr(st, "experimental_rerun"):
+                                    st.experimental_rerun()
+
+                            with tw1:
+                                x_start = st.number_input(
+                                    "X min (s)",
+                                    min_value=0.0,
+                                    max_value=float(dur),
+                                    step=0.1,
+                                    format="%.3f",
+                                    key=time_key_start,
+                                    on_change=_mark_validate_time_window_override,
+                                    args=(time_state_key,),
+                                )
+                            with tw2:
+                                x_end = st.number_input(
+                                    "X max (s)",
+                                    min_value=0.0,
+                                    max_value=float(dur),
+                                    step=0.1,
+                                    format="%.3f",
+                                    key=time_key_end,
+                                    on_change=_mark_validate_time_window_override,
+                                    args=(time_state_key,),
                                 )
 
-                        st.pyplot(fig, width="stretch", clear_figure=True)
-                        plt.close(fig)
-                    except Exception as e:
-                        st.error(f"Spectrogram error: {e}")
+                            if float(x_end) <= float(x_start):
+                                x_start = float(default_start)
+                                x_end = float(default_end)
 
-                    if st.button(
-                        "Open interactive spectrogram",
-                        key=_safe_widget_key("open_interactive_plotly", base, species_orig),
-                        width="stretch",
-                    ):
-                        st.session_state["validate_interactive_card"] = (base, species_orig)
-                        _interactive_spectrogram_dialog()
+                            xmin, xmax = max(0.0, float(x_start)), min(float(dur), float(x_end))
+                            if xmax <= xmin:
+                                xmin, xmax = float(default_start), float(default_end)
+                            current_state = dict(st.session_state.get(time_state_key, {}))
+                            st.session_state[time_state_key] = {
+                                "xmin": float(xmin),
+                                "xmax": float(xmax),
+                                "user_override": bool(current_state.get("user_override", False)),
+                                "default_signature": default_signature,
+                            }
 
-                    try:
-                        y_seg = y
-                        low_edge = _estimate_low_edge_hz_for_group(gdf)
-                        te_auto = _choose_te_for_group(low_edge, sr)
-                        use_te_override_flag = bool(st.session_state.get("validate_use_te_override", False))
-                        if use_te_override_flag:
-                            te_val = int(st.session_state.get("validate_te_override", te_auto or 1))
-                            te = max(1, te_val)
-                        else:
-                            te = max(1, int(te_auto))
+                            y, sr, actual_start, actual_end = _load_audio_window(apath, xmin, xmax, fallback_sr=sr)
+                            if y.size == 0 or sr <= 0:
+                                raise ValueError("Audio window could not be read")
+                            xmin = float(actual_start)
+                            xmax = float(actual_end)
 
-                        y_play, psr = _apply_time_expansion_for_playback(y_seg, sr, te)
-                        tmp_wav = _tmp_audio_path(proj_root, base, species_orig, int(te), int(psr), int(y_play.size))
-                        sf.write(str(tmp_wav), y_play, int(psr), format="WAV", subtype="PCM_16")
-                        st.audio(str(tmp_wav))
-                    except Exception as e:
-                        st.error(f"Playback error: {e}")
+                            if lock_freq and (fmax_khz > fmin_khz):
+                                ymin = max(0.0, float(fmin_khz) * 1000.0)
+                                ymax = float(fmax_khz) * 1000.0
+                                nyq = 0.5 * sr * 0.98
+                                ymax = min(ymax, nyq)
+                            else:
+                                highs = [b["high_freq"] for b in boxes if np.isfinite(b["high_freq"])]
+                                lows = [b["low_freq"] for b in boxes if np.isfinite(b["low_freq"])]
+                                if highs and lows and max(highs) > min(lows):
+                                    fmin, fmax = min(lows), max(highs)
+                                else:
+                                    fmin, fmax = 0.0, 0.5 * sr
+                                span = max(1.0, (fmax - fmin))
+                                pad = max(4_000.0, 0.30 * span)
+                                nyq = 0.5 * sr * 0.98
+                                ymin = max(0.0, fmin - pad)
+                                ymax = min(nyq, fmax + pad)
 
-                with st.expander("Edit detections (species)"):
-                    acoustic_lookup: Dict[int, Dict[str, str]] = {}
+                            spec = _compute_spectrogram_data(
+                                y=y,
+                                sr=sr,
+                                n_fft=n_fft,
+                                hop_length=hop,
+                            )
+                            S_dB = spec["S_dB"]
+                            times = spec["times"] + float(xmin)
+                            freqs_hz = spec["freqs_hz"]
+                        except Exception as e:
+                            st.error(f"Spectrogram setup error: {e}")
+                            y, sr = np.array([], dtype=np.float32), 1
+                            dur = 0.0
+                            n_fft = _get_validate_n_fft(sr)
+                            hop = max(1, n_fft // 8)
+                            times = np.arange(2, dtype=float)
+                            freqs_hz = np.arange(2, dtype=float)
+                            S_dB = np.zeros((2, 2))
+                            xmin, xmax = 0.0, 1.0
 
-                    if y.size > 0 and sr > 1:
-                        requested_metric_fft = int(n_fft)
-                        metric_fft = _card_metric_fft(
-                            gdf=gdf,
-                            y=y,
-                            sr=sr,
-                            requested_n_fft=requested_metric_fft,
-                        )
+                        try:
+                            fig, ax = plt.subplots(figsize=(8.6, 5.2), dpi=280, constrained_layout=False)
+                            plot_xmin, plot_xmax = float(xmin), float(xmax)
+                            if not (np.isfinite(plot_xmin) and np.isfinite(plot_xmax) and plot_xmax > plot_xmin):
+                                plot_xmin, plot_xmax = 0.0, float(dur)
+                            plot_span = max(1e-6, plot_xmax - plot_xmin)
+                            plot_S = S_dB
+                            if len(times) > 1:
+                                time_mask = (times >= plot_xmin) & (times <= plot_xmax)
+                                if int(np.count_nonzero(time_mask)) >= 2:
+                                    plot_S = S_dB[:, time_mask]
+                                else:
+                                    left_idx = int(np.searchsorted(times, plot_xmin, side="left"))
+                                    right_idx = int(np.searchsorted(times, plot_xmax, side="right"))
+                                    left_idx = max(0, min(left_idx, len(times) - 2))
+                                    right_idx = max(left_idx + 2, min(right_idx, len(times)))
+                                    plot_S = S_dB[:, left_idx:right_idx]
+                            extent = [0.0, plot_span, freqs_hz.min(), freqs_hz.max()]
+                            ax.imshow(
+                                plot_S,
+                                origin="lower",
+                                aspect="auto",
+                                interpolation="nearest",
+                                extent=extent,
+                                vmin=S_dB.max() - 90,
+                                vmax=S_dB.max(),
+                            )
+                            ax.set_xlim(0.0, plot_span)
+                            ax.set_ylim(ymin, ymax)
+                            ax.set_xlabel("Time (s)")
+                            ax.set_ylabel("Frequency (kHz)")
+                            ax.yaxis.set_major_formatter(FuncFormatter(lambda ytick, pos: f"{ytick/1000:.0f}"))
+                            tick_count = 6 if plot_span >= 5.0 else 5
+                            tick_positions = np.linspace(0.0, plot_span, tick_count)
+                            ax.set_xticks(tick_positions)
+                            ax.set_xticklabels([f"{plot_xmin + t:.1f}" for t in tick_positions])
 
-                        if metric_fft is not None:
-                            metric_hop = max(1, metric_fft // 8)
+                            for b in boxes:
+                                x0, x1 = b["start_s"], b["end_s"]
+                                if not (np.isfinite(x0) and np.isfinite(x1)):
+                                    continue
+                                clipped_x0 = max(float(x0), plot_xmin)
+                                clipped_x1 = min(float(x1), plot_xmax)
+                                if clipped_x1 <= clipped_x0:
+                                    continue
+                                rel_x0 = clipped_x0 - plot_xmin
+                                rel_width = clipped_x1 - clipped_x0
+                                prob = b["prob"]
+                                ax.add_patch(
+                                    Rectangle(
+                                        (rel_x0, ymin),
+                                        rel_width,
+                                        ymax - ymin,
+                                        facecolor=(1, 1, 1, 0.06),
+                                        edgecolor=(1, 1, 1, 0.12),
+                                        linewidth=0.6,
+                                    )
+                                )
+                                if np.isfinite(prob):
+                                    xm = rel_x0 + rel_width * 0.5
+                                    ym = ymin + 0.88 * (ymax - ymin)
+                                    ax.text(
+                                        xm,
+                                        ym,
+                                        f"{prob:.2f}",
+                                        ha="center",
+                                        va="center",
+                                        color="white",
+                                        fontsize=9,
+                                        bbox=dict(
+                                            boxstyle="round,pad=0.18",
+                                            fc=(0, 0, 0, 0.55),
+                                            ec=(1, 1, 1, 0.25),
+                                            lw=0.5,
+                                        ),
+                                    )
 
-                            gdf_for_metrics = gdf.copy().sort_values("start_s").reset_index(drop=True)
+                            st.pyplot(fig, width="stretch", clear_figure=True)
+                            plt.close(fig)
+                        except Exception as e:
+                            st.error(f"Spectrogram error: {e}")
 
-                            for ridx_metric, row_metric in gdf_for_metrics.iterrows():
-                                start_s_metric = _num(row_metric.get("start_s", row_metric.get("detection_start_s")))
-                                end_s_metric = _num(row_metric.get("end_s", row_metric.get("detection_end_s")))
-                                low_freq_metric = _num(row_metric.get("low_freq"))
-                                high_freq_metric = _num(row_metric.get("high_freq"))
-                                prob_metric = _num(row_metric.get("detection_probability"))
+                        if st.button(
+                            "Open interactive spectrogram",
+                            key=_safe_widget_key("open_interactive_plotly", base, species_orig),
+                            width="stretch",
+                        ):
+                            st.session_state["validate_interactive_card"] = (base, species_orig)
+                            _interactive_spectrogram_dialog()
 
-                                metrics = _acoustic_metrics_for_detection(
+                        try:
+                            y_seg = y
+                            low_edge = _estimate_low_edge_hz_for_group(gdf)
+                            te_auto = _choose_te_for_group(low_edge, sr)
+                            use_te_override_flag = bool(st.session_state.get("validate_use_te_override", False))
+                            if use_te_override_flag:
+                                te_val = int(st.session_state.get("validate_te_override", te_auto or 1))
+                                te = max(1, te_val)
+                            else:
+                                te = max(1, int(te_auto))
+
+                            y_play, psr = _apply_time_expansion_for_playback(y_seg, sr, te)
+                            tmp_wav = _tmp_audio_path(proj_root, base, f"{species_orig}|{float(xmin):.3f}-{float(xmax):.3f}", int(te), int(psr), int(y_play.size))
+                            if not tmp_wav.exists() or tmp_wav.stat().st_size == 0:
+                                sf.write(str(tmp_wav), y_play, int(psr), format="WAV", subtype="PCM_16")
+                            st.audio(str(tmp_wav))
+                        except Exception as e:
+                            st.error(f"Playback error: {e}")
+
+                    with st.form(key=_safe_widget_key("validate_card_review_form", base, species_orig), border=False):
+                        card_form_values: Dict[int, Dict[str, object]] = {}
+
+                        with st.expander("Edit detections (species)"):
+                            acoustic_lookup: Dict[int, Dict[str, str]] = {}
+
+                            if y.size > 0 and sr > 1:
+                                requested_metric_fft = int(n_fft)
+                                gdf_metric_source = _offset_detection_times(gdf, float(xmin))
+                                metric_fft = _card_metric_fft(
+                                    gdf=gdf_metric_source,
                                     y=y,
                                     sr=sr,
-                                    start_s=start_s_metric,
-                                    end_s=end_s_metric,
-                                    low_freq=low_freq_metric,
-                                    high_freq=high_freq_metric,
-                                    n_fft=metric_fft,
-                                    hop_length=metric_hop,
+                                    requested_n_fft=requested_metric_fft,
                                 )
 
-                                fft_note = ""
-                                if metric_fft != requested_metric_fft:
-                                    fft_note = f" • FFT {metric_fft}"
+                                if metric_fft is not None:
+                                    metric_hop = max(1, metric_fft // 8)
 
-                                acoustic_lookup[int(ridx_metric)] = {
-                                    "duration": _fmt_ms(metrics.get("duration_s", np.nan)),
-                                    "peak": _fmt_khz(metrics.get("peak_freq_hz", np.nan)),
-                                    "centroid": _fmt_khz(metrics.get("centroid_hz", np.nan)),
-                                    "prob": f"{prob_metric:.2f}" if np.isfinite(prob_metric) else "—",
-                                    "fft_note": fft_note,
+                                    gdf_for_metrics = gdf_metric_source.copy().sort_values("start_s").reset_index(drop=True)
+
+                                    for ridx_metric, row_metric in gdf_for_metrics.iterrows():
+                                        start_s_metric = _num(row_metric.get("start_s", row_metric.get("detection_start_s")))
+                                        end_s_metric = _num(row_metric.get("end_s", row_metric.get("detection_end_s")))
+                                        low_freq_metric = _num(row_metric.get("low_freq"))
+                                        high_freq_metric = _num(row_metric.get("high_freq"))
+                                        prob_metric = _num(row_metric.get("detection_probability"))
+
+                                        metrics = _acoustic_metrics_for_detection(
+                                            y=y,
+                                            sr=sr,
+                                            start_s=start_s_metric,
+                                            end_s=end_s_metric,
+                                            low_freq=low_freq_metric,
+                                            high_freq=high_freq_metric,
+                                            n_fft=metric_fft,
+                                            hop_length=metric_hop,
+                                        )
+
+                                        fft_note = ""
+                                        if metric_fft != requested_metric_fft:
+                                            fft_note = f" • FFT {metric_fft}"
+
+                                        acoustic_lookup[int(ridx_metric)] = {
+                                            "duration": _fmt_ms(metrics.get("duration_s", np.nan)),
+                                            "peak": _fmt_khz(metrics.get("peak_freq_hz", np.nan)),
+                                            "centroid": _fmt_khz(metrics.get("centroid_hz", np.nan)),
+                                            "prob": f"{prob_metric:.2f}" if np.isfinite(prob_metric) else "—",
+                                            "fft_note": fft_note,
+                                        }
+
+                            gdf_with_idx = gdf.copy()
+                            gdf_with_idx["__orig_index"] = gdf_with_idx.index
+                            rgdf = gdf_with_idx.reset_index(drop=True)
+
+                            for ridx, row in rgdf.iterrows():
+                                ts = row.get("start_s", row.get("detection_start_s", np.nan))
+                                ts_str = f"{float(ts):.2f}s" if np.isfinite(_num(ts)) else "—"
+
+                                cur_sp_row = str(row.get("species_name", "") or "").strip()
+                                cur_pl_row = str(row.get("presence_label", "") or "").lower()
+                                current_species_choice = "[absent]" if (cur_pl_row != "present" or cur_sp_row.strip() == "") else cur_sp_row
+                                select_key = f"sp_{base}_{species_orig}_{ridx}"
+                                new_species_key = f"{select_key}_new"
+                                options_for_row = list(species_select_options)
+                                if current_species_choice not in options_for_row and current_species_choice != "[absent]":
+                                    options_for_row.insert(1, current_species_choice)
+                                try:
+                                    idx_choice = options_for_row.index(current_species_choice)
+                                except ValueError:
+                                    idx_choice = 0
+
+                                row_left, row_right = st.columns([4.0, 1.2])
+
+                                with row_left:
+                                    if select_key in st.session_state:
+                                        if st.session_state.get(select_key) not in options_for_row:
+                                            st.session_state[select_key] = current_species_choice
+                                        selected_species_choice = st.selectbox(
+                                            f"Detection {ridx+1} @ {ts_str}",
+                                            options=options_for_row,
+                                            key=select_key,
+                                        )
+                                    else:
+                                        selected_species_choice = st.selectbox(
+                                            f"Detection {ridx+1} @ {ts_str}",
+                                            options=options_for_row,
+                                            index=idx_choice,
+                                            key=select_key,
+                                        )
+                                    new_species_value = st.session_state.get(new_species_key, "")
+                                    if selected_species_choice == _ADD_SPECIES_OPTION:
+                                        new_species_value = st.text_input(
+                                            "New species",
+                                            key=new_species_key,
+                                            placeholder="Type species name",
+                                        )
+
+                                with row_right:
+                                    current_uncertain = _bool_from_any(row.get("uncertain_flag", ""))
+                                    uncertain_value = st.checkbox(
+                                        "Uncertain",
+                                        value=current_uncertain,
+                                        key=f"unc_{base}_{species_orig}_{ridx}",
+                                    )
+
+                                note_key = f"note_{base}_{species_orig}_{ridx}"
+                                existing_note = str(row.get("validation_notes", "") or "")
+                                if note_key not in st.session_state:
+                                    st.session_state[note_key] = existing_note
+                                with st.expander("Notes", expanded=bool(existing_note.strip())):
+                                    note_value = st.text_area(
+                                        "Optional note for this detection",
+                                        key=note_key,
+                                        height=80,
+                                        placeholder="Add context for uncertainty, species changes, or other validation decisions.",
+                                    )
+
+                                card_form_values[int(ridx)] = {
+                                    "species_key": select_key,
+                                    "species_value": selected_species_choice,
+                                    "new_species_key": new_species_key,
+                                    "new_species_value": new_species_value,
+                                    "uncertain_key": f"unc_{base}_{species_orig}_{ridx}",
+                                    "uncertain_value": bool(uncertain_value),
+                                    "note_key": note_key,
+                                    "note_value": note_value,
                                 }
 
-                    gdf_with_idx = gdf.copy()
-                    gdf_with_idx["__orig_index"] = gdf_with_idx.index
-                    rgdf = gdf_with_idx.reset_index(drop=True)
+                                summary = acoustic_lookup.get(int(ridx))
+                                if summary:
+                                    st.markdown(
+                                        f"""
+                                        <div style="
+                                            margin:-0.10rem 0 0.75rem 0.1rem;
+                                            font-size:0.98rem;
+                                            color:#374151;
+                                            line-height:1.45;
+                                        ">
+                                            <span style="font-weight:600;">{summary['duration']}</span>
+                                            <span style="color:#9ca3af;"> • </span>
+                                            <span><strong>{summary['peak']}</strong> peak energy</span>
+                                            <span style="color:#9ca3af;"> • </span>
+                                            <span><strong>{summary['centroid']}</strong> centroid</span>
+                                            <span style="color:#9ca3af;"> • </span>
+                                            <span>p=<strong>{summary['prob']}</strong></span>
+                                            <span style="color:#6b7280;">{summary.get('fft_note', '')}</span>
+                                        </div>
+                                        """,
+                                        unsafe_allow_html=True,
+                                    )
 
-                    for ridx, row in rgdf.iterrows():
-                        ts = row.get("start_s", row.get("detection_start_s", np.nan))
-                        ts_str = f"{float(ts):.2f}s" if np.isfinite(_num(ts)) else "—"
+                        st.markdown("<div style='height:0.35rem'></div>", unsafe_allow_html=True)
+                        card_review_submitted = st.form_submit_button(
+                            "Mark card as reviewed",
+                            key=_safe_widget_key("mark_reviewed_form", base, species_orig),
+                            width="stretch",
+                            type="primary",
+                        )
 
-                        cur_sp_row = str(row.get("species_name", "") or "")
-                        cur_pl_row = str(row.get("presence_label", "") or "").lower()
-                        current_species_choice = "[absent]" if (cur_pl_row != "present" or cur_sp_row.strip() == "") else cur_sp_row
-                        try:
-                            idx_choice = species_choices.index(current_species_choice)
-                        except ValueError:
-                            idx_choice = 0
 
-                        row_left, row_right = st.columns([4.0, 1.2])
-
-                        with row_left:
-                            st.selectbox(
-                                f"Detection {ridx+1} @ {ts_str}",
-                                options=species_choices,
-                                index=idx_choice,
-                                key=f"sp_{base}_{species_orig}_{ridx}",
+                    if card_review_submitted:
+                            selected_indices = gdf.index.tolist()
+                            updated_df, _, _ = _commit_card(
+                                proj_root,
+                                df_all,
+                                base,
+                                species_orig,
+                                selected_indices=selected_indices,
+                                submitted_values=card_form_values,
                             )
+                            out = proj_root / "data_normalised" / "detections_validated.csv"
+                            out.parent.mkdir(parents=True, exist_ok=True)
+                            updated_df.to_csv(out, index=False)
 
-                        with row_right:
-                            current_uncertain = _bool_from_any(row.get("uncertain_flag", ""))
-                            st.checkbox(
-                                "Uncertain",
-                                value=current_uncertain,
-                                key=f"unc_{base}_{species_orig}_{ridx}",
-                            )
+                            st.session_state["_force_validate_dataset"] = "Validated (published)"
+                            st.session_state["active_dataset_label"] = "Validated (published)"
+                            st.session_state["active_dataset_path"] = str(out)
+                            st.session_state["pa_df_det"] = updated_df
+                            df_all = updated_df.copy()
 
-                        summary = acoustic_lookup.get(int(ridx))
-                        if summary:
-                            st.markdown(
-                                f"""
-                                <div style="
-                                    margin:-0.10rem 0 0.75rem 0.1rem;
-                                    font-size:0.98rem;
-                                    color:#374151;
-                                    line-height:1.45;
-                                ">
-                                    <span style="font-weight:600;">{summary['duration']}</span>
-                                    <span style="color:#9ca3af;"> • </span>
-                                    <span><strong>{summary['peak']}</strong> peak energy</span>
-                                    <span style="color:#9ca3af;"> • </span>
-                                    <span><strong>{summary['centroid']}</strong> centroid</span>
-                                    <span style="color:#9ca3af;"> • </span>
-                                    <span>p=<strong>{summary['prob']}</strong></span>
-                                    <span style="color:#6b7280;">{summary.get('fft_note', '')}</span>
-                                </div>
-                                """,
-                                unsafe_allow_html=True,
-                            )
+                            if hasattr(st, "rerun"):
+                                st.rerun()
+                            elif hasattr(st, "experimental_rerun"):
+                                st.experimental_rerun()
 
     st.markdown("<div style='height:0.5rem'></div>", unsafe_allow_html=True)
     nav_left, nav_mid, nav_right = st.columns([1.2, 1.2, 4])
@@ -3388,6 +4195,7 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                     "species_name",
                     "presence_label",
                     "uncertain_flag",
+                    "validation_notes",
                 ] if col in df_all.columns
             ]].copy()
             st.dataframe(changed_df, width="stretch")
@@ -3408,10 +4216,10 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
 
     st.divider()
     st.subheader("Download validated data")
-    st.write(
-        "Download the currently selected dataset as a CSV file. "
-        "If a validated dataset exists and is selected above, that will be exported; "
-        "otherwise the current in-memory detections are exported."
+    st.markdown(
+        "CSV exports the validated detections only.  \
+"
+        "Excel exports the validated detections plus a validation strategy summary."
     )
 
     user_name = (
@@ -3424,17 +4232,28 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
 
     export_df = df_all.copy()
 
-    for c in ["validation_state", "validation_label", "validation_species", "validated_by", "validated_at", "uncertain_flag"]:
+    for c in ["validation_state", "validation_label", "validation_species", "validated_by", "validated_at", "uncertain_flag", "validation_notes"]:
         if c not in export_df.columns:
             export_df[c] = ""
 
     export_df = export_df.drop(columns=UNWANTED, errors="ignore")
 
     csv_bytes = export_df.to_csv(index=False).encode("utf-8")
+    strategy_export_df = _strategy_export_summary_df(df_all.copy(), proj_root, user_name)
+    xlsx_bytes = _validated_workbook_bytes(export_df, strategy_export_df)
 
-    st.download_button(
-        "Download CSV",
-        data=csv_bytes,
-        file_name=export_filename,
-        mime="text/csv",
-    )
+    dl_cols = st.columns(2)
+    with dl_cols[0]:
+        st.download_button(
+            "Download CSV",
+            data=csv_bytes,
+            file_name=export_filename,
+            mime="text/csv",
+        )
+    with dl_cols[1]:
+        st.download_button(
+            "Download Excel workbook",
+            data=xlsx_bytes,
+            file_name=_make_export_xlsx_filename(export_filename),
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )

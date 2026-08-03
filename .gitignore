@@ -48,13 +48,23 @@ ipython_config.py
 *.swp
 *.swo
 
+# Build/release artefacts generated locally
+dist/
+build/
+release/
+*.spec
 
-# Pipeline runtime artefacts
-results/pipeline.log
-results/pipeline_status.json
-
-# Local launcher artefacts
+# Local launcher/runtime artefacts
 *.pid
 
-# Local auth config
+# Local auth config and local project state
 code/.auth.json
+code/projects/
+PAMalytics/
+
+# Keep these tracked intentionally for no-code launchers:
+# .uv-bin/
+# VC_redist.x64.exe
+
+# macOS
+.DS_Store

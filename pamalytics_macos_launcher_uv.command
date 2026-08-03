@@ -26,20 +26,20 @@ fi
 VENV_DIR="${PWD}/.venv"
 PY_BIN="${VENV_DIR}/bin/python"
 
-# If venv exists, ensure it's supported (3.9-3.12); otherwise recreate
+# If venv exists, ensure it's supported (3.12); otherwise recreate
 if [ -x "$PY_BIN" ]; then
   PY_MINOR="$("$PY_BIN" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null || true)"
   case "$PY_MINOR" in
-    3.9|3.10|3.11|3.12) : ;;
+    3.12) : ;;
     *) rm -rf "$VENV_DIR" ;;
   esac
 fi
 
-# Create venv if missing. Prefer existing system Python 3.12->3.9, else install 3.12
+# Create venv if missing. Prefer existing system Python 3.12, else install 3.12
 if [ ! -x "$PY_BIN" ]; then
   SYS_PY=""
 
-  for v in 3.12 3.11 3.10 3.9; do
+  for v in 3.12; do
     SYS_PY="$("$UV_BIN" python find --system --no-python-downloads "$v" 2>/dev/null || true)"
     if [ -n "$SYS_PY" ]; then
       break

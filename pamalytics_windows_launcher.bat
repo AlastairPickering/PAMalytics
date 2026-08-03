@@ -1,20 +1,26 @@
 @echo off
 setlocal enabledelayedexpansion
-
-rem Change to the directory of this script
 cd /d "%~dp0"
 
-rem Create virtual environment if it does not exist
+if exist "%cd%\VC_redist.x64.exe" (
+    echo Installing Microsoft Visual C++ runtime if required...
+    start /wait "" "%cd%\VC_redist.x64.exe" /install /passive /norestart
+)
+
 if not exist ".venv" (
     python -m venv .venv
 )
 
-rem Activate virtual environment
 call ".venv\Scripts\activate.bat"
 
-rem Upgrade pip and install dependencies
-python -m pip install --upgrade pip
-python -m pip install streamlit pydantic python-dateutil streamlit-extras
+python -m pip install --upgrade pip setuptools wheel
 
-rem Launch Streamlit app
+if exist "requirements.txt" (
+    python -m pip install -r requirements.txt
+) else (
+    echo requirements.txt not found.
+    pause
+    exit /b 1
+)
+
 python -m streamlit run code/Home.py --server.port 8510

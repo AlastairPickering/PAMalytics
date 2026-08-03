@@ -19,7 +19,9 @@ PAGE_IMPL_DIR = CORE_DIR / "page_impl"         # .../code/core/page_impl
 
 REAL_PAGE = PAGE_IMPL_DIR / "1_Validate.py"    
 
-AUTH_FILE = STUDIO_ROOT / ".auth.json"
+if str(STUDIO_ROOT) not in sys.path:
+    sys.path.insert(0, str(STUDIO_ROOT))
+from app_paths import AUTH_FILE
 
 
 def sidebar_signout_button(label: str = "Sign out") -> None:
