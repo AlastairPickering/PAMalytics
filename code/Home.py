@@ -20,7 +20,7 @@ SCRIPTS_DIR = STUDIO_ROOT / "scripts"
 if str(STUDIO_ROOT) not in sys.path:
     sys.path.insert(0, str(STUDIO_ROOT))
 
-from app_paths import AUTH_FILE, PROJECTS_ROOT, USER_ROOT, runtime_summary
+from app_paths import AUTH_FILE, PROJECTS_ROOT, USER_ROOT
 
 # Ensure scripts/ is importable
 if str(SCRIPTS_DIR) not in sys.path:
@@ -141,12 +141,6 @@ def hide_chrome(hide_sidebar: bool = True, hide_header: bool = True) -> None:
 def chip(text: str, kind: str = "info") -> str:
     colours = {"ready": "#16a34a", "pending": "#d97706", "empty": "#6b7280", "error": "#dc2626", "info": "#3b82f6"}
     return f'<span style="display:inline-block;padding:2px 8px;border-radius:999px;background:{colours.get(kind, "#3b82f6")};color:white;font-size:12px">{text}</span>'
-
-
-def render_runtime_diagnostics() -> None:
-    with st.expander("Diagnostics", expanded=False):
-        st.caption("Runtime paths and environment information for troubleshooting packaged releases.")
-        st.json(runtime_summary())
 
 
 def _btn(label: str, key: Optional[str] = None) -> bool:
@@ -2194,7 +2188,6 @@ def view_hub() -> None:
             st.success(f"Created project: `{folder.name}`")
             st.rerun()
 
-    render_runtime_diagnostics()
 
     st.subheader("Recent projects")
 
