@@ -43,9 +43,9 @@ The Windows launchers use the bundled `VC_redist.x64.exe` when needed, because s
 
 ## Packaged macOS app
 
-A packaged macOS app/DMG is built from the same source code. Packaged release artefacts belong in GitHub Releases, not in the repository itself.
+A packaged macOS app/DMG is built from the same source code.
 
-To build the unsigned macOS app locally:
+To build the macOS app locally:
 
 ```bash
 python3.12 -m venv .venv
@@ -57,7 +57,7 @@ python packaging/macos/build_app.py
 bash packaging/macos/build_dmg.sh
 ```
 
-The unsigned DMG will be written to `release/`. Public macOS distribution still requires Developer ID signing and Apple notarisation.
+The DMG will be written to `release/`. 
 
 ## Features
 
