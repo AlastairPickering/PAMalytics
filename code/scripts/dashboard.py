@@ -1079,7 +1079,7 @@ def render_dashboard(df: Optional[pd.DataFrame], sources: Dict[str, str], page: 
                     )
                     .interactive()
                 )
-                st.altair_chart(date_chart, width='stretch')
+                st.altair_chart(date_chart, use_container_width=True)
 
     # Detections by time of day
     if "date_time" in df_page.columns and not df_page.empty:
@@ -1119,6 +1119,6 @@ def render_dashboard(df: Optional[pd.DataFrame], sources: Dict[str, str], page: 
                     )
                     .interactive()
                 )
-                st.altair_chart(tod_chart, width='stretch')
+                st.altair_chart(tod_chart, use_container_width=True)
 
     show_detection_examples(df_page, df_all, proj_root)
