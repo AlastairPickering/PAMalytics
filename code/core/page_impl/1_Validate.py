@@ -3669,8 +3669,9 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
             gdf_plot = _rows_for_resolved_audio(proj_root, gdf, apath)
 
             all_detectable_boxes: List[Dict[str, float]] = []
-            for _, row in gdf_plot.iterrows():
+            for row_index, row in gdf_plot.iterrows():
                 b = {
+                    "row_index": row_index,
                     "start_s": _num(row.get("start_s", row.get("detection_start_s"))),
                     "end_s": _num(row.get("end_s", row.get("detection_end_s"))),
                     "low_freq": _num(row.get("low_freq")),
@@ -3680,9 +3681,11 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                 if np.isfinite(b["start_s"]) and np.isfinite(b["end_s"]) and b["end_s"] > b["start_s"]:
                     all_detectable_boxes.append(b)
             boxes = sorted(all_detectable_boxes, key=lambda b: (b["prob"] if np.isfinite(b["prob"]) else -1.0), reverse=True)[:10]
-            n_displayed_det = int(len(boxes))
+            displayed_indices = [b["row_index"] for b in boxes if b.get("row_index") in gdf.index]
+            gdf_card = gdf.loc[displayed_indices].copy() if displayed_indices else gdf.iloc[0:0].copy()
+            n_displayed_det = int(len(gdf_card))
 
-            max_cp = _group_max_prob(gdf_plot)
+            max_cp = _group_max_prob(gdf_card if not gdf_card.empty else gdf_plot)
             title_html = (
                 f"<div class='pam-card-header pam-card-title'><strong>{base}</strong>"
                 f"<br>{species_orig}"
@@ -3698,7 +3701,7 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                     with h1:
                         st.markdown(title_html, unsafe_allow_html=True)
                     with h2:
-                        _render_pills(gdf)
+                        _render_pills(gdf_card)
                     y, sr = np.array([], dtype=np.float32), 1
                     dur = 0.0
                     xmin, xmax = 0.0, 1.0
@@ -4019,7 +4022,7 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                                             "fft_note": fft_note,
                                         }
 
-                            gdf_with_idx = gdf.copy()
+                            gdf_with_idx = gdf_card.copy()
                             gdf_with_idx["__orig_index"] = gdf_with_idx.index
                             rgdf = gdf_with_idx.reset_index(drop=True)
 
@@ -4130,7 +4133,7 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
 
 
                     if card_review_submitted:
-                            selected_indices = gdf.index.tolist()
+                            selected_indices = list(gdf_card.index)
                             updated_df, _, _ = _commit_card(
                                 proj_root,
                                 df_all,
