@@ -2900,10 +2900,11 @@ def _commit_card(
     cur_pl = card_rows_updated["presence_label"].astype(str).str.lower()
     orig_sp = card_rows_updated["species_name_original"].astype(str)
     orig_pl = card_rows_updated["presence_label_original"].astype(str).str.lower()
-    species_presence_changed_mask = (cur_sp != orig_sp) | (cur_pl != orig_pl)
+    species_changed_mask = cur_sp != orig_sp
+    species_presence_changed_mask = species_changed_mask | (cur_pl != orig_pl)
     changed_mask = species_presence_changed_mask
 
-    for i, changed_here, species_presence_changed_here in zip(card_rows_updated.index, changed_mask, species_presence_changed_mask):
+    for i, changed_here, species_changed_here in zip(card_rows_updated.index, changed_mask, species_changed_mask):
         current_sp = str(det.at[i, "species_name"] or "")
         current_pl = str(det.at[i, "presence_label"] or "").strip().lower()
         original_sp = str(det.at[i, "species_name_original"] or "")
@@ -2914,11 +2915,7 @@ def _commit_card(
             det.at[i, "user_changed_by"] = user_id
             det.at[i, "user_changed_at"] = now_iso
 
-        is_uncertain = _bool_from_any(det.at[i, "uncertain_flag"])
-        if is_uncertain:
-            det.at[i, "validation_state"] = "uncertain"
-        else:
-            det.at[i, "validation_state"] = "incorrect" if species_presence_changed_here else "correct"
+        det.at[i, "validation_state"] = "incorrect" if species_changed_here else "correct"
 
         det.at[i, "validated_by"] = user_id
         det.at[i, "validated_at"] = now_iso
