@@ -2,6 +2,7 @@
 from __future__ import annotations
 import streamlit as st
 from pathlib import Path
+from typing import Optional
 
 AUTH_KEYS = ("user_id", "user_name", "username")
 
@@ -46,7 +47,7 @@ def top_right_logout() -> None:
 
 # Logos
 def find_logo(project_root: str | Path, names=("pamalytics_logo.png","pamalytics_logo.svg",
-                                               "logo.png","logo.svg")) -> Path | None:
+                                               "logo.png","logo.svg")) -> Optional[Path]:
     roots = [Path(project_root)/"assets", Path(project_root), Path.cwd()]
     for r in roots:
         for n in names:

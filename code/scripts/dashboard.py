@@ -81,7 +81,7 @@ def _slugify(s: str) -> str:
     return s or "unnamed"
 
 
-def _make_export_filename(project_root: Path, user: str | None = None) -> str:
+def _make_export_filename(project_root: Path, user: Optional[str] = None) -> str:
     project_slug = _slugify(project_root.name)
     user_slug = _slugify(user or "reviewer")
     ts = datetime.utcnow().strftime("%Y%m%d_%H%M")
