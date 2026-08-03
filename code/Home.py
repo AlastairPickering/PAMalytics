@@ -13,9 +13,14 @@ import re
 import pandas as pd
 
 # Paths
-STUDIO_ROOT = Path(__file__).resolve().parent      # code/
-REPO_ROOT   = STUDIO_ROOT.parent                   # repo root
-SCRIPTS_DIR = STUDIO_ROOT / "scripts"              # code/scripts
+STUDIO_ROOT = Path(__file__).resolve().parent
+REPO_ROOT = STUDIO_ROOT.parent
+SCRIPTS_DIR = STUDIO_ROOT / "scripts"
+
+if str(STUDIO_ROOT) not in sys.path:
+    sys.path.insert(0, str(STUDIO_ROOT))
+
+from app_paths import AUTH_FILE, PROJECTS_ROOT, USER_ROOT, runtime_summary
 
 # Ensure scripts/ is importable
 if str(SCRIPTS_DIR) not in sys.path:
@@ -138,6 +143,12 @@ def chip(text: str, kind: str = "info") -> str:
     return f'<span style="display:inline-block;padding:2px 8px;border-radius:999px;background:{colours.get(kind, "#3b82f6")};color:white;font-size:12px">{text}</span>'
 
 
+def render_runtime_diagnostics() -> None:
+    with st.expander("Diagnostics", expanded=False):
+        st.caption("Runtime paths and environment information for troubleshooting packaged releases.")
+        st.json(runtime_summary())
+
+
 def _btn(label: str, key: Optional[str] = None) -> bool:
     return st.button(label, key=key or label)
 
@@ -155,10 +166,6 @@ def nav_row(left_label: str, left_route: str,
 
 
 # Project model
-PROJECTS_ROOT = STUDIO_ROOT / "projects"
-PROJECTS_ROOT.mkdir(parents=True, exist_ok=True)
-AUTH_FILE = STUDIO_ROOT / ".auth.json"
-
 
 @dataclass
 class ProjectManifest:
@@ -1571,23 +1578,27 @@ def _build_audio_index_sqlite(audio_root: Path, index_db: Path, progress_callbac
         conn.commit()
 
         root_path = Path(root_abs)
-        if root_path.is_file():
-            scan_items = [(str(root_path.parent), root_path.name, str(root_path), root_path.name)] if root_path.suffix.lower() in audio_exts else []
-        else:
-            scan_items = []
-            for root, _, names in os.walk(root_abs):
+
+        def _iter_audio_files():
+            if root_path.is_file():
+                if root_path.suffix.lower() in audio_exts:
+                    yield str(root_path.parent), root_path.name, str(root_path), root_path.name
+                return
+            for folder, _, names in os.walk(root_abs):
                 for nm in names:
                     suffix = os.path.splitext(nm)[1].lower()
                     if suffix not in audio_exts:
                         continue
-                    full = os.path.abspath(os.path.join(root, nm))
+                    full = os.path.abspath(os.path.join(folder, nm))
                     try:
                         rel = os.path.relpath(full, root_abs).replace(os.sep, "/")
                     except Exception:
                         rel = nm
-                    scan_items.append((root, nm, full, rel))
+                    yield folder, nm, full, rel
 
-        for root, nm, full, rel in scan_items:
+        last_folder = root_abs
+        for folder, nm, full, rel in _iter_audio_files():
+            last_folder = folder
             suffix = os.path.splitext(nm)[1].lower()
             filename_lc = nm.lower()
             stem_lc = os.path.splitext(filename_lc)[0]
@@ -1601,14 +1612,14 @@ def _build_audio_index_sqlite(audio_root: Path, index_db: Path, progress_callbac
                 conn.commit()
                 batch.clear()
                 if progress_callback:
-                    progress_callback(count, root, time.monotonic() - started, False)
+                    progress_callback(count, folder, time.monotonic() - started, False)
 
         if batch:
             cur.executemany("INSERT INTO audio_files (audio_root, filename, filename_lc, stem_lc, suffix_lc, path, path_lc, rel_lc, parent_lc) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", batch)
             conn.commit()
             batch.clear()
             if progress_callback:
-                progress_callback(count, root_abs, time.monotonic() - started, False)
+                progress_callback(count, last_folder, time.monotonic() - started, False)
 
         cur.execute("CREATE INDEX idx_audio_filename_lc ON audio_files(filename_lc)")
         cur.execute("CREATE INDEX idx_audio_stem_lc ON audio_files(stem_lc)")
@@ -2182,6 +2193,8 @@ def view_hub() -> None:
             st.session_state.route = "overview"
             st.success(f"Created project: `{folder.name}`")
             st.rerun()
+
+    render_runtime_diagnostics()
 
     st.subheader("Recent projects")
 

@@ -1,75 +1,131 @@
-# PAMalytics — PAM Classifier Validation dashboard
+# PAMalytics — no-code PAM classifier validation and analytics
 [![CI (macOS & Windows)](https://github.com/AlastairPickering/PAMalytics/actions/workflows/ci.yaml/badge.svg)](https://github.com/AlastairPickering/PAMalytics/actions/workflows/ci.yaml)
 
-An open source, no-code, classifier-agnostic, interactive dashboard to efficiently review bioacoustic classifier results.
-
-<img width="256" height="256" alt="image" src="https://github.com/user-attachments/assets/93c1b4ad-ea2d-41ef-a417-dc4b55ddf34d" />
-
+PAMalytics is an open-source, no-code, classifier-agnostic dashboard for reviewing bioacoustic classifier outputs. It supports detection summaries, audio/spectrogram review, validation edits, uncertainty flags, threshold recalculation and export of validated results.
 
 User guide: https://alastairpickering.github.io/PAMalytics/
 
-### Features
-- Interactive dashboard to summarise, validate and export results
-- Total review effort tracked - how many detections validated per group (e.g., species, recorder); what proportion correct, changed
-- Update detections to correct species and/or presence-absence designation
-- Streamlined clip validation with high-resolution spectrograms and classifier probabilities displayed directly at detection points
-- Audio playback alongside spectrograms
-- Flexible reclassification of detection thresholds with modelling of impact on detection rates
-- All processes run via the app — no terminal required
-- Saved validated csv with tracked user-levels changes ready to plug into downstream analysis and reporting tasks
+<img width="256" height="256" alt="PAMalytics logo" src="docs/assets/brand/pamalytics-logo.png" />
 
-### Dashboard (analysis)
+## Start PAMalytics without coding
 
-<img width="2668" height="1218" alt="image" src="https://github.com/user-attachments/assets/cbf2837b-bd53-474e-9e4b-c3552bf4be8e" />
-
-- Headline stats: total detections, total recordings, detection rate
-- Global date range and recorder filters (AND logic) that control the whole page
-- Location Stats table with detection counts & rates
-- Interactive map (pydeck) sized by detections per recorder
-- Detections over time and by time of day (Altair)
-- Validation grid with compact spectrogram thumbnails + full audio playback
-- One-click annotation updates:
-    - Non-destructive overrides stored in UserLabel (not overwriting FinalLabel)
-    - Effective label = UserLabel (if set) else FinalLabel
-
-### Validate
-
-<img width="2946" height="1630" alt="image" src="https://github.com/user-attachments/assets/8c2d4016-a9ad-472f-927e-ba2c85e64597" />
-
-- Sort & filter by clip probability (min-max segment probability per file)
-- High-resolution spectrograms optimised for quick visual check
-- Shows pending changes before saving
-- Saves only UserLabel changes so you always preserve the original predictions
-
-<img width="2915" height="1286" alt="image" src="https://github.com/user-attachments/assets/d26837ee-43d8-45b4-b9eb-b87d80db16df" />
-
-<img width="2876" height="1451" alt="image" src="https://github.com/user-attachments/assets/82fd2b1d-c6a5-48da-946a-b1bf4d0156ea" />
-
-# Quick Start
-Prerequisites: <br>
-Python 3.9 - 3.12 <br>
-macOS or Windows
+Download or clone this repository, then use the launcher for your operating system.
 
 ### macOS
-Double click pamalytics_macos_launcher.command (first run may need permission override in System Settings/Privacy & Security/Security/Allow applications downloaded from App store and identified developers).
 
-It will:
-- Create .venv
-- Install requirements.txt
-- Launch Streamlit on port 8510
-- The app opens in your browser at http://localhost:8510.
+Double-click:
+
+```text
+pamalytics_macos_launcher_uv.command
+```
+
+Fallback launcher:
+
+```text
+pamalytics_macos_launcher.command
+```
 
 ### Windows
-- Double-click pamalytics_windows_launcher.bat (or run python scripts\launch_dashboard.py).
-- Same behaviour: venv + requirements + Streamlit on port 8510.
 
-### manual launch
-```bash
-python -m venv .venv
-. .venv/bin/activate  # Mac        
-.venv\Scripts\activate # Windows
-pip install -r requirements.txt
-streamlit run scripts/Dashboard.py --server.port 8503
+Double-click:
+
+```text
+pamalytics_windows_launcher_uv.bat
 ```
-</details>
 
+Fallback launcher:
+
+```text
+pamalytics_windows_launcher.bat
+```
+
+The Windows launchers use the bundled `VC_redist.x64.exe` when needed, because some scientific/audio Python packages require the Microsoft Visual C++ runtime.
+
+## Packaged macOS app
+
+A packaged macOS app/DMG is built from the same source code. Packaged release artefacts belong in GitHub Releases, not in the repository itself.
+
+To build the unsigned macOS app locally:
+
+```bash
+python3.12 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip setuptools wheel
+python -m pip install -r requirements-build-macos.txt
+python -m code.scripts.smoke_test
+python packaging/macos/build_app.py
+bash packaging/macos/build_dmg.sh
+```
+
+The unsigned DMG will be written to `release/`. Public macOS distribution still requires Developer ID signing and Apple notarisation.
+
+## Features
+
+- Interactive dashboard for summarising, validating and exporting classifier outputs
+- Classifier-agnostic import workflow, including BirdNET and BatDetect2 adapters
+- Audio playback and high-resolution spectrogram review
+- Card-based validation workflow with uncertainty flags and species/presence correction
+- Changed and uncertain detections tracked separately
+- Recalculate page for exploring threshold impacts
+- Non-destructive validation outputs that preserve original classifier predictions
+- Local-first operation: projects and validation state are stored on the user’s machine
+
+## Local data location
+
+By default, user projects and app state are stored outside the source folder:
+
+```text
+~/Documents/PAMalytics/
+```
+
+For testing, this can be overridden with:
+
+```bash
+export PAMALYTICS_HOME=/tmp/pamalytics_test_home
+```
+
+## Developer source launch
+
+Manual launch on macOS/Linux:
+
+```bash
+python3.12 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip setuptools wheel
+python -m pip install -r requirements.txt
+python -m streamlit run code/Home.py --server.port 8510
+```
+
+Manual launch on Windows:
+
+```bat
+py -3.12 -m venv .venv
+.venv\Scripts\activate
+python -m pip install --upgrade pip setuptools wheel
+python -m pip install -r requirements.txt
+python -m streamlit run code\Home.py --server.port 8510
+```
+
+## Testing
+
+```bash
+python -m code.scripts.smoke_test
+```
+
+See `docs/release-testing.md` and `packaging/macos/README.md` for release testing and macOS packaging notes.
+
+## Repository layout
+
+```text
+code/                    Shared PAMalytics Streamlit application code
+docs/                    User documentation site
+packaging/macos/         macOS app/DMG build scripts and icons
+packaging/windows/       Windows launcher notes and future packaging area
+pamalytics_*_launcher*   Root-level no-code launchers for source users
+VC_redist.x64.exe        Windows runtime prerequisite used by launchers
+.uv-bin/                 Bundled uv binaries used by uv launchers
+```
+
+## Licence
+
+PAMalytics is released under the GNU General Public License v3.0. See `LICENSE`.

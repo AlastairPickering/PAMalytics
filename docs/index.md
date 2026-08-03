@@ -11,7 +11,7 @@
     </p>
     <p class="home-hero__links">
       <a href="quick-start/">Quick start</a> ·
-      <a href="projects/first-project/">Set up your first project</a> ·
+      <a href="first-project/">Set up your first project</a> ·
       <a href="validate/">Validate</a>
     </p>
   </div>

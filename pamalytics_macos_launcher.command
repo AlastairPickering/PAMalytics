@@ -3,11 +3,11 @@ set -e
 cd "$(dirname "$0")"
 
 if [ ! -d ".venv" ]; then
-  python3 -m venv .venv
+  python3.12 -m venv .venv || python3 -m venv .venv
 fi
 source .venv/bin/activate
 
-python3 -m pip install --upgrade pip setuptools wheel
+python -m pip install --upgrade pip setuptools wheel
 
 REQ_FILE=""
 if [ -f "requirements.txt" ]; then
@@ -17,9 +17,9 @@ elif [ -f "code/scripts/requirements.txt" ]; then
 fi
 
 if [ -n "$REQ_FILE" ]; then
-  python3 -m pip install -r "$REQ_FILE"
+  python -m pip install -r "$REQ_FILE"
 else
-  python3 -m pip install streamlit pydantic python-dateutil streamlit-extras librosa soundfile
+  python -m pip install streamlit librosa soundfile
 fi
 
-python3 -m streamlit run code/Home.py --server.port 8510
+python -m streamlit run code/Home.py --server.port 8510

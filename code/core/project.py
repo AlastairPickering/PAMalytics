@@ -6,9 +6,10 @@ from pathlib import Path
 from typing import Optional, List
 import uuid
 
-STUDIO_DIR = Path(__file__).resolve().parents[1]
-PROJECTS_ROOT = STUDIO_DIR / "projects"
-PROJECTS_ROOT.mkdir(parents=True, exist_ok=True)
+try:
+    from code.app_paths import PROJECTS_ROOT
+except Exception:
+    from app_paths import PROJECTS_ROOT
 
 @dataclass
 class ProjectManifest:
@@ -44,6 +45,7 @@ def create_project(name: str, use_case: str, created_by: Optional[str]) -> Path:
             "metadata": "metadata/",
             "exports": "exports/",
             "logs": "logs/",
+            "workspace": "workspace/",
         },
         status={
             "import_results": "empty",
