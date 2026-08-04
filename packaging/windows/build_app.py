@@ -158,6 +158,8 @@ def main() -> int:
         f"{ROOT / 'code'}{os.pathsep}code",
         "--add-data",
         f"{ICON_ICO}{os.pathsep}packaging/windows",
+        "--add-data",
+        f"{ICON_PNG}{os.pathsep}packaging/windows",
     ]
 
     for module_name in [
