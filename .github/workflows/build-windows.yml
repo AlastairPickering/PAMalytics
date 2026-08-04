@@ -1,0 +1,110 @@
+name: Build Windows portable app
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version used in the ZIP filename
+        required: true
+        default: v1.0.0-test1
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12 x64
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          architecture: "x64"
+          cache: pip
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install -r requirements.txt
+          python -m pip install "pyinstaller>=6.0" pillow
+
+      - name: Run source smoke test
+        shell: pwsh
+        run: |
+          python -m code.scripts.smoke_test
+
+      - name: Build portable Windows application
+        shell: pwsh
+        run: |
+          python packaging/windows/build_app.py
+
+      - name: Smoke-test packaged server
+        shell: pwsh
+        run: |
+          $env:PAMALYTICS_HOME = "$env:RUNNER_TEMP\PAMalyticsTestHome"
+          $process = Start-Process `
+            -FilePath ".\dist\PAMalytics\PAMalytics.exe" `
+            -ArgumentList "--pamalytics-streamlit-server" `
+            -PassThru `
+            -WindowStyle Hidden
+
+          try {
+            $ready = $false
+            for ($i = 0; $i -lt 120; $i++) {
+              Start-Sleep -Seconds 1
+              try {
+                $response = Invoke-WebRequest `
+                  -Uri "http://127.0.0.1:8510/_stcore/health" `
+                  -UseBasicParsing `
+                  -TimeoutSec 2
+                if ($response.StatusCode -eq 200) {
+                  $ready = $true
+                  break
+                }
+              } catch {
+              }
+
+              if ($process.HasExited) {
+                throw "Packaged PAMalytics server exited with code $($process.ExitCode)."
+              }
+            }
+
+            if (-not $ready) {
+              throw "Packaged PAMalytics server did not become ready within 120 seconds."
+            }
+
+            Write-Host "Packaged PAMalytics server smoke test passed."
+          }
+          finally {
+            if (-not $process.HasExited) {
+              Stop-Process -Id $process.Id -Force
+            }
+          }
+
+      - name: Create portable ZIP
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path release | Out-Null
+          $zip = "release\PAMalytics-${{ inputs.version }}-windows-x64.zip"
+          Compress-Archive -Path "dist\PAMalytics\*" -DestinationPath $zip -Force
+          Get-FileHash -Algorithm SHA256 $zip |
+            ForEach-Object {
+              "$($_.Hash.ToLower())  PAMalytics-${{ inputs.version }}-windows-x64.zip"
+            } |
+            Set-Content "$zip.sha256"
+          Get-ChildItem release
+
+      - name: Upload portable build
+        uses: actions/upload-artifact@v4
+        with:
+          name: PAMalytics-${{ inputs.version }}-windows-x64
+          path: |
+            release/PAMalytics-${{ inputs.version }}-windows-x64.zip
+            release/PAMalytics-${{ inputs.version }}-windows-x64.zip.sha256
+          if-no-files-found: error
+          retention-days: 14
