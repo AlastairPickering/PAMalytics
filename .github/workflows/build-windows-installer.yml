@@ -1,0 +1,129 @@
+name: Build Windows installer
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Production version without a leading v
+        required: true
+        default: "1.0.0"
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows-installer:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12 x64
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          architecture: "x64"
+          cache: pip
+
+      - name: Install Python dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install -r requirements.txt
+          python -m pip install "pyinstaller>=6.0" pillow
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          choco install innosetup --no-progress -y
+
+      - name: Run source smoke test
+        shell: pwsh
+        run: |
+          python -m code.scripts.smoke_test
+
+      - name: Build Windows application
+        shell: pwsh
+        run: |
+          python packaging/windows/build_app.py
+
+      - name: Smoke-test packaged server
+        shell: pwsh
+        run: |
+          $env:PAMALYTICS_HOME = "$env:RUNNER_TEMP\PAMalyticsTestHome"
+          $process = Start-Process `
+            -FilePath ".\dist\PAMalytics\PAMalytics.exe" `
+            -ArgumentList "--pamalytics-streamlit-server" `
+            -PassThru `
+            -WindowStyle Hidden
+
+          try {
+            $ready = $false
+            for ($i = 0; $i -lt 120; $i++) {
+              Start-Sleep -Seconds 1
+              try {
+                $response = Invoke-WebRequest `
+                  -Uri "http://127.0.0.1:8510/_stcore/health" `
+                  -UseBasicParsing `
+                  -TimeoutSec 2
+                if ($response.StatusCode -eq 200) {
+                  $ready = $true
+                  break
+                }
+              } catch {
+              }
+
+              if ($process.HasExited) {
+                throw "Packaged PAMalytics server exited with code $($process.ExitCode)."
+              }
+            }
+
+            if (-not $ready) {
+              throw "Packaged PAMalytics server did not become ready within 120 seconds."
+            }
+          }
+          finally {
+            if (-not $process.HasExited) {
+              Stop-Process -Id $process.Id -Force
+            }
+          }
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path release | Out-Null
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            throw "Inno Setup compiler was not found at $iscc"
+          }
+
+          & $iscc `
+            "/DMyAppVersion=${{ inputs.version }}" `
+            "/DMySourceDir=$env:GITHUB_WORKSPACE\dist\PAMalytics" `
+            "/DMyOutputDir=$env:GITHUB_WORKSPACE\release" `
+            "packaging\windows\PAMalytics.iss"
+
+      - name: Create checksum
+        shell: pwsh
+        run: |
+          $setup = "release\PAMalytics-v${{ inputs.version }}-windows-x64-setup.exe"
+          if (-not (Test-Path $setup)) {
+            throw "Installer was not created: $setup"
+          }
+
+          Get-FileHash -Algorithm SHA256 $setup |
+            ForEach-Object {
+              "$($_.Hash.ToLower())  PAMalytics-v${{ inputs.version }}-windows-x64-setup.exe"
+            } |
+            Set-Content "$setup.sha256"
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: PAMalytics-v${{ inputs.version }}-windows-x64-installer
+          path: |
+            release/PAMalytics-v${{ inputs.version }}-windows-x64-setup.exe
+            release/PAMalytics-v${{ inputs.version }}-windows-x64-setup.exe.sha256
+          if-no-files-found: error
+          retention-days: 14

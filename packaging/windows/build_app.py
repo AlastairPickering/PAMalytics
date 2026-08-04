@@ -14,6 +14,7 @@ APP_DIR = DIST / "PAMalytics"
 EXE = APP_DIR / "PAMalytics.exe"
 ICON_PNG = ROOT / "packaging" / "macos" / "PAMalytics-icon.png"
 ICON_ICO = ROOT / "packaging" / "windows" / "PAMalytics.ico"
+VERSION_FILE = ROOT / "packaging" / "windows" / "version_info.txt"
 
 
 def _require_windows_python_312() -> None:
@@ -60,6 +61,44 @@ def _create_windows_icon() -> None:
     )
 
 
+
+def _write_version_info() -> None:
+    VERSION_FILE.write_text(
+        """VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers=(1, 0, 0, 0),
+    prodvers=(1, 0, 0, 0),
+    mask=0x3f,
+    flags=0x0,
+    OS=0x40004,
+    fileType=0x1,
+    subtype=0x0,
+    date=(0, 0)
+  ),
+  kids=[
+    StringFileInfo([
+      StringTable(
+        '040904B0',
+        [
+          StringStruct('CompanyName', 'Alastair Pickering'),
+          StringStruct('FileDescription', 'PAMalytics desktop application'),
+          StringStruct('FileVersion', '1.0.0'),
+          StringStruct('InternalName', 'PAMalytics'),
+          StringStruct('LegalCopyright', 'Copyright © 2026 Alastair Pickering'),
+          StringStruct('OriginalFilename', 'PAMalytics.exe'),
+          StringStruct('ProductName', 'PAMalytics'),
+          StringStruct('ProductVersion', '1.0.0')
+        ]
+      )
+    ]),
+    VarFileInfo([VarStruct('Translation', [1033, 1200])])
+  ]
+)
+""",
+        encoding="utf-8",
+    )
+
+
 def _installed(module_name: str) -> bool:
     return importlib.util.find_spec(module_name) is not None
 
@@ -95,6 +134,7 @@ def main() -> int:
     _require_windows_python_312()
     _validate_source_imports()
     _create_windows_icon()
+    _write_version_info()
 
     for path in (DIST, BUILD):
         if path.exists():
@@ -112,8 +152,12 @@ def main() -> int:
         "--noconfirm",
         "--icon",
         str(ICON_ICO),
+        "--version-file",
+        str(VERSION_FILE),
         "--add-data",
         f"{ROOT / 'code'}{os.pathsep}code",
+        "--add-data",
+        f"{ICON_ICO}{os.pathsep}packaging/windows",
     ]
 
     for module_name in [

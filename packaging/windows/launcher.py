@@ -14,6 +14,7 @@ from pathlib import Path
 from urllib.request import urlopen
 
 APP_NAME = "PAMalytics"
+APP_USER_MODEL_ID = "AlastairPickering.PAMalytics.Desktop.1"
 DEFAULT_PORT = 8510
 SERVER_MODE_ARGUMENT = "--pamalytics-streamlit-server"
 STARTUP_TIMEOUT_SECONDS = 90.0
@@ -22,6 +23,13 @@ _server_process: subprocess.Popen | None = None
 _server_lock = threading.Lock()
 _shutdown_started = False
 _mutex_handle = None
+
+
+def _set_windows_app_identity() -> None:
+    try:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
+    except Exception:
+        pass
 
 
 def _resource_root() -> Path:
@@ -287,8 +295,17 @@ def _run_windows_application() -> int:
         )
         return 1
 
+    _set_windows_app_identity()
+
     root = tk.Tk()
     root.title(APP_NAME)
+
+    icon_path = _resource_root() / "packaging" / "windows" / "PAMalytics.ico"
+    if icon_path.is_file():
+        try:
+            root.iconbitmap(default=str(icon_path))
+        except Exception:
+            _log(f"Could not apply window icon from {icon_path}.")
     root.geometry("380x170")
     root.resizable(False, False)
 
