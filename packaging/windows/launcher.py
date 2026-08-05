@@ -301,7 +301,6 @@ def _run_windows_application() -> int:
     root.title(APP_NAME)
 
     resource_root = _resource_root()
-    icon_ico = resource_root / "packaging" / "windows" / "PAMalytics.ico"
     icon_png = resource_root / "packaging" / "windows" / "PAMalytics-icon.png"
 
     if icon_png.is_file():
@@ -312,11 +311,6 @@ def _run_windows_application() -> int:
         except Exception:
             _log(f"Could not apply window PNG icon from {icon_png}.")
 
-    if icon_ico.is_file():
-        try:
-            root.iconbitmap(default=str(icon_ico))
-        except Exception:
-            _log(f"Could not apply window ICO icon from {icon_ico}.")
     root.geometry("380x170")
     root.resizable(False, False)
 
