@@ -1128,9 +1128,12 @@ def _render_interactive_validate_dialog(
     grouped,
     base: str,
     species_orig: str,
-    lock_freq: bool,
-    fmin_khz: float,
-    fmax_khz: float,
+    xmin: float,
+    xmax: float,
+    ymin: float,
+    ymax: float,
+    n_fft: int,
+    hop_length: int,
 ):
     gdf_int = grouped.get_group((base, species_orig)).copy()
     apath_int = _resolve_audio_path(proj_root, gdf_int, df_all)
@@ -1163,12 +1166,18 @@ def _render_interactive_validate_dialog(
         if sr_int <= 0 or dur_int <= 0:
             raise ValueError("Audio metadata could not be read")
 
-        xmin_int, xmax_int, _ = _default_detection_window(
-            boxes=boxes_int,
-            duration_s=dur_int,
-            default_single_window_s=float(st.session_state.get("validate_auto_zoom_window_s", 5.0)),
-            padding_s=2.0,
-        )
+        xmin_int = max(0.0, float(xmin))
+        xmax_int = min(float(dur_int), float(xmax))
+        if xmax_int <= xmin_int:
+            xmin_int, xmax_int, _ = _default_detection_window(
+                boxes=boxes_int,
+                duration_s=dur_int,
+                default_single_window_s=float(
+                    st.session_state.get("validate_auto_zoom_window_s", 5.0)
+                ),
+                padding_s=2.0,
+            )
+
         y_int, sr_int, actual_start_int, actual_end_int = _load_audio_window(
             apath_int,
             xmin_int,
@@ -1183,26 +1192,15 @@ def _render_interactive_validate_dialog(
         st.error(f"Audio read error: {e}")
         return
 
-    n_fft_int = _get_validate_n_fft(sr_int)
-    hop_int = max(1, n_fft_int // 8)
+    n_fft_int = max(2, int(n_fft))
+    hop_int = max(1, int(hop_length))
 
-    if lock_freq and (fmax_khz > fmin_khz):
-        ymin_int = max(0.0, float(fmin_khz) * 1000.0)
-        ymax_int = float(fmax_khz) * 1000.0
-        nyq_int = 0.5 * sr_int * 0.98
-        ymax_int = min(ymax_int, nyq_int)
-    else:
-        highs = [b["high_freq"] for b in boxes_int if np.isfinite(b["high_freq"])]
-        lows = [b["low_freq"] for b in boxes_int if np.isfinite(b["low_freq"])]
-        if highs and lows and max(highs) > min(lows):
-            fmin_int, fmax_int = min(lows), max(highs)
-        else:
-            fmin_int, fmax_int = 0.0, 0.5 * sr_int
-        span_int = max(1.0, (fmax_int - fmin_int))
-        pad_int = max(4_000.0, 0.30 * span_int)
-        nyq_int = 0.5 * sr_int * 0.98
-        ymin_int = max(0.0, fmin_int - pad_int)
-        ymax_int = min(nyq_int, fmax_int + pad_int)
+    nyq_int = 0.5 * sr_int * 0.98
+    ymin_int = max(0.0, float(ymin))
+    ymax_int = min(float(ymax), nyq_int)
+    if ymax_int <= ymin_int:
+        ymin_int = 0.0
+        ymax_int = nyq_int
 
     spec_int = _compute_spectrogram_data(
         y=y_int,
@@ -1241,7 +1239,10 @@ def _render_interactive_validate_dialog(
     )
 
     st.caption(f"{base} • {species_orig}")
-    st.plotly_chart(fig_int, width='stretch', config={"displayModeBar": True})
+    st.plotly_chart(
+        fig_int,
+        config={"displayModeBar": True},
+    )
 
 def _acoustic_metrics_for_detection(
     y: np.ndarray,
@@ -3300,7 +3301,8 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                 st.write("No card selected.")
                 return
 
-            sel_base, sel_species_orig = selected_card
+            sel_base = str(selected_card["base"])
+            sel_species_orig = str(selected_card["species_orig"])
             try:
                 _render_interactive_validate_dialog(
                     proj_root=proj_root,
@@ -3308,9 +3310,12 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                     grouped=grouped,
                     base=sel_base,
                     species_orig=sel_species_orig,
-                    lock_freq=lock_freq,
-                    fmin_khz=fmin_khz,
-                    fmax_khz=fmax_khz,
+                    xmin=float(selected_card["xmin"]),
+                    xmax=float(selected_card["xmax"]),
+                    ymin=float(selected_card["ymin"]),
+                    ymax=float(selected_card["ymax"]),
+                    n_fft=int(selected_card["n_fft"]),
+                    hop_length=int(selected_card["hop_length"]),
                 )
             except Exception as e:
                 st.error(f"Interactive spectrogram error: {e}")
@@ -3956,7 +3961,16 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                             key=_safe_widget_key("open_interactive_plotly", base, species_orig),
                             width="stretch",
                         ):
-                            st.session_state["validate_interactive_card"] = (base, species_orig)
+                            st.session_state["validate_interactive_card"] = {
+                                "base": base,
+                                "species_orig": species_orig,
+                                "xmin": float(xmin),
+                                "xmax": float(xmax),
+                                "ymin": float(ymin),
+                                "ymax": float(ymax),
+                                "n_fft": int(n_fft),
+                                "hop_length": int(hop),
+                            }
                             _interactive_spectrogram_dialog()
 
                         try:
