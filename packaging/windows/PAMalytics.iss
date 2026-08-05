@@ -34,7 +34,7 @@ VersionInfoVersion=1.0.0.0
 VersionInfoCompany=Alastair Pickering
 VersionInfoDescription=PAMalytics Windows installer
 VersionInfoProductName=PAMalytics
-VersionInfoProductVersion={#MyAppVersion}
+VersionInfoProductVersion=1.0.0.0
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
