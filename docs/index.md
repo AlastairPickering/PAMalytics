@@ -7,7 +7,7 @@
   <div class="home-hero__text">
     <h1>PAMalytics</h1>
     <p>
-      No-code validation and analytics for bioacoustic classifier outputs.
+      A no-code application for validating bioacoustic detections.
     </p>
     <p class="home-hero__links">
       <a href="quick-start/">Quick start</a> ·
@@ -17,20 +17,19 @@
   </div>
 </div>
 
-# PAMalytics
-
-[Open the GitHub repository](https://github.com/AlastairPickering/PAMalytics){ .md-button .md-button--primary }
+[Download PAMalytics](https://github.com/AlastairPickering/PAMalytics/releases/latest){ .md-button .md-button--primary }
 [Quick start](quick-start.md){ .md-button }
 
 ## What it does
 
 PAMalytics lets you:
 
-- Summarise detections across recorders and time
-- Review and correct detections efficiently using high-resolution spectrograms and audio playback
-- Track validation progress and classifier performance across sites and species
-- Keep original classifier outputs intact while storing non-destructive user overrides
-- Export a validated CSV ready for downstream analysis
+- Review detections using spectrograms and audio playback
+- Create a targeted sample for validation
+- Confirm detections, change species labels, or mark them absent or uncertain
+- Track validation progress and classifier performance
+- Keep original classifier outputs alongside review decisions
+- Export validated results for downstream analysis
 
 ## Start here
 

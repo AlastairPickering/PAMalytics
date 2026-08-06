@@ -9,11 +9,11 @@ The Detection Dashboard gives you a high-level view of your project and a quick 
 PAMalytics provides:
 
 - Headline stats (total detections, total recordings, detection rate)
-- Global date range and recorder filters (AND logic)
+- Dataset, date-range and grouping controls
 - Location stats table (counts and rates)
 - Interactive map sized by detections per recorder
 - Detections over time and by time of day
-- Validation grid: spectrogram thumbnails and audio playback
+- Spectrogram preview grid with audio playback
 
 ## Explore your detections
 
@@ -21,8 +21,10 @@ When you launch a PAMalytics project you’ll land on the Detection Dashboard. U
 
 At the top of the page you can:
 
+- choose the **dataset** to display, including the original detections or the published validated dataset where available
 - set a **date range** using the date picker
-- choose a **grouping variable** (for example species, site, or any other metadata column you imported)
+- group results by **species** or **recorder**
+- select **Clear filters** to restore the default view
 
 The grouping variable controls how summaries and charts are broken down across the dashboard.
 
@@ -36,9 +38,11 @@ All of these views are separated by your selected grouping variable (e.g. specie
 
 ## Preview audio and spectrograms
 
-You can inspect detections directly from the dashboard using the validation grid.
+You can inspect detections directly from the dashboard using the spectrogram preview grid.
 
-Each spectrogram thumbnail is annotated to help you triage quickly:
+Use **Spectrograms per page**, **Columns per row**, and **Page** to control how many previews are loaded and how they are arranged. Reducing the number of spectrograms per page can improve performance on large datasets or slower computers.
+
+Each spectrogram is annotated to help you triage quickly:
 
 - the predicted label (e.g. species)
 - the number of detections found

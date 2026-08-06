@@ -1,10 +1,25 @@
 # Quick start
 
-## Prerequisites
+## Recommended installation
 
-Python 3.12 for source installs. macOS or Windows.
+For most users, the recommended way to run PAMalytics is to install the packaged desktop application.
 
-For ordinary users, use a packaged PAMalytics release where available. The source launchers are retained for development and testing.
+### macOS
+
+1. Download `PAMalytics-v1.0.1-macOS-arm64.dmg`.
+2. Open the DMG.
+3. Drag **PAMalytics** into **Applications**.
+4. Launch PAMalytics from Applications.
+
+The macOS application is signed and notarised by Apple.
+
+### Windows
+
+1. Download `PAMalytics-v1.0.1-windows-x64-setup.exe`.
+2. Run the installer.
+3. Launch PAMalytics from the Windows Start menu.
+
+The Windows installer is unsigned, so Windows may display a security warning. After confirming that the installer came from the official PAMalytics release, select **More info** and then **Run anyway**.
 
 ## Getting started video
 
@@ -18,7 +33,13 @@ For ordinary users, use a packaged PAMalytics release where available. The sourc
   </iframe>
 </div>
 
-## macOS source launch
+## Alternative source launch
+
+The packaged desktop applications are the recommended way to use PAMalytics.
+
+The source launchers below are retained as a backup for users who cannot use the packaged installers, and for development or testing. Python 3.12 is required.
+
+### macOS source launch
 
 Double-click `pamalytics_macos_launcher_uv.command`.
 
@@ -31,11 +52,11 @@ It will:
 
 User projects and login state are stored outside the code folder at `~/Documents/PAMalytics/`.
 
-## Windows source launch
+### Windows source launch
 
 Double-click `pamalytics_windows_launcher_uv.bat`.
 
-## Manual launch
+### Manual launch
 
 ```bash
 python3.12 -m venv .venv
@@ -44,7 +65,7 @@ python -m pip install -r requirements.txt
 python -m streamlit run code/Home.py --server.port 8510
 ```
 
-## Clean test launch
+### Clean test launch
 
 ```bash
 export PAMALYTICS_HOME=/tmp/pamalytics_clean_test
