@@ -7,41 +7,42 @@ User guide: https://alastairpickering.github.io/PAMalytics/
 
 <img width="256" height="256" alt="PAMalytics logo" src="docs/assets/brand/pamalytics-logo.png" />
 
-## Start PAMalytics without coding
+## Install PAMalytics
 
-Download or clone this repository, then use the launcher for your operating system.
+Pre-built desktop applications are available from the latest GitHub release.
 
 ### macOS
 
-Double-click:
+Download:
 
 ```text
-pamalytics_macos_launcher_uv.command
+PAMalytics-v1.0.1-macOS-arm64.dmg
 ```
 
-Fallback launcher:
+This build is for Apple Silicon Macs and is signed and notarised by Apple.
 
-```text
-pamalytics_macos_launcher.command
-```
+Open the DMG, drag PAMalytics into Applications, then launch it from Applications.
 
 ### Windows
 
-Double-click:
+Download:
 
 ```text
-pamalytics_windows_launcher_uv.bat
+PAMalytics-v1.0.1-windows-x64-setup.exe
 ```
 
-Fallback launcher:
+Run the installer, then launch PAMalytics from the Windows Start menu.
 
-```text
-pamalytics_windows_launcher.bat
-```
+The Windows installer is currently unsigned, so Windows may display a security warning. Select **More info**, then **Run anyway**, after confirming that the installer was downloaded from the official PAMalytics GitHub release.
 
-The Windows launchers use the bundled `VC_redist.x64.exe` when needed, because some scientific/audio Python packages require the Microsoft Visual C++ runtime.
+### Checksums
 
-## Packaged macOS app
+SHA-256 checksum files are provided alongside both installers:
+
+- `PAMalytics-v1.0.1-macOS-arm64.dmg.sha256`
+- `PAMalytics-v1.0.1-windows-x64-setup.exe.sha256`
+
+## Building the macOS app from source
 
 A packaged macOS app/DMG is built from the same source code.
 
@@ -120,8 +121,8 @@ See `docs/release-testing.md` and `packaging/macos/README.md` for release testin
 code/                    Shared PAMalytics Streamlit application code
 docs/                    User documentation site
 packaging/macos/         macOS app/DMG build scripts and icons
-packaging/windows/       Windows launcher notes and future packaging area
-pamalytics_*_launcher*   Root-level no-code launchers for source users
+packaging/windows/       Windows application and installer build files
+pamalytics_*_launcher*   Alternative source launchers for development use
 VC_redist.x64.exe        Windows runtime prerequisite used by launchers
 .uv-bin/                 Bundled uv binaries used by uv launchers
 ```
