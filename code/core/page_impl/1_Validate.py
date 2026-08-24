@@ -293,17 +293,35 @@ def _fmt_khz(x: float) -> str:
 # Dataset loading
 
 def _load_csv_safe(p: Path) -> Optional[pd.DataFrame]:
+    """Read a validation CSV once per session/file version.
+
+    The cache is deliberately session-scoped rather than ``st.cache_data`` so a
+    large detections table is not serialised into a second global cache copy.
+    A changed size or mtime invalidates the entry automatically.
+    """
     try:
-        if p.exists():
-            df = pd.read_csv(p, low_memory=False)
-            try:
-                df.columns = df.columns.str.strip()
-            except Exception:
-                pass
-            return df
+        if not p.exists():
+            return None
+        stat = p.stat()
+        signature = (str(p), int(stat.st_size), int(stat.st_mtime_ns))
+        cache = st.session_state.setdefault("_validate_csv_session_cache", {})
+        entry = cache.get(str(p))
+        if isinstance(entry, dict) and entry.get("signature") == signature:
+            return entry.get("df")
+
+        df = pd.read_csv(p, low_memory=False)
+        try:
+            df.columns = df.columns.str.strip()
+        except Exception:
+            pass
+        cache[str(p)] = {"signature": signature, "df": df}
+        if len(cache) > 2:
+            for key in list(cache.keys()):
+                if key != str(p) and len(cache) > 2:
+                    cache.pop(key, None)
+        return df
     except Exception:
         return None
-    return None
 
 
 def _dataset_choice_validate(sources: dict) -> Tuple[pd.DataFrame, str, Dict[str, pd.DataFrame], Dict[str, Path]]:
@@ -910,6 +928,33 @@ def _offset_detection_times(gdf: pd.DataFrame, offset_s: float) -> pd.DataFrame:
         if col in out.columns:
             out[col] = pd.to_numeric(out[col], errors="coerce") - float(offset_s)
     return out
+
+@st.cache_data(show_spinner=False, max_entries=128)
+def _compute_static_spectrogram_data(
+    y: np.ndarray,
+    sr: int,
+    n_fft: int,
+    hop_length: int,
+) -> Dict[str, np.ndarray]:
+    """Compute only what the static validation card actually displays."""
+    out = {
+        "S_dB": np.zeros((2, 2), dtype=float),
+        "times": np.zeros(2, dtype=float),
+        "freqs_hz": np.zeros(2, dtype=float),
+    }
+    if y.size == 0 or sr <= 0:
+        return out
+    D = librosa.stft(y=y, n_fft=int(n_fft), hop_length=int(hop_length))
+    S_power = np.abs(D) ** 2
+    if S_power.size == 0:
+        return out
+    out["S_dB"] = librosa.power_to_db(S_power, ref=np.max, top_db=90)
+    out["times"] = librosa.frames_to_time(
+        np.arange(S_power.shape[1]), sr=sr, hop_length=hop_length
+    )
+    out["freqs_hz"] = librosa.fft_frequencies(sr=sr, n_fft=n_fft)
+    return out
+
 
 @st.cache_data(show_spinner=False, max_entries=128)
 def _compute_spectrogram_data(
@@ -3854,7 +3899,7 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                                 ymin = max(0.0, fmin - pad)
                                 ymax = min(nyq, fmax + pad)
 
-                            spec = _compute_spectrogram_data(
+                            spec = _compute_static_spectrogram_data(
                                 y=y,
                                 sr=sr,
                                 n_fft=n_fft,
@@ -3875,7 +3920,7 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                             xmin, xmax = 0.0, 1.0
 
                         try:
-                            fig, ax = plt.subplots(figsize=(8.6, 5.2), dpi=280, constrained_layout=False)
+                            fig, ax = plt.subplots(figsize=(8.6, 5.2), dpi=150, constrained_layout=False)
                             plot_xmin, plot_xmax = float(xmin), float(xmax)
                             if not (np.isfinite(plot_xmin) and np.isfinite(plot_xmax) and plot_xmax > plot_xmin):
                                 plot_xmin, plot_xmax = 0.0, float(dur)

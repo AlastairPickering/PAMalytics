@@ -10,6 +10,7 @@ import subprocess
 import sys
 import time
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
 
 # Paths
@@ -555,6 +556,17 @@ def stage_audio_into_project(
 
         dest = (dest_root / rel_inside) if rel_inside is not None else (dest_root / src_abs.name)
         dest.parent.mkdir(parents=True, exist_ok=True)
+
+        if dest.exists():
+            try:
+                import soundfile as sf
+                with sf.SoundFile(str(dest), mode="r"):
+                    pass
+            except Exception:
+                try:
+                    dest.unlink()
+                except Exception:
+                    return ""
 
         if not dest.exists():
             shutil.copy2(src_abs, dest)
@@ -1352,29 +1364,65 @@ def _list_result_files(path: Path) -> List[Path]:
     return []
 
 
-def _read_result_inputs(path: Path):
+def _read_result_inputs(path: Path, progress_callback=None, max_attempts: int = 4):
     import pandas as pd
+    import time as _time
 
-    files = _list_result_files(path)
+    started = _time.time()
+    files = None
+    last_error = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            files = _list_result_files(path)
+            break
+        except (TimeoutError, OSError) as e:
+            last_error = e
+            if progress_callback:
+                progress_callback("discover", 0, 0, _time.time() - started, attempt, str(e))
+            if attempt < max_attempts:
+                _time.sleep(min(2 ** (attempt - 1), 4))
+    if files is None:
+        raise last_error if last_error else ValueError("Could not inspect the selected results location.")
     if not files:
         raise ValueError("No CSV, TSV or Parquet files were found in the selected location.")
 
     frames = []
-    for f in files:
-        if f.suffix.lower() == ".parquet":
-            df = pd.read_parquet(f)
-        elif f.suffix.lower() == ".tsv":
-            df = pd.read_csv(f, sep="\t")
-        else:
+    total = len(files)
+    for i, f in enumerate(files, start=1):
+        df = None
+        last_error = None
+        if progress_callback:
+            progress_callback(str(f), i - 1, total, _time.time() - started, 1, "")
+        for attempt in range(1, max_attempts + 1):
             try:
-                df = pd.read_csv(f)
-            except Exception:
-                df = pd.read_csv(f, sep="\t")
-
+                with open(f, "rb") as _fh:
+                    _fh.read(1)
+                if f.suffix.lower() == ".parquet":
+                    df = pd.read_parquet(f)
+                elif f.suffix.lower() == ".tsv":
+                    df = pd.read_csv(f, sep="\t", low_memory=False)
+                else:
+                    try:
+                        df = pd.read_csv(f, low_memory=False)
+                    except (TimeoutError, OSError):
+                        raise
+                    except Exception:
+                        df = pd.read_csv(f, sep="\t", low_memory=False)
+                break
+            except (TimeoutError, OSError) as e:
+                last_error = e
+                if progress_callback:
+                    progress_callback(str(f), i - 1, total, _time.time() - started, attempt, str(e))
+                if attempt < max_attempts:
+                    _time.sleep(min(2 ** (attempt - 1), 4))
+        if df is None:
+            raise last_error if last_error else ValueError(f"Could not read results file: {f}")
         if df is not None and not df.empty:
             df = df.copy()
             df["_ingest_source_file"] = str(f)
             frames.append(df)
+        if progress_callback:
+            progress_callback(str(f), i, total, _time.time() - started, 1, "")
 
     if not frames:
         raise ValueError("All selected result files were empty.")
@@ -1743,13 +1791,16 @@ def _ensure_audio_index_ui(proj_path: Path, audio_root: Optional[Path], key_pref
         st.error(f"Audio indexing failed: {e}")
         return {"ready": False, "file_count": 0, "index_db": str(index_db), "reason": str(e)}
 
-def _audio_index_query_paths(index_db: Path, raw_sql: str, params: Tuple[Any, ...]) -> List[str]:
+def _audio_index_query_paths(index_db: Path, raw_sql: str, params: Tuple[Any, ...], conn=None) -> List[str]:
     import sqlite3
     if not index_db or not Path(index_db).exists():
         return []
     try:
-        with sqlite3.connect(str(index_db)) as conn:
+        if conn is not None:
             rows = conn.execute(raw_sql, params).fetchall()
+        else:
+            with sqlite3.connect(str(index_db)) as _conn:
+                rows = _conn.execute(raw_sql, params).fetchall()
         return list(dict.fromkeys([str(r[0]) for r in rows if r and _pa_clean_value(r[0])]))
     except Exception:
         return []
@@ -1769,7 +1820,7 @@ def _is_path_like_audio_ref(value: str) -> bool:
     return bool(raw.startswith("//") or (len(raw) >= 3 and raw[1] == ":" and raw[2] == "/") or "/" in raw or Path(raw).is_absolute())
 
 
-def _resolve_audio_values_sqlite_status(index_db: Path, value: str, source_file: str = "", results_root: Optional[Path] = None) -> Tuple[List[str], str, int, str]:
+def _resolve_audio_values_sqlite_status(index_db: Path, value: str, source_file: str = "", results_root: Optional[Path] = None, conn=None) -> Tuple[List[str], str, int, str]:
     import re as _re
     raw = _pa_clean_value(value)
     if not raw or not index_db or not Path(index_db).exists():
@@ -1782,22 +1833,22 @@ def _resolve_audio_values_sqlite_status(index_db: Path, value: str, source_file:
 
     if _is_abs_like(raw):
         raw_path_lc = raw.replace("\\", "/").lower()
-        m = _audio_index_query_paths(index_db, "SELECT path FROM audio_files WHERE path_lc = ?", (raw_path_lc,))
+        m = _audio_index_query_paths(index_db, "SELECT path FROM audio_files WHERE path_lc = ?", (raw_path_lc,), conn=conn)
         if m:
             return _classify_audio_index_matches(m, "exact_path")
 
-    m = _audio_index_query_paths(index_db, "SELECT path FROM audio_files WHERE rel_lc = ?", (raw_rel_lc,))
+    m = _audio_index_query_paths(index_db, "SELECT path FROM audio_files WHERE rel_lc = ?", (raw_rel_lc,), conn=conn)
     if m:
         return _classify_audio_index_matches(m, "relative_path")
 
     if "/" in raw_rel_lc:
-        m = _audio_index_query_paths(index_db, "SELECT path FROM audio_files WHERE rel_lc = ? OR rel_lc LIKE ?", (raw_rel_lc, "%/" + raw_rel_lc))
+        m = _audio_index_query_paths(index_db, "SELECT path FROM audio_files WHERE rel_lc = ? OR rel_lc LIKE ?", (raw_rel_lc, "%/" + raw_rel_lc), conn=conn)
         if m:
             return _classify_audio_index_matches(m, "path_suffix")
 
     if path_like:
         for cand in _pa_raw_path_tail_candidates(raw, min_parts=2):
-            m = _audio_index_query_paths(index_db, "SELECT path FROM audio_files WHERE rel_lc = ? OR rel_lc LIKE ?", (cand, "%/" + cand))
+            m = _audio_index_query_paths(index_db, "SELECT path FROM audio_files WHERE rel_lc = ? OR rel_lc LIKE ?", (cand, "%/" + cand), conn=conn)
             if m:
                 return _classify_audio_index_matches(m, "path_tail")
 
@@ -1809,18 +1860,18 @@ def _resolve_audio_values_sqlite_status(index_db: Path, value: str, source_file:
             except Exception:
                 folder = src_parent.name
             for cand in _pa_suffix_candidates(folder, raw_name_lc):
-                m = _audio_index_query_paths(index_db, "SELECT path FROM audio_files WHERE rel_lc = ? OR rel_lc LIKE ?", (cand, "%/" + cand))
+                m = _audio_index_query_paths(index_db, "SELECT path FROM audio_files WHERE rel_lc = ? OR rel_lc LIKE ?", (cand, "%/" + cand), conn=conn)
                 if m:
                     return _classify_audio_index_matches(m, "csv_relative_path")
         except Exception:
             pass
 
-    m = _audio_index_query_paths(index_db, "SELECT path FROM audio_files WHERE filename_lc = ?", (raw_name_lc,))
+    m = _audio_index_query_paths(index_db, "SELECT path FROM audio_files WHERE filename_lc = ?", (raw_name_lc,), conn=conn)
     if m:
         return _classify_audio_index_matches(m, "filename")
 
     if raw_stem_lc:
-        m = _audio_index_query_paths(index_db, "SELECT path FROM audio_files WHERE stem_lc = ?", (raw_stem_lc,))
+        m = _audio_index_query_paths(index_db, "SELECT path FROM audio_files WHERE stem_lc = ?", (raw_stem_lc,), conn=conn)
         if m:
             return _classify_audio_index_matches(m, "stem")
 
@@ -1978,6 +2029,13 @@ def _make_progress_callback(status_box, progress_bar=None):
                     pairs.append(f"{label} {int(payload.get(key)):,}")
                 except Exception:
                     pairs.append(f"{label} {payload.get(key)}")
+        current_file = str(payload.get("current_file", "")).strip()
+        if current_file:
+            pairs.append(current_file)
+        retry = payload.get("retry")
+        retries = payload.get("retries")
+        if retry is not None and retries is not None:
+            pairs.append(f"retry {retry}/{retries}")
         detail = str(payload.get("detail", "")).strip()
         if detail:
             pairs.append(detail)
@@ -2032,65 +2090,105 @@ def _stage_import_audio_with_progress(df_norm: pd.DataFrame, proj_path: Path, au
     uniq = [p for p in df_norm["file_path_original"].fillna("").astype(str).unique() if _pa_clean_value(p)]
     if not uniq:
         return df_norm
+
     status_box = status_box or st.empty()
     progress_bar = progress_bar or st.progress(0.0)
-    rel_map = {}
     started = time.time()
-    copied = 0
-    skipped = 0
-    failed = 0
-    status_box.info(f"Staging audio for {label}: preparing {len(uniq):,} unique audio file(s).")
-    for n, p0 in enumerate(uniq, start=1):
+    total_files = len(uniq)
+    max_workers = min(8, total_files)
+    rel_map = {}
+    copied = skipped = failed = 0
+    completed_bytes = 0
+    known_total_bytes = 0
+
+    def _fmt_bytes(n):
+        n = float(max(0, n or 0))
+        for unit in ("B", "KB", "MB", "GB", "TB"):
+            if n < 1024.0 or unit == "TB":
+                return f"{n:.1f} {unit}" if unit != "B" else f"{int(n):,} B"
+            n /= 1024.0
+
+    def _stage_one(p0):
         p0s = _pa_clean_value(p0)
+        if not p0s:
+            return p0, p0s, "", "failed", 0
         src = resolve_input_audio_path(audio_root, p0s)
-        if src and src.exists():
+        if not src or not src.exists():
+            return p0, p0s, p0s, "failed", 0
+        try:
+            size = int(Path(src).stat().st_size)
+        except Exception:
+            size = 0
+        try:
+            src_abs = Path(src).resolve()
+            rel_inside = None
+            if audio_root:
+                try:
+                    rel_inside = src_abs.relative_to(Path(audio_root).resolve())
+                except Exception:
+                    rel_inside = None
+            dest_root_abs = audio_dest_root.resolve()
+            dest = (dest_root_abs / rel_inside) if rel_inside is not None else (dest_root_abs / src_abs.name)
+            already_exists = dest.exists()
+        except Exception:
+            already_exists = False
+        rel = stage_audio_into_project(proj_path, src, dest_root=audio_dest_root, audio_root=audio_root)
+        if rel:
+            return p0, p0s, rel, ("skipped" if already_exists else "copied"), size
+        return p0, p0s, p0s, "failed", size
+
+    status_box.info(
+        f"Copying project audio locally: 0 / {total_files:,} file(s) | "
+        f"{max_workers} concurrent workers | failed 0 | elapsed 00:00"
+    )
+
+    futures = {}
+    with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="pa-audio-stage") as executor:
+        for p0 in uniq:
+            fut = executor.submit(_stage_one, p0)
+            futures[fut] = p0
+        for n, fut in enumerate(as_completed(futures), start=1):
+            p0 = futures[fut]
             try:
-                proj_abs = proj_path.resolve()
-                src_abs = Path(src).resolve()
-                rel_inside = None
-                if audio_root:
-                    try:
-                        rel_inside = src_abs.relative_to(Path(audio_root).resolve())
-                    except Exception:
-                        rel_inside = None
-                dest = (audio_dest_root.resolve() / rel_inside) if rel_inside is not None else (audio_dest_root.resolve() / src_abs.name)
-                already_exists = dest.exists()
+                p0, p0s, rel, outcome, size = fut.result()
             except Exception:
-                already_exists = False
-            rel = stage_audio_into_project(proj_path, src, dest_root=audio_dest_root, audio_root=audio_root)
-            rel_map[p0] = rel if rel else p0s
-            if rel:
-                if already_exists:
-                    skipped += 1
-                else:
-                    copied += 1
+                p0s = _pa_clean_value(p0)
+                rel, outcome, size = p0s, "failed", 0
+            rel_map[p0] = rel
+            known_total_bytes += max(0, int(size or 0))
+            if outcome == "copied":
+                copied += 1
+                completed_bytes += max(0, int(size or 0))
+            elif outcome == "skipped":
+                skipped += 1
+                completed_bytes += max(0, int(size or 0))
             else:
                 failed += 1
-        else:
-            rel_map[p0] = p0s
-            failed += 1
-        progress_bar.progress(max(0.0, min(1.0, n / max(1, len(uniq)))))
-        if n == len(uniq) or n % 10 == 0:
+
             elapsed = time.time() - started
-            rate = (n / elapsed) if elapsed > 0 else 0.0
-            remaining = ((len(uniq) - n) / rate) if rate > 0 and n < len(uniq) else None
+            progress_bar.progress(max(0.0, min(1.0, n / max(1, total_files))))
+            byte_rate = (completed_bytes / elapsed) if elapsed > 0 and completed_bytes > 0 else 0.0
+            file_rate = (n / elapsed) if elapsed > 0 else 0.0
+            remaining = ((total_files - n) / file_rate) if file_rate > 0 and n < total_files else None
             msg = (
-                f"Staging audio for {label}: {n:,} / {len(uniq):,} unique files | "
-                f"copied {copied:,} | skipped existing {skipped:,} | failed {failed:,} | "
+                f"Copying project audio locally: {n:,} / {total_files:,} file(s) | "
+                f"{_fmt_bytes(completed_bytes)} completed | "
+                f"{_fmt_bytes(byte_rate)}/s | "
+                f"{max_workers} concurrent workers | failed {failed:,} | "
                 f"elapsed {_format_elapsed(elapsed)}"
             )
             if remaining is not None and remaining >= 1:
                 msg += f" | approx remaining {_format_elapsed(remaining)}"
             status_box.info(msg)
+
     df_norm["file_path"] = df_norm["file_path_original"].astype(str).map(rel_map).fillna("")
     status_box.success(
-        f"Staged audio for {label}: {len(uniq):,} unique file(s) checked in {_format_elapsed(time.time() - started)} "
+        f"Staged audio for {label}: {total_files:,} unique file(s) checked in {_format_elapsed(time.time() - started)} "
         f"({copied:,} copied, {skipped:,} already present, {failed:,} failed)."
     )
     return df_norm
 
 
-# Views
 def view_login() -> None:
     hide_chrome(True, True)
 
@@ -2141,7 +2239,6 @@ def view_login() -> None:
                 pass
             st.session_state.route = "hub"
             st.rerun()
-
 
 def view_hub() -> None:
     """
@@ -2455,7 +2552,7 @@ def view_import_results() -> None:
             _ensure_audio_index_ui(proj_path, audio_base, key_prefix="bd2", auto_build=False, render_ui=True)
 
         can_run = bd2_csv_root and bd2_csv_root.exists()
-        run_btn = st.button("Ingest BatDetect2 results", disabled=not can_run, key="bd2_ingest_btn")
+        run_btn = st.button("Create PAMalytics project", disabled=not can_run, key="bd2_ingest_btn")
         if not can_run:
             st.info("Select a valid **Classification results file or folder** to enable ingestion.")
 
@@ -2605,7 +2702,7 @@ def view_import_results() -> None:
             _ensure_audio_index_ui(proj_path, audio_base, key_prefix="bn", auto_build=False, render_ui=True)
 
         can_run = bn_csv_root and bn_csv_root.exists()
-        run_btn = st.button("Ingest BirdNET results", disabled=not can_run, key="bn_ingest_btn")
+        run_btn = st.button("Create PAMalytics project", disabled=not can_run, key="bn_ingest_btn")
         if not can_run:
             st.info("Select a valid **BirdNET results file or folder** to enable ingestion.")
 
@@ -2723,15 +2820,34 @@ def view_import_results() -> None:
     audio_csv = ws_dir / "audio_paths.csv"
 
     df = st.session_state.import_params.get("df")
-    if results_path and results_path.exists():
+    selected_results_key = str(results_path) if results_path else ""
+    loaded_results_key = st.session_state.get("manual_loaded_results_key", "")
+    if selected_results_key != loaded_results_key:
+        st.session_state["manual_df_linked"] = None
+        st.session_state.pop("manual_link_signature", None)
+        st.session_state["manual_audio_ok"] = False
+
+    if results_path and results_path.exists() and (df is None or selected_results_key != loaded_results_key):
         try:
-            df, input_files = _read_result_inputs(results_path)
+            _load_status = st.empty()
+            _load_bar = st.progress(0.0)
+            def _results_progress(current, done, total, elapsed, attempt, error):
+                frac = (done / total) if total else 0.0
+                _load_bar.progress(max(0.0, min(1.0, frac)))
+                msg = f"Reading classifier results: {done:,} / {total:,} file(s) | elapsed {_format_elapsed(elapsed)}" if total else f"Reading classifier results | elapsed {_format_elapsed(elapsed)}"
+                if error:
+                    msg += f" | cloud read retry {attempt}/{4}"
+                _load_status.info(msg)
+            df, input_files = _read_result_inputs(results_path, progress_callback=_results_progress)
+            _load_bar.progress(1.0)
+            _load_status.success(f"Classifier results loaded: {len(df):,} row(s) from {len(input_files):,} file(s).")
             if df is None or df.empty:
                 st.error("No rows found in the selected results location.")
                 return
             st.session_state.import_params["filename"] = results_path.name
             st.session_state.import_params["input_files"] = [str(p) for p in input_files]
             st.session_state.import_params["df"] = df
+            st.session_state["manual_loaded_results_key"] = selected_results_key
         except Exception as e:
             st.error(f"Could not read results: {e}")
             return
@@ -2786,64 +2902,136 @@ def view_import_results() -> None:
         return
     wav_index = Path(str(audio_index.get("index_db")))
 
-    df_link = df.copy()
-
-    results_root = None
     try:
-        results_root = results_path if results_path and Path(results_path).is_dir() else Path(results_path).parent
+        index_stat = wav_index.stat()
+        index_identity = (str(wav_index), int(index_stat.st_size), int(index_stat.st_mtime_ns))
     except Exception:
-        results_root = None
+        index_identity = (str(wav_index), None, None)
+    manual_link_signature = (
+        selected_results_key,
+        str(audio_base),
+        str(audio_col),
+        index_identity,
+    )
+    cached_linked = st.session_state.get("manual_df_linked")
+    cached_signature = st.session_state.get("manual_link_signature")
 
-    vals = df_link[audio_col].astype(str).str.strip()
-    sources = df_link["_ingest_source_file"].astype(str) if "_ingest_source_file" in df_link.columns else pd.Series([""] * len(df_link), index=df_link.index)
-    cache = {}
-    expanded_rows = []
-    status_box = st.empty()
-    progress_bar = st.progress(0.0) if len(vals) else None
-    started = time.time()
-    total_vals = int(len(vals))
-    matched_count = 0
-    ambiguous_count = 0
-    unmatched_count = 0
-    unique_matched_paths = set()
-    for n, (idx_row, raw_value) in enumerate(vals.items(), start=1):
-        source_value = str(sources.loc[idx_row]) if idx_row in sources.index else ""
-        cache_key = (str(raw_value), source_value)
-        if cache_key not in cache:
-            cache[cache_key] = _resolve_audio_values_sqlite_status(wav_index, str(raw_value), source_file=source_value, results_root=results_root)
-        matches, match_status, match_count, match_method = cache[cache_key]
-        if len(matches) == 1 and match_status == "matched":
-            matched_count += 1
-            unique_matched_paths.add(str(matches[0]))
-        elif str(match_status).startswith("ambiguous_"):
-            ambiguous_count += 1
-        else:
-            unmatched_count += 1
-        base_row = df_link.loc[idx_row].copy()
-        base_row["file_path_original"] = matches[0] if len(matches) == 1 else ""
-        base_row["file_path"] = matches[0] if len(matches) == 1 else ""
-        base_row["_audio_match_status"] = match_status
-        base_row["_audio_match_count"] = int(match_count)
-        base_row["_audio_match_method"] = match_method
-        base_row["_audio_match_value"] = str(raw_value)
-        expanded_rows.append(base_row)
-        if progress_bar is not None:
-            progress_bar.progress(max(0.0, min(1.0, n / max(1, total_vals))))
-        if n == total_vals or n % 100 == 0:
+    if cached_linked is not None and cached_signature == manual_link_signature:
+        df_link = cached_linked
+        st.caption("Audio matching already prepared for these inputs — reusing the existing match while mapping is adjusted.")
+    else:
+        if cached_signature is not None and cached_signature != manual_link_signature:
+            st.session_state["manual_audio_ok"] = False
+        df_link = df.copy()
+
+        results_root = None
+        try:
+            results_root = results_path if results_path and Path(results_path).is_dir() else Path(results_path).parent
+        except Exception:
+            results_root = None
+
+        vals = df_link[audio_col].astype(str).str.strip()
+        sources = df_link["_ingest_source_file"].astype(str) if "_ingest_source_file" in df_link.columns else pd.Series([""] * len(df_link), index=df_link.index)
+
+        contextual_keys = list(zip(vals.astype(str).tolist(), sources.astype(str).tolist()))
+        unique_keys = list(dict.fromkeys(contextual_keys))
+        cache = {}
+        status_box = st.empty()
+        progress_bar = st.progress(0.0) if unique_keys else None
+        started = time.time()
+        total_refs = int(len(unique_keys))
+
+        import sqlite3 as _sqlite3
+        _conn = _sqlite3.connect(f"file:{wav_index}?mode=ro", uri=True)
+        _matched_refs = 0
+        _ambiguous_refs = 0
+        _unmatched_refs = 0
+
+        def _record_match_result(_key, _result):
+            nonlocal _matched_refs, _ambiguous_refs, _unmatched_refs
+            cache[_key] = _result
+            if len(_result[0]) == 1 and _result[1] == "matched":
+                _matched_refs += 1
+            elif str(_result[1]).startswith("ambiguous_"):
+                _ambiguous_refs += 1
+            else:
+                _unmatched_refs += 1
+
+        def _show_matching_progress(_done):
+            if progress_bar is not None:
+                progress_bar.progress(max(0.0, min(1.0, _done / max(1, total_refs))))
             elapsed = time.time() - started
-            rate = (n / elapsed) if elapsed > 0 else 0.0
-            remaining = ((total_vals - n) / rate) if rate > 0 and n < total_vals else None
+            rate = (_done / elapsed) if elapsed > 0 else 0.0
+            remaining = ((total_refs - _done) / rate) if rate > 0 and _done < total_refs else None
             msg = (
-                f"Matching detections to indexed audio: {n:,} / {total_vals:,} | "
-                f"matched {matched_count:,} | ambiguous {ambiguous_count:,} | unmatched {unmatched_count:,} | "
-                f"unique files {len(unique_matched_paths):,} | elapsed {_format_elapsed(elapsed)}"
+                f"Matching unique audio references: {_done:,} / {total_refs:,} | "
+                f"matched {_matched_refs:,} | ambiguous {_ambiguous_refs:,} | unmatched {_unmatched_refs:,} | "
+                f"{len(df_link):,} detection row(s) | elapsed {_format_elapsed(elapsed)}"
             )
             if remaining is not None and remaining >= 1:
                 msg += f" | approx remaining {_format_elapsed(remaining)}"
             status_box.info(msg)
 
-    df_link = pd.DataFrame(expanded_rows).reset_index(drop=True)
-    df_link["file_key"] = df_link["file_path"].astype(str).map(make_file_key)
+        try:
+            bare_keys = []
+            general_keys = []
+            for _key in unique_keys:
+                _raw = _pa_clean_value(_key[0])
+                if _raw and not _is_path_like_audio_ref(_raw) and Path(_raw).suffix == "":
+                    bare_keys.append(_key)
+                else:
+                    general_keys.append(_key)
+
+            if bare_keys:
+                _stems = list(dict.fromkeys(_pa_clean_value(k[0]).lower() for k in bare_keys))
+                _stem_paths = {stem: [] for stem in _stems}
+                _batch_size = 500
+                for _start in range(0, len(_stems), _batch_size):
+                    _batch = _stems[_start:_start + _batch_size]
+                    _marks = ",".join(["?"] * len(_batch))
+                    _rows = _conn.execute(
+                        f"SELECT stem_lc, path FROM audio_files WHERE stem_lc IN ({_marks})",
+                        tuple(_batch),
+                    ).fetchall()
+                    for _stem, _path in _rows:
+                        if _stem in _stem_paths and _path and _path not in _stem_paths[_stem]:
+                            _stem_paths[_stem].append(str(_path))
+
+                for _key in bare_keys:
+                    _stem = _pa_clean_value(_key[0]).lower()
+                    _matches = _stem_paths.get(_stem, [])
+                    if _matches:
+                        _result = _classify_audio_index_matches(_matches, "stem")
+                    else:
+                        _result = ([], "unmatched_filename", 0, "filename")
+                    _record_match_result(_key, _result)
+                _show_matching_progress(len(bare_keys))
+
+            _offset = len(bare_keys)
+            for _i, (raw_value, source_value) in enumerate(general_keys, start=1):
+                _result = _resolve_audio_values_sqlite_status(
+                    wav_index, raw_value, source_file=source_value, results_root=results_root, conn=_conn
+                )
+                _record_match_result((raw_value, source_value), _result)
+                _done = _offset + _i
+                if _done == total_refs or _i % 100 == 0:
+                    _show_matching_progress(_done)
+        finally:
+            _conn.close()
+
+        resolved = [cache[k] for k in contextual_keys]
+        paths = [r[0][0] if len(r[0]) == 1 else "" for r in resolved]
+        df_link["file_path_original"] = paths
+        df_link["file_path"] = paths
+        df_link["_audio_match_status"] = [r[1] for r in resolved]
+        df_link["_audio_match_count"] = [int(r[2]) for r in resolved]
+        df_link["_audio_match_method"] = [r[3] for r in resolved]
+        df_link["_audio_match_value"] = vals.astype(str).tolist()
+        df_link = df_link.reset_index(drop=True)
+        df_link["file_key"] = df_link["file_path"].astype(str).map(make_file_key)
+
+        st.session_state["manual_df_linked"] = df_link
+        st.session_state["manual_link_signature"] = manual_link_signature
 
     matched_mask = df_link["file_path"].notna() & df_link["file_path"].astype(str).str.strip().ne("")
     total_rows = int(len(df_link))
@@ -2879,14 +3067,7 @@ def view_import_results() -> None:
 
     st.session_state["manual_df_linked"] = df_link
 
-    proceed = st.checkbox(
-        "Looks good — continue to column mapping",
-        value=st.session_state.get("manual_audio_ok", False),
-        key="manual_audio_ok"
-    )
-    if not proceed:
-        return
-
+    st.session_state["manual_audio_ok"] = True
     st.subheader("2) Map and normalise to the canonical schema")
 
     df_av = st.session_state["manual_df_linked"]
@@ -2924,7 +3105,7 @@ def view_import_results() -> None:
     st.markdown("**Presence label → `presence_label`**")
     label_mode = st.session_state.import_params.get("label_mode", "binary_presence_column")
     label_mode = st.radio(
-        "",
+        "Label interpretation",
         options=["binary_presence_column", "use_label_column"],
         index=0 if label_mode == "binary_presence_column" else 1,
         format_func=lambda x: "Binary presence column (0/1, true/false, yes/no…)" if x == "binary_presence_column" else "Use existing label column",
@@ -3097,7 +3278,7 @@ def view_import_results() -> None:
         st.subheader("4) Validate & edit the final mapped data (canonical)")
         edited = st.data_editor(norm, width='stretch', num_rows="dynamic", key="norm_editor")
 
-        if _btn("Save normalised copy", key="save_norm_btn"):
+        if _btn("Create PAMalytics project", key="save_norm_btn"):
             out_dir = project_path(proj_path, "data_normalised")
             out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -3173,29 +3354,89 @@ def view_import_results() -> None:
                 _orig = out_df["file_path_original"].astype(str).fillna("")
                 _uniq = _orig.unique()
                 _rel_map = {}
-                for _p0 in _uniq:
+                _stage_status = st.empty()
+                _stage_bar = st.progress(0.0) if len(_uniq) else None
+                _stage_started = time.time()
+                _stage_total = int(len(_uniq))
+                _stage_failed = 0
+                _stage_completed_bytes = 0
+                _stage_workers = min(8, max(1, _stage_total))
+
+                def _fmt_stage_bytes(_n):
+                    _n = float(max(0, _n or 0))
+                    for _unit in ("B", "KB", "MB", "GB", "TB"):
+                        if _n < 1024.0 or _unit == "TB":
+                            return f"{_n:.1f} {_unit}" if _unit != "B" else f"{int(_n):,} B"
+                        _n /= 1024.0
+
+                def _stage_manual_one(_p0):
                     _p0s = str(_p0).strip()
                     if not _p0s:
-                        _rel_map[_p0] = ""
-                        continue
+                        return _p0, "", "failed", 0
 
-                    # If a non-absolute path already exists inside the project, keep it as-is.
                     _cand_in_proj = resolve_project_path(proj_path, _p0s)
                     if (not _is_abs_like(_p0s)) and _cand_in_proj.exists():
                         try:
-                            _rel_map[_p0] = _cand_in_proj.relative_to(proj_path.resolve()).as_posix()
+                            _rel = _cand_in_proj.relative_to(proj_path.resolve()).as_posix()
                         except Exception:
-                            _rel_map[_p0] = _p0s
-                        continue
+                            _rel = _p0s
+                        try:
+                            _size = int(_cand_in_proj.stat().st_size)
+                        except Exception:
+                            _size = 0
+                        return _p0, _rel, "skipped", _size
 
                     _src = resolve_input_audio_path(audio_root, _p0s)
-                    if _src and _src.exists():
-                        _rel = stage_audio_into_project(
-                            proj_path, _src, dest_root=audio_dest_root, audio_root=audio_root
-                        )
+                    if not _src or not _src.exists():
+                        return _p0, "", "failed", 0
+                    try:
+                        _size = int(Path(_src).stat().st_size)
+                    except Exception:
+                        _size = 0
+                    _rel = stage_audio_into_project(
+                        proj_path, _src, dest_root=audio_dest_root, audio_root=audio_root
+                    )
+                    return _p0, _rel, ("copied" if _rel else "failed"), _size
+
+                _stage_status.info(
+                    f"Copying project audio locally: 0 / {_stage_total:,} file(s) | "
+                    f"{_stage_workers} concurrent workers | failed 0 | elapsed 00:00"
+                )
+
+                _futures = {}
+                with ThreadPoolExecutor(max_workers=_stage_workers, thread_name_prefix="pa-manual-audio-stage") as _executor:
+                    for _p0 in _uniq:
+                        _future = _executor.submit(_stage_manual_one, _p0)
+                        _futures[_future] = _p0
+
+                    for _stage_n, _future in enumerate(as_completed(_futures), start=1):
+                        _p0 = _futures[_future]
+                        try:
+                            _p0, _rel, _outcome, _size = _future.result()
+                        except Exception:
+                            _rel, _outcome, _size = "", "failed", 0
                         _rel_map[_p0] = _rel
-                    else:
-                        _rel_map[_p0] = ""
+                        if _outcome == "failed":
+                            _stage_failed += 1
+                        else:
+                            _stage_completed_bytes += max(0, int(_size or 0))
+
+                        _elapsed = time.time() - _stage_started
+                        if _stage_bar is not None:
+                            _stage_bar.progress(max(0.0, min(1.0, _stage_n / max(1, _stage_total))))
+                        _rate_files = (_stage_n / _elapsed) if _elapsed > 0 else 0.0
+                        _remaining = ((_stage_total - _stage_n) / _rate_files) if _rate_files > 0 and _stage_n < _stage_total else None
+                        _rate_bytes = (_stage_completed_bytes / _elapsed) if _elapsed > 0 and _stage_completed_bytes > 0 else 0.0
+                        _msg = (
+                            f"Copying project audio locally: {_stage_n:,} / {_stage_total:,} file(s) | "
+                            f"{_fmt_stage_bytes(_stage_completed_bytes)} completed | "
+                            f"{_fmt_stage_bytes(_rate_bytes)}/s | "
+                            f"{_stage_workers} concurrent workers | failed {_stage_failed:,} | "
+                            f"elapsed {_format_elapsed(_elapsed)}"
+                        )
+                        if _remaining is not None and _remaining >= 1:
+                            _msg += f" | approx remaining {_format_elapsed(_remaining)}"
+                        _stage_status.info(_msg)
 
                 out_df["file_path"] = _orig.map(_rel_map).fillna("")
                 out_df = _pa_rebuild_file_keys_and_detection_ids(out_df)
@@ -3299,7 +3540,8 @@ def view_import_results() -> None:
             st.session_state.import_last_saved = str(out_csv)
             set_status(proj_path, "import_results", "ready")
             st.session_state["manual_ingest_ready"] = True
-            st.success(f"Saved normalised detections to: `{out_csv}`")
+            st.session_state["manual_just_created"] = True
+            st.rerun()
 
     ok_to_launch = False
     if norm_csv.exists():
@@ -3324,6 +3566,9 @@ def view_import_results() -> None:
                 )
         except Exception:
             ok_to_launch = False
+
+    if st.session_state.pop("manual_just_created", False):
+        st.success("PAMalytics project created successfully.")
 
     have_norm_audio = norm_csv.exists() and audio_csv.exists()
     if have_norm_audio:

@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional, List, Dict, Tuple, Any, Callable
 import os
+import time
 import sqlite3
 import numpy as np
 import pandas as pd
@@ -13,18 +14,44 @@ from schema import CORE_COLUMNS as PAMA_CORE, LEGACY_MAP, normalise_schema, drop
 RECOMMENDED: List[str] = ["recorder_id", "date_time"]
 
 
-def _read_all_csvs(root: Path) -> pd.DataFrame:
+def _read_csv_with_retry(path: Path, attempts: int = 4, progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None, file_no: int = 1, total_files: int = 1) -> pd.DataFrame:
+    last_error: Optional[Exception] = None
+    for attempt in range(1, max(1, int(attempts)) + 1):
+        try:
+            with Path(path).open("rb") as fh:
+                fh.read(1)
+            return pd.read_csv(path, low_memory=False)
+        except (TimeoutError, OSError) as exc:
+            last_error = exc
+            _progress(
+                progress_callback, stage="Reading results files", processed=max(0, file_no - 1), total=total_files,
+                current_file=Path(path).name, retry=attempt, retries=attempts, detail=str(exc),
+            )
+            if attempt < attempts:
+                time.sleep(min(4.0, 0.75 * attempt))
+        except Exception:
+            raise
+    if last_error is not None:
+        raise last_error
+    return pd.DataFrame()
+
+
+def _read_all_csvs(root: Path, progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None) -> pd.DataFrame:
     parts: List[pd.DataFrame] = []
     root = Path(root)
     paths = [root] if root.is_file() and root.suffix.lower() == ".csv" else list(root.rglob("*.csv"))
-    for p in paths:
+    total_files = len(paths)
+    for n, p in enumerate(paths, start=1):
+        _progress(progress_callback, stage="Reading results files", processed=n - 1, total=total_files, current_file=p.name)
         try:
-            df = pd.read_csv(p, low_memory=False)
+            df = _read_csv_with_retry(p, progress_callback=progress_callback, file_no=n, total_files=total_files)
             if not df.empty:
                 df["_source_csv"] = str(p)
                 parts.append(df)
-        except Exception:
+        except Exception as exc:
+            _progress(progress_callback, stage="Results file failed", processed=n, total=total_files, current_file=p.name, detail=str(exc))
             continue
+        _progress(progress_callback, stage="Reading results files", processed=n, total=total_files, current_file=p.name)
     return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
 
 
@@ -202,11 +229,14 @@ def _attach_paths_by_filename(df: pd.DataFrame, audio_root: Optional[Path]) -> p
     return out.fillna("")
 
 
-def _audio_index_query_paths(index_db: Path, raw_sql: str, params: Tuple[Any, ...]) -> List[str]:
+def _audio_index_query_paths(index_db: Path, raw_sql: str, params: Tuple[Any, ...], conn: Optional[sqlite3.Connection] = None) -> List[str]:
     if not index_db or not Path(index_db).exists():
         return []
     try:
-        with sqlite3.connect(str(index_db)) as conn:
+        if conn is None:
+            with sqlite3.connect(f"file:{Path(index_db)}?mode=ro", uri=True) as local_conn:
+                rows = local_conn.execute(raw_sql, params).fetchall()
+        else:
             rows = conn.execute(raw_sql, params).fetchall()
         out = []
         seen = set()
@@ -229,7 +259,7 @@ def _classify_matches(matches: List[str], method: str) -> Tuple[List[str], str, 
     return [], "unmatched", 0, method
 
 
-def _match_audio_paths_sqlite_status(index_db: Path, value: str) -> Tuple[List[str], str, int, str]:
+def _match_audio_paths_sqlite_status(index_db: Path, value: str, conn: Optional[sqlite3.Connection] = None) -> Tuple[List[str], str, int, str]:
     raw = _safe_path_str(value)
     if not raw:
         return [], "missing_audio_reference", 0, "none"
@@ -241,32 +271,32 @@ def _match_audio_paths_sqlite_status(index_db: Path, value: str) -> Tuple[List[s
     path_like = _is_path_like(raw)
 
     if raw.startswith("\\") or raw.startswith("//") or (len(raw) >= 3 and raw[1] == ":" and raw[2] in ("\\", "/")) or Path(raw).is_absolute():
-        matches = _audio_index_query_paths(index_db, "SELECT path FROM audio_files WHERE path_lc = ?", (raw_norm.lower(),))
+        matches = _audio_index_query_paths(index_db, "SELECT path FROM audio_files WHERE path_lc = ?", (raw_norm.lower(),), conn=conn)
         if matches:
             return _classify_matches(matches, "exact_path")
 
     if raw_lc:
-        matches = _audio_index_query_paths(index_db, "SELECT path FROM audio_files WHERE rel_lc = ?", (raw_lc,))
+        matches = _audio_index_query_paths(index_db, "SELECT path FROM audio_files WHERE rel_lc = ?", (raw_lc,), conn=conn)
         if matches:
             return _classify_matches(matches, "relative_path")
         if "/" in raw_lc:
-            matches = _audio_index_query_paths(index_db, "SELECT path FROM audio_files WHERE rel_lc = ? OR rel_lc LIKE ?", (raw_lc, "%/" + raw_lc))
+            matches = _audio_index_query_paths(index_db, "SELECT path FROM audio_files WHERE rel_lc = ? OR rel_lc LIKE ?", (raw_lc, "%/" + raw_lc), conn=conn)
             if matches:
                 return _classify_matches(matches, "path_suffix")
 
     if path_like:
         for cand in _raw_path_tail_candidates(raw, min_parts=2):
-            matches = _audio_index_query_paths(index_db, "SELECT path FROM audio_files WHERE rel_lc = ? OR rel_lc LIKE ?", (cand, "%/" + cand))
+            matches = _audio_index_query_paths(index_db, "SELECT path FROM audio_files WHERE rel_lc = ? OR rel_lc LIKE ?", (cand, "%/" + cand), conn=conn)
             if matches:
                 return _classify_matches(matches, "path_tail")
 
     if raw_name_lc:
-        matches = _audio_index_query_paths(index_db, "SELECT path FROM audio_files WHERE filename_lc = ?", (raw_name_lc,))
+        matches = _audio_index_query_paths(index_db, "SELECT path FROM audio_files WHERE filename_lc = ?", (raw_name_lc,), conn=conn)
         if matches:
             return _classify_matches(matches, "filename")
 
     if raw_stem_lc:
-        matches = _audio_index_query_paths(index_db, "SELECT path FROM audio_files WHERE stem_lc = ?", (raw_stem_lc,))
+        matches = _audio_index_query_paths(index_db, "SELECT path FROM audio_files WHERE stem_lc = ?", (raw_stem_lc,), conn=conn)
         if matches:
             return _classify_matches(matches, "stem")
 
@@ -282,45 +312,52 @@ def _expand_rows_by_audio_index(df: pd.DataFrame, audio_index_db: Optional[Path]
     if df.empty or not audio_index_db or not Path(audio_index_db).exists() or "file_id" not in df.columns:
         return df
 
+    out = df.copy()
+    fids = out["file_id"].map(_safe_path_str)
+    unique_fids = list(dict.fromkeys(fids.tolist()))
     cache: Dict[str, Tuple[List[str], str, int, str]] = {}
-    expanded = []
-    total = int(len(df))
-    matched_count = 0
-    ambiguous_count = 0
-    unmatched_count = 0
+    total_refs = len(unique_fids)
+    matched_refs = ambiguous_refs = unmatched_refs = 0
     unique_matched_paths = set()
-    for n, (_, row) in enumerate(df.iterrows(), start=1):
-        fid = _safe_path_str(row.get("file_id", ""))
-        if fid not in cache:
-            cache[fid] = _match_audio_paths_sqlite_status(Path(audio_index_db), fid)
-        matches, status, match_count, method = cache[fid]
-        if len(matches) == 1 and status == "matched":
-            matched_count += 1
-            unique_matched_paths.add(str(matches[0]))
-        elif str(status).startswith("ambiguous_"):
-            ambiguous_count += 1
-        else:
-            unmatched_count += 1
-        r = row.copy()
-        r["file_path"] = matches[0] if len(matches) == 1 else ""
-        r["_audio_match_status"] = status
-        r["_audio_match_count"] = int(match_count)
-        r["_audio_match_method"] = method
-        r["_audio_match_value"] = fid
-        expanded.append(r)
-        if n == total or n % 100 == 0:
-            _progress(
-                progress_callback,
-                stage="Matching detections to indexed audio",
-                processed=n,
-                total=total,
-                matched=matched_count,
-                ambiguous=ambiguous_count,
-                unmatched=unmatched_count,
-                unique_files=len(unique_matched_paths),
-            )
 
-    return pd.DataFrame(expanded).reset_index(drop=True) if expanded else df.head(0).copy()
+    with sqlite3.connect(f"file:{Path(audio_index_db)}?mode=ro", uri=True) as conn:
+        for n, fid in enumerate(unique_fids, start=1):
+            result = _match_audio_paths_sqlite_status(Path(audio_index_db), fid, conn=conn)
+            cache[fid] = result
+            matches, status, _, _ = result
+            if len(matches) == 1 and status == "matched":
+                matched_refs += 1
+                unique_matched_paths.add(str(matches[0]))
+            elif str(status).startswith("ambiguous_"):
+                ambiguous_refs += 1
+            else:
+                unmatched_refs += 1
+            if n == total_refs or n % 100 == 0:
+                _progress(
+                    progress_callback,
+                    stage="Matching unique audio references",
+                    processed=n, total=total_refs,
+                    matched=matched_refs, ambiguous=ambiguous_refs, unmatched=unmatched_refs,
+                    unique_files=len(unique_matched_paths),
+                )
+
+    results = fids.map(cache)
+    out["file_path"] = results.map(lambda r: r[0][0] if r and len(r[0]) == 1 and r[1] == "matched" else "")
+    out["_audio_match_status"] = results.map(lambda r: r[1] if r else "unmatched")
+    out["_audio_match_count"] = results.map(lambda r: int(r[2]) if r else 0)
+    out["_audio_match_method"] = results.map(lambda r: r[3] if r else "none")
+    out["_audio_match_value"] = fids
+
+    statuses = out["_audio_match_status"].astype(str)
+    row_matched = int(statuses.eq("matched").sum())
+    row_ambiguous = int(statuses.str.startswith("ambiguous_").sum())
+    row_unmatched = int(len(out) - row_matched - row_ambiguous)
+    _progress(
+        progress_callback, stage="Matched detections to indexed audio",
+        processed=int(len(out)), total=int(len(out)), matched=row_matched,
+        ambiguous=row_ambiguous, unmatched=row_unmatched, unique_files=len(unique_matched_paths),
+    )
+    return out.reset_index(drop=True)
 
 
 
@@ -434,7 +471,7 @@ def ingest_batdetect2(
         return pd.DataFrame()
 
     _progress(progress_callback, stage="Reading BatDetect2 CSVs", processed=0, total=None)
-    raw = _read_all_csvs(csv_root)
+    raw = _read_all_csvs(csv_root, progress_callback=progress_callback)
     if raw.empty:
         return raw
     _progress(progress_callback, stage="Reading BatDetect2 CSVs", processed=int(len(raw)), total=int(len(raw)))

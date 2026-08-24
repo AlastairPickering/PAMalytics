@@ -4,7 +4,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional, List, Dict, Tuple, Any, Callable
 import os
+import time
 import re
+import sqlite3
 import numpy as np
 import pandas as pd
 
@@ -14,26 +16,44 @@ RECOMMENDED: List[str] = ["recorder_id", "date_time"]
 
 
 # Helpers
-def _read_all_csvs(root: Path) -> pd.DataFrame:
+def _read_csv_with_retry(path: Path, attempts: int = 4, progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None, file_no: int = 1, total_files: int = 1) -> pd.DataFrame:
+    last_error: Optional[Exception] = None
+    for attempt in range(1, max(1, int(attempts)) + 1):
+        try:
+            with Path(path).open("rb") as fh:
+                fh.read(1)
+            return pd.read_csv(path, low_memory=False)
+        except (TimeoutError, OSError) as exc:
+            last_error = exc
+            _progress(
+                progress_callback, stage="Reading results files", processed=max(0, file_no - 1), total=total_files,
+                current_file=Path(path).name, retry=attempt, retries=attempts, detail=str(exc),
+            )
+            if attempt < attempts:
+                time.sleep(min(4.0, 0.75 * attempt))
+        except Exception:
+            raise
+    if last_error is not None:
+        raise last_error
+    return pd.DataFrame()
+
+
+def _read_all_csvs(root: Path, progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None) -> pd.DataFrame:
     parts: List[pd.DataFrame] = []
     root = Path(root)
-    if root.is_file() and root.suffix.lower() == ".csv":
+    paths = [root] if root.is_file() and root.suffix.lower() == ".csv" else list(root.rglob("*.csv"))
+    total_files = len(paths)
+    for n, p in enumerate(paths, start=1):
+        _progress(progress_callback, stage="Reading results files", processed=n - 1, total=total_files, current_file=p.name)
         try:
-            df = pd.read_csv(root, low_memory=False)
+            df = _read_csv_with_retry(p, progress_callback=progress_callback, file_no=n, total_files=total_files)
             if not df.empty:
-                df["_source_csv"] = str(root)
+                df["_source_csv"] = str(p)
                 parts.append(df)
-        except Exception:
-            pass
-    else:
-        for p in root.rglob("*.csv"):
-            try:
-                df = pd.read_csv(p, low_memory=False)
-                if not df.empty:
-                    df["_source_csv"] = str(p)
-                    parts.append(df)
-            except Exception:
-                continue
+        except Exception as exc:
+            _progress(progress_callback, stage="Results file failed", processed=n, total=total_files, current_file=p.name, detail=str(exc))
+            continue
+        _progress(progress_callback, stage="Reading results files", processed=n, total=total_files, current_file=p.name)
     return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
 
 
@@ -202,12 +222,14 @@ def _raw_path_tail_candidates(raw_value: str, min_parts: int = 2) -> List[str]:
 
 
 
-def _sqlite_query_paths(index_db: Path, sql: str, params: Tuple[object, ...]) -> List[str]:
-    import sqlite3
+def _sqlite_query_paths(index_db: Path, sql: str, params: Tuple[object, ...], conn: Optional[sqlite3.Connection] = None) -> List[str]:
     if not index_db or not Path(index_db).exists():
         return []
     try:
-        with sqlite3.connect(str(index_db)) as conn:
+        if conn is None:
+            with sqlite3.connect(f"file:{Path(index_db)}?mode=ro", uri=True) as local_conn:
+                rows = local_conn.execute(sql, params).fetchall()
+        else:
             rows = conn.execute(sql, params).fetchall()
         return list(dict.fromkeys([str(r[0]) for r in rows if r and _clean_identity_value(r[0])]))
     except Exception:
@@ -228,7 +250,7 @@ def _classify_matches(matches: List[str], method: str) -> Tuple[List[str], str, 
     return [], "unmatched", 0, method
 
 
-def _match_audio_paths_sqlite_status(index_db: Path, raw_value: str, source_csv: str = "", csv_base: Optional[Path] = None) -> Tuple[List[str], str, int, str]:
+def _match_audio_paths_sqlite_status(index_db: Path, raw_value: str, source_csv: str = "", csv_base: Optional[Path] = None, conn: Optional[sqlite3.Connection] = None) -> Tuple[List[str], str, int, str]:
     raw = _clean_identity_value(raw_value)
     if not raw or not index_db or not Path(index_db).exists():
         return [], "missing_audio_reference", 0, "none"
@@ -239,22 +261,22 @@ def _match_audio_paths_sqlite_status(index_db: Path, raw_value: str, source_csv:
     path_like = _is_path_like(raw)
 
     if raw.startswith("\\") or raw.startswith("//") or (len(raw) >= 3 and raw[1] == ":" and raw[2] in ("\\", "/")) or Path(raw).is_absolute():
-        m = _sqlite_query_paths(index_db, "SELECT path FROM audio_files WHERE path_lc = ?", (raw.replace("\\", "/").lower(),))
+        m = _sqlite_query_paths(index_db, "SELECT path FROM audio_files WHERE path_lc = ?", (raw.replace("\\", "/").lower(),), conn=conn)
         if m:
             return _classify_matches(m, "exact_path")
 
-    m = _sqlite_query_paths(index_db, "SELECT path FROM audio_files WHERE rel_lc = ?", (raw_rel_lc,))
+    m = _sqlite_query_paths(index_db, "SELECT path FROM audio_files WHERE rel_lc = ?", (raw_rel_lc,), conn=conn)
     if m:
         return _classify_matches(m, "relative_path")
 
     if "/" in raw_rel_lc:
-        m = _sqlite_query_paths(index_db, "SELECT path FROM audio_files WHERE rel_lc = ? OR rel_lc LIKE ?", (raw_rel_lc, "%/" + raw_rel_lc))
+        m = _sqlite_query_paths(index_db, "SELECT path FROM audio_files WHERE rel_lc = ? OR rel_lc LIKE ?", (raw_rel_lc, "%/" + raw_rel_lc), conn=conn)
         if m:
             return _classify_matches(m, "path_suffix")
 
     if path_like:
         for cand in _raw_path_tail_candidates(raw, min_parts=2):
-            m = _sqlite_query_paths(index_db, "SELECT path FROM audio_files WHERE rel_lc = ? OR rel_lc LIKE ?", (cand, "%/" + cand))
+            m = _sqlite_query_paths(index_db, "SELECT path FROM audio_files WHERE rel_lc = ? OR rel_lc LIKE ?", (cand, "%/" + cand), conn=conn)
             if m:
                 return _classify_matches(m, "path_tail")
 
@@ -266,18 +288,18 @@ def _match_audio_paths_sqlite_status(index_db: Path, raw_value: str, source_csv:
             except Exception:
                 rel_folder = source_folder.name
             for cand in _path_suffix_candidates(rel_folder, raw_name_lc):
-                m = _sqlite_query_paths(index_db, "SELECT path FROM audio_files WHERE rel_lc = ? OR rel_lc LIKE ?", (cand, "%/" + cand))
+                m = _sqlite_query_paths(index_db, "SELECT path FROM audio_files WHERE rel_lc = ? OR rel_lc LIKE ?", (cand, "%/" + cand), conn=conn)
                 if m:
                     return _classify_matches(m, "csv_relative_path")
         except Exception:
             pass
 
-    m = _sqlite_query_paths(index_db, "SELECT path FROM audio_files WHERE filename_lc = ?", (raw_name_lc,))
+    m = _sqlite_query_paths(index_db, "SELECT path FROM audio_files WHERE filename_lc = ?", (raw_name_lc,), conn=conn)
     if m:
         return _classify_matches(m, "filename")
 
     if raw_stem_lc:
-        m = _sqlite_query_paths(index_db, "SELECT path FROM audio_files WHERE stem_lc = ?", (raw_stem_lc,))
+        m = _sqlite_query_paths(index_db, "SELECT path FROM audio_files WHERE stem_lc = ?", (raw_stem_lc,), conn=conn)
         if m:
             return _classify_matches(m, "stem")
 
@@ -540,7 +562,7 @@ def _audio_reference_candidates_for_row(row: pd.Series, path_cols: List[str], fi
     return values
 
 
-def _resolve_audio_candidates_sqlite_status(index_db: Path, values: List[str], source_csv: str = "", csv_base: Optional[Path] = None) -> Tuple[List[str], str, int, str, str]:
+def _resolve_audio_candidates_sqlite_status(index_db: Path, values: List[str], source_csv: str = "", csv_base: Optional[Path] = None, conn: Optional[sqlite3.Connection] = None) -> Tuple[List[str], str, int, str, str]:
     first_ambiguous: Optional[Tuple[List[str], str, int, str, str]] = None
     first_unmatched: Optional[Tuple[List[str], str, int, str, str]] = None
     for raw_value in values:
@@ -608,7 +630,6 @@ def _expand_rows_by_audio_matches(
 
     path_cols = _audio_path_cols(df)
     filename_cols = _audio_filename_cols(df)
-
     csv_base = None
     if csv_root is not None:
         try:
@@ -617,50 +638,67 @@ def _expand_rows_by_audio_matches(
         except Exception:
             csv_base = None
 
-    rows = []
-    cache: Dict[Tuple[str, str], Tuple[List[str], str, int, str, str]] = {}
-    total = int(len(df))
-    matched_count = 0
-    ambiguous_count = 0
-    unmatched_count = 0
-    unique_matched_paths = set()
-    for n, (idx, row) in enumerate(df.iterrows(), start=1):
+    key_series = []
+    key_inputs: Dict[Tuple[str, str], Tuple[List[str], str]] = {}
+    for _, row in df.iterrows():
         source_csv = str(row.get("_source_csv", ""))
         candidate_values = _audio_reference_candidates_for_row(row, path_cols, filename_cols)
         key = ("||".join(candidate_values), source_csv)
-        if key not in cache:
-            if use_sqlite:
-                cache[key] = _resolve_audio_candidates_sqlite_status(Path(audio_index_db), candidate_values, source_csv=source_csv, csv_base=csv_base)
-            else:
-                cache[key] = _resolve_audio_candidates_frame_status(mp, candidate_values, source_csv=source_csv, csv_base=csv_base)
-        matches, status, match_count, method, used_value = cache[key]
-        if len(matches) == 1 and status == "matched":
-            matched_count += 1
-            unique_matched_paths.add(str(matches[0]))
-        elif str(status).startswith("ambiguous_"):
-            ambiguous_count += 1
-        else:
-            unmatched_count += 1
-        r = row.copy()
-        r["file_path"] = matches[0] if len(matches) == 1 else ""
-        r["_audio_match_status"] = status
-        r["_audio_match_count"] = int(match_count)
-        r["_audio_match_method"] = method
-        r["_audio_match_value"] = used_value
-        rows.append(r)
-        if n == total or n % 100 == 0:
-            _progress(
-                progress_callback,
-                stage="Matching detections to indexed audio",
-                processed=n,
-                total=total,
-                matched=matched_count,
-                ambiguous=ambiguous_count,
-                unmatched=unmatched_count,
-                unique_files=len(unique_matched_paths),
-            )
+        key_series.append(key)
+        if key not in key_inputs:
+            key_inputs[key] = (candidate_values, source_csv)
 
-    return pd.DataFrame(rows).reset_index(drop=True)
+    cache: Dict[Tuple[str, str], Tuple[List[str], str, int, str, str]] = {}
+    total_refs = len(key_inputs)
+    matched_refs = ambiguous_refs = unmatched_refs = 0
+    unique_matched_paths = set()
+
+    conn = sqlite3.connect(f"file:{Path(audio_index_db)}?mode=ro", uri=True) if use_sqlite else None
+    try:
+        for n, (key, (candidate_values, source_csv)) in enumerate(key_inputs.items(), start=1):
+            if use_sqlite:
+                result = _resolve_audio_candidates_sqlite_status(
+                    Path(audio_index_db), candidate_values, source_csv=source_csv, csv_base=csv_base, conn=conn
+                )
+            else:
+                result = _resolve_audio_candidates_frame_status(mp, candidate_values, source_csv=source_csv, csv_base=csv_base)
+            cache[key] = result
+            matches, status, _, _, _ = result
+            if len(matches) == 1 and status == "matched":
+                matched_refs += 1
+                unique_matched_paths.add(str(matches[0]))
+            elif str(status).startswith("ambiguous_"):
+                ambiguous_refs += 1
+            else:
+                unmatched_refs += 1
+            if n == total_refs or n % 100 == 0:
+                _progress(
+                    progress_callback, stage="Matching unique audio references",
+                    processed=n, total=total_refs, matched=matched_refs, ambiguous=ambiguous_refs,
+                    unmatched=unmatched_refs, unique_files=len(unique_matched_paths),
+                )
+    finally:
+        if conn is not None:
+            conn.close()
+
+    out = df.copy()
+    results = pd.Series(key_series, index=out.index).map(cache)
+    out["file_path"] = results.map(lambda r: r[0][0] if r and len(r[0]) == 1 and r[1] == "matched" else "")
+    out["_audio_match_status"] = results.map(lambda r: r[1] if r else "unmatched")
+    out["_audio_match_count"] = results.map(lambda r: int(r[2]) if r else 0)
+    out["_audio_match_method"] = results.map(lambda r: r[3] if r else "none")
+    out["_audio_match_value"] = results.map(lambda r: r[4] if r else "")
+
+    statuses = out["_audio_match_status"].astype(str)
+    row_matched = int(statuses.eq("matched").sum())
+    row_ambiguous = int(statuses.str.startswith("ambiguous_").sum())
+    row_unmatched = int(len(out) - row_matched - row_ambiguous)
+    _progress(
+        progress_callback, stage="Matched detections to indexed audio",
+        processed=int(len(out)), total=int(len(out)), matched=row_matched, ambiguous=row_ambiguous,
+        unmatched=row_unmatched, unique_files=len(unique_matched_paths),
+    )
+    return out.reset_index(drop=True)
 
 
 
@@ -767,7 +805,7 @@ def ingest_birdnet(
         return pd.DataFrame()
 
     _progress(progress_callback, stage="Reading BirdNET CSVs", processed=0, total=None)
-    raw = _read_all_csvs(csv_root)
+    raw = _read_all_csvs(csv_root, progress_callback=progress_callback)
     if raw.empty:
         return raw
     _progress(progress_callback, stage="Reading BirdNET CSVs", processed=int(len(raw)), total=int(len(raw)))
