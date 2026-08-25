@@ -622,6 +622,7 @@ ss.setdefault("pa_page", "Dashboard")
 ss.setdefault("import_params", {})
 ss.setdefault("import_preview_ready", False)
 ss.setdefault("import_preview_df", None)
+ss.setdefault("import_preview_signature", None)
 ss.setdefault("import_last_saved", None)
 ss.setdefault("import_notes", [])
 
@@ -631,6 +632,7 @@ if ss.get("import_project") != ss.get("current_project"):
     ss["import_params"] = {}
     ss["import_preview_ready"] = False
     ss["import_preview_df"] = None
+    ss["import_preview_signature"] = None
     ss["import_last_saved"] = None
     ss["import_notes"] = []
     ss["manual_df_linked"] = None
@@ -2826,6 +2828,13 @@ def view_import_results() -> None:
         st.session_state["manual_df_linked"] = None
         st.session_state.pop("manual_link_signature", None)
         st.session_state["manual_audio_ok"] = False
+        st.session_state["import_preview_ready"] = False
+        st.session_state["import_preview_df"] = None
+        st.session_state["import_preview_signature"] = None
+        st.session_state.import_params["presence_col"] = "—"
+        st.session_state.import_params["species_name"] = "—"
+        st.session_state.pop("presence_col_select", None)
+        st.session_state.pop("select_species_name", None)
 
     if results_path and results_path.exists() and (df is None or selected_results_key != loaded_results_key):
         try:
@@ -2857,11 +2866,9 @@ def view_import_results() -> None:
         return
 
     if df is not None:
-        st.write("Preview (first 20 rows):")
-        st.dataframe(df.head(20), width='stretch')
         input_files = st.session_state.import_params.get("input_files", [])
         if input_files:
-            st.caption(f"Loaded {len(input_files):,} result file(s).")
+            st.caption(f"Loaded {len(df):,} detection row(s) from {len(input_files):,} result file(s).")
 
     st.subheader("1) Link each detection to an audio file")
 
@@ -3038,42 +3045,14 @@ def view_import_results() -> None:
     matched_rows = int(matched_mask.sum())
     pct = (100.0 * matched_rows / total_rows) if total_rows else 0.0
 
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Detections", f"{total_rows:,}")
-    c2.metric("Detections with audio", f"{matched_rows:,}")
-    c3.metric("Audio coverage", f"{pct:.1f}%")
-    _show_audio_match_summary(df_link, label="Manual audio matching")
-
-    preview_cols = []
-    if audio_col in df_link.columns:
-        preview_cols.append(audio_col)
-    if "file_path" in df_link.columns and "file_path" not in preview_cols:
-        preview_cols.append("file_path")
-    if not preview_cols:
-        preview_cols = ["file_path"]
-
-    with st.expander("Linked preview (sample)", expanded=True):
-        sample_matched = df_link.loc[matched_mask, preview_cols].head(30)
-        if not sample_matched.empty:
-            st.caption("Matched rows (first 30)")
-            st.dataframe(sample_matched, width='stretch')
-        else:
-            st.caption("No matched rows in sample. (You can still see unmatched below.)")
-
-    if matched_rows < total_rows:
-        with st.expander("Unmatched rows (sample)"):
-            sample_unmatched = df_link.loc[~matched_mask, preview_cols].head(30)
-            st.dataframe(sample_unmatched, width='stretch')
+    st.metric("Detections matched to audio", f"{matched_rows:,}")
 
     st.session_state["manual_df_linked"] = df_link
 
     st.session_state["manual_audio_ok"] = True
-    st.subheader("2) Map and normalise to the canonical schema")
+    st.subheader("2) Define the detection labels")
 
-    df_av = st.session_state["manual_df_linked"]
-    st.write("Preview (first 20 rows from linked table):")
-    st.dataframe(df_av.head(20), width='stretch')
-
+    df_av = df_link.loc[matched_mask].copy().reset_index(drop=True)
     cols_av = list(df_av.columns)
 
     def _auto_guess_av(colnames: List[str], candidates: List[str]) -> Optional[str]:
@@ -3086,8 +3065,7 @@ def view_import_results() -> None:
     file_id_guess = _auto_guess_av(cols_av, ["file_id", "source_file", "filename", "file", "filepath", "path_in_results"])
     start_guess = _auto_guess_av(cols_av, ["detection_start_s", "start", "start_s", "start_time_s", "begin", "onset", "start_sec"])
     end_guess = _auto_guess_av(cols_av, ["detection_end_s", "end", "end_s", "end_time_s", "offset", "end_sec", "duration", "duration_s"])
-    class_guess = _auto_guess_av(cols_av, ["species_name", "class", "species", "label", "prediction", "taxon"])
-    score_guess = _auto_guess_av(cols_av, ["detection_probability", "score", "prob", "probability", "class_prob", "det_prob"])
+    score_guess = _auto_guess_av(cols_av, ["detection_probability", "score", "prob", "probability", "class_prob", "det_prob", "confidence"])
 
     def pick(name_key: str, label: str, default: Optional[str]):
         current = st.session_state.import_params.get(name_key, "—")
@@ -3098,99 +3076,123 @@ def view_import_results() -> None:
         st.session_state.import_params[name_key] = choice
         return choice
 
-    file_id_col = pick("file_id", "Detector file id → `file_id`", file_id_guess)
-    start_col = pick("start_s", "Start time (seconds) → `detection_start_s`", start_guess)
-    end_col = pick("end_s", "End time or duration → `detection_end_s`", end_guess)
+    auto_mapping_complete = all(v in cols_av for v in [file_id_guess, start_guess, end_guess, score_guess])
+    if auto_mapping_complete:
+        file_id_col = file_id_guess
+        start_col = start_guess
+        end_col = end_guess
+        prob_col = score_guess
+        st.session_state.import_params.update({
+            "file_id": file_id_col,
+            "start_s": start_col,
+            "end_s": end_col,
+            "score": prob_col,
+        })
+    else:
+        with st.expander("File, time and confidence fields", expanded=True):
+            file_id_col = pick("file_id", "Recording identifier", file_id_guess)
+            start_col = pick("start_s", "Detection start (seconds)", start_guess)
+            end_col = pick("end_s", "Detection end or duration", end_guess)
+            prob_col = pick("score", "Confidence / probability", score_guess)
 
-    st.markdown("**Presence label → `presence_label`**")
-    label_mode = st.session_state.import_params.get("label_mode", "binary_presence_column")
-    label_mode = st.radio(
-        "Label interpretation",
-        options=["binary_presence_column", "use_label_column"],
-        index=0 if label_mode == "binary_presence_column" else 1,
-        format_func=lambda x: "Binary presence column (0/1, true/false, yes/no…)" if x == "binary_presence_column" else "Use existing label column",
-        horizontal=False,
-        key="label_mode_radio"
+    presence_source = st.session_state.import_params.get("presence_source", "column")
+    presence_source = st.radio(
+        "Presence",
+        options=["column", "confidence"],
+        index=0 if presence_source == "column" else 1,
+        format_func=lambda x: "Presence column" if x == "column" else "Confidence threshold",
+        horizontal=True,
+        key="manual_presence_source",
     )
+    st.session_state.import_params["presence_source"] = presence_source
+    label_mode = "binary_presence_column" if presence_source == "column" else "confidence_threshold"
     st.session_state.import_params["label_mode"] = label_mode
 
     presence_col = st.session_state.import_params.get("presence_col", "—")
-    label_col = st.session_state.import_params.get("label_col", "—")
+    positive_tokens = st.session_state.import_params.get("positive_tokens", "1,true,yes,present,y,t")
+    confidence_threshold = float(st.session_state.import_params.get("confidence_threshold", 0.5))
 
-    if label_mode == "binary_presence_column":
-        guess_presence = _auto_guess_av(cols_av, ["presence_label", "present", "presence", "detected", "label", "class", "species"])
-        if presence_col == "—" and guess_presence in cols_av:
-            presence_col = guess_presence
-        presence_col = st.selectbox("Presence column", ["—"] + cols_av,
-                                    index=(cols_av.index(presence_col) + 1) if presence_col in cols_av else 0,
-                                    key="presence_col_select")
-        positive_tokens = st.text_input("Values that mean 'present' (comma-separated)", value=st.session_state.import_params.get("positive_tokens", "1,true,yes,present,y,t"), key="positive_tokens")
-        positive_label_name = st.text_input("Canonical label for present detections", value=st.session_state.import_params.get("positive_label_name", "present"), key="positive_label_name")
-        keep_only_present = st.checkbox("Keep only present rows (detections only)", value=bool(st.session_state.import_params.get("keep_only_present", True)), key="keep_only_present")
+    if presence_source == "column":
+        presence_col = st.selectbox(
+            "Presence / absence column",
+            ["—"] + cols_av,
+            index=(cols_av.index(presence_col) + 1) if presence_col in cols_av else 0,
+            key="presence_col_select",
+        )
+        positive_tokens = st.text_input(
+            "Values meaning present",
+            value=positive_tokens,
+            key="positive_tokens",
+        )
         st.session_state.import_params.update({
             "presence_col": presence_col,
             "positive_tokens": positive_tokens,
-            "positive_label_name": positive_label_name,
-            "keep_only_present": bool(keep_only_present),
         })
     else:
-        label_col_guess = _auto_guess_av(cols_av, ["presence_label", "label", "species", "class", "prediction"])
-        if label_col == "—" and label_col_guess in cols_av:
-            label_col = label_col_guess
-        label_col = st.selectbox("Label column", ["—"] + cols_av,
-                                 index=(cols_av.index(label_col) + 1) if label_col in cols_av else 0,
-                                 key="label_col_select")
-        canonicalise_existing = st.checkbox("Canonicalise this label to present/absent", value=bool(st.session_state.import_params.get("canonicalise_existing", False)), key="canonicalise_existing")
-        present_value_for_existing = st.text_input("Value that means 'present' (used only when canonicalising)", value=str(st.session_state.import_params.get("present_value_for_existing", "1")), key="present_value_for_existing")
-        st.session_state.import_params.update({
-            "label_col": label_col,
-            "canonicalise_existing": bool(canonicalise_existing),
-            "present_value_for_existing": present_value_for_existing,
-        })
+        confidence_threshold = st.number_input(
+            "Presence threshold", min_value=0.0, max_value=1.0, value=confidence_threshold, step=0.01,
+            key="manual_confidence_threshold",
+        )
+        st.session_state.import_params["confidence_threshold"] = float(confidence_threshold)
 
-    species_col = pick("species_name", "Species / class → `species_name`", class_guess)
-    prob_col = pick("score", "Probability / score → `detection_probability`", score_guess)
+    species_current = st.session_state.import_params.get("species_name", "—")
+    species_col = st.selectbox(
+        "Species / class column (optional)",
+        ["—"] + cols_av,
+        index=(cols_av.index(species_current) + 1) if species_current in cols_av else 0,
+        key="select_species_name",
+    )
+    st.session_state.import_params["species_name"] = species_col
+
+    if presence_source == "column" and presence_col not in (None, "—") and species_col == presence_col:
+        st.error("Presence and Species / class cannot use the same source column. Leave Species / class blank for presence-only data.")
 
     missing = []
     if file_id_col == "—":
-        missing.append("file_id")
+        missing.append("recording identifier")
     if start_col == "—":
-        missing.append("detection_start_s")
+        missing.append("detection start")
     if end_col == "—":
-        missing.append("detection_end_s")
-    if label_mode == "binary_presence_column" and (presence_col in (None, "—")):
-        missing.append("presence column")
-    if label_mode == "use_label_column" and (label_col in (None, "—")):
-        missing.append("label column")
-    if species_col == "—":
-        missing.append("species_name")
+        missing.append("detection end/duration")
     if prob_col == "—":
-        missing.append("detection_probability")
-    if missing:
-        st.warning("Please map required fields: " + ", ".join(missing))
+        missing.append("confidence/probability")
+    if presence_source == "column" and presence_col in (None, "—"):
+        missing.append("presence/absence column")
+    if presence_source == "column" and species_col == presence_col and presence_col not in (None, "—"):
+        missing.append("distinct presence/species mappings")
+    if presence_source == "confidence" and prob_col == "—":
+        missing.append("confidence/probability for thresholding")
 
-    st.subheader("Options")
-    convert_ms = st.checkbox("Times are in milliseconds (convert to seconds)", value=bool(st.session_state.import_params.get("convert_ms", False)), key="convert_ms")
-    assume_utc = st.checkbox("Interpret datetimes as UTC when timezone is missing (only if you pass a datetime later)", value=bool(st.session_state.import_params.get("assume_utc", True)), key="assume_utc")
-    te_factor_default = st.number_input("Time expansion factor (if your times are TE’d)", min_value=0.1, max_value=100.0, value=float(st.session_state.import_params.get("manual_te_factor", 1.0)), step=0.1, key="manual_te_factor")
+    with st.expander("Advanced time options", expanded=False):
+        convert_ms = st.checkbox("Times are in milliseconds (convert to seconds)", value=bool(st.session_state.import_params.get("convert_ms", False)), key="convert_ms")
+        assume_utc = st.checkbox("Interpret datetimes as UTC when timezone is missing", value=bool(st.session_state.import_params.get("assume_utc", True)), key="assume_utc")
+        te_factor_default = st.number_input("Time expansion factor", min_value=0.1, max_value=100.0, value=float(st.session_state.import_params.get("manual_te_factor", 1.0)), step=0.1, key="manual_te_factor")
     st.session_state.import_params.update({"convert_ms": bool(convert_ms), "assume_utc": bool(assume_utc)})
 
-    st.markdown("### 3) Build preview (editable)")
+    if missing:
+        st.warning("Complete the required mapping: " + ", ".join(dict.fromkeys(missing)))
+
     disabled = bool(missing) or (st.session_state.get("manual_df_linked") is None)
-    if _btn("Build preview", key="build_preview_btn") and not disabled:
+    preview_signature = (
+        manual_link_signature, file_id_col, start_col, end_col, prob_col,
+        presence_source, presence_col if presence_source == "column" else None,
+        positive_tokens if presence_source == "column" else None,
+        round(float(confidence_threshold), 6) if presence_source == "confidence" else None,
+        species_col, bool(convert_ms), bool(assume_utc), round(float(te_factor_default), 6),
+    )
+    if not disabled and st.session_state.get("import_preview_signature") != preview_signature:
+        label_mode = "binary_presence_column" if presence_source == "column" else "confidence_threshold"
         norm, notes = _build_normalised_table(
             df=df_av, source_file_col=file_id_col, start_col=start_col, end_col=end_col,
             score_col=prob_col, ts_col=None, convert_ms=bool(convert_ms), assume_utc=bool(assume_utc),
-            label_mode=label_mode, presence_col=presence_col, positive_tokens=st.session_state.import_params.get("positive_tokens", "1,true,yes,present,y,t"),
-            positive_label_name=st.session_state.import_params.get("positive_label_name", "present"), keep_only_present=bool(st.session_state.import_params.get("keep_only_present", True)),
-            label_col=label_col, canonicalise_existing=bool(st.session_state.import_params.get("canonicalise_existing", False)),
-            present_value_for_existing=st.session_state.import_params.get("present_value_for_existing", "1"),
+            label_mode=label_mode, presence_col=presence_col, positive_tokens=positive_tokens,
+            positive_label_name="present", keep_only_present=True,
+            label_col=None, canonicalise_existing=False, present_value_for_existing="1",
+            confidence_threshold=float(confidence_threshold),
         )
 
-        import numpy as _np
-
         if norm is None or norm.empty:
-            st.warning("No rows after your label filter/mapping. Adjust your presence mapping or disable 'keep only present'.")
+            st.warning("No rows remained after normalisation. Check the presence rule and mappings.")
             return
 
         idx = norm.index
@@ -3198,35 +3200,21 @@ def view_import_results() -> None:
 
         def _from_norm(col_main, col_fallback=None, numeric=False):
             if col_main in norm.columns:
-                s = norm[col_main].reindex(idx)
+                ss = norm[col_main].reindex(idx)
             elif col_fallback and col_fallback in norm.columns:
-                s = norm[col_fallback].reindex(idx)
+                ss = norm[col_fallback].reindex(idx)
             else:
                 return pd.Series([pd.NA] * len(idx), index=idx)
-            if numeric:
-                return pd.to_numeric(s, errors="coerce")
-            return s
+            return pd.to_numeric(ss, errors="coerce") if numeric else ss
 
         cn["detection_start_s"] = _from_norm("detection_start_s", "start_s", numeric=True)
         cn["detection_end_s"] = _from_norm("detection_end_s", "end_s", numeric=True)
-
-        pl = _from_norm("presence_label")
-        if pl.isna().all() and "label" in norm.columns:
-            pl = norm["label"].reindex(idx).astype(str).str.strip().str.lower()
-        cn["presence_label"] = pl.astype(str).str.strip().str.lower()
-
-        sp = _from_norm("species_name")
-        if sp.isna().all():
-            if species_col and species_col != "—" and species_col in df_av.columns:
-                sp = df_av.loc[idx, species_col].astype(str)
-            elif "species_name" in df_av.columns:
-                sp = df_av.loc[idx, "species_name"].astype(str)
-            else:
-                sp = pd.Series([""] * len(idx), index=idx)
-        cn["species_name"] = sp.astype(str)
-
+        cn["presence_label"] = _from_norm("presence_label", "label").astype(str).str.strip().str.lower()
+        if species_col and species_col != "—" and species_col in df_av.columns:
+            cn["species_name"] = df_av.loc[idx, species_col].astype("string").fillna("").astype(str).str.strip()
+        else:
+            cn["species_name"] = ""
         cn["detection_probability"] = _from_norm("detection_probability", "score", numeric=True)
-
         cn["file_id"] = df_av.loc[idx, file_id_col].astype(str)
         if "file_path_original" in df_av.columns:
             cn["file_path_original"] = df_av.loc[idx, "file_path_original"].astype(str)
@@ -3236,7 +3224,6 @@ def view_import_results() -> None:
             cn["file_path"] = df_av.loc[idx, "file_path"].astype(str)
 
         cn = _pa_rebuild_file_keys_and_detection_ids(cn)
-
         if callable(normalise_schema):
             try:
                 cn = normalise_schema(cn, build_detection_id=False)
@@ -3244,39 +3231,45 @@ def view_import_results() -> None:
             except Exception as e:
                 st.warning(f"Schema normalisation failed on preview: {e}")
 
-        mapped_sources = set()
-        for col in [file_id_col, start_col, end_col, species_col, prob_col]:
-            if col and col != "—":
-                mapped_sources.add(col)
-
-        if label_mode == "binary_presence_column":
-            if presence_col and presence_col != "—":
-                mapped_sources.add(presence_col)
-        else:
-            if label_col and label_col != "—":
-                mapped_sources.add(label_col)
-
+        mapped_sources = {c for c in [file_id_col, start_col, end_col, species_col, prob_col] if c and c != "—"}
+        if presence_source == "column" and presence_col and presence_col != "—":
+            mapped_sources.add(presence_col)
         cn = drop_mapped_columns(cn, mapped_sources)
 
         st.session_state.import_preview_ready = True
         st.session_state.import_preview_df = cn.to_dict(orient="records")
+        st.session_state.import_preview_signature = preview_signature
         st.session_state.import_last_saved = None
         st.session_state.import_notes = notes
+        st.session_state.import_params["label_mode"] = label_mode
         st.rerun()
-
-    if disabled:
-        st.caption("Map all required fields above to enable the preview.")
 
     if st.session_state.get("import_preview_ready") and isinstance(st.session_state.get("import_preview_df"), list):
         norm = pd.DataFrame.from_records(st.session_state.import_preview_df)
-        for n in st.session_state.get("import_notes", []):
-            st.caption(n)
         if norm.empty:
             st.warning("No rows to display. Please check your present/absent values.")
             return
 
-        st.subheader("4) Validate & edit the final mapped data (canonical)")
-        edited = st.data_editor(norm, width='stretch', num_rows="dynamic", key="norm_editor")
+        st.subheader("3) Create project")
+
+        present_total = int(len(norm))
+        project_df = norm.copy().reset_index(drop=True)
+        project_total = int(len(project_df))
+        if "file_path_original" in project_df.columns:
+            stage_paths = project_df["file_path_original"].astype(str).str.strip()
+        elif "file_path" in project_df.columns:
+            stage_paths = project_df["file_path"].astype(str).str.strip()
+        else:
+            stage_paths = pd.Series([], dtype="string")
+        stage_paths = stage_paths[~stage_paths.isin(["", "nan", "None", "<NA>"])]
+        staged_unique = int(stage_paths.nunique())
+
+        st.metric("Present detections retained", f"{present_total:,}")
+
+        with st.expander("Final review", expanded=False):
+            st.dataframe(project_df.head(50), width="stretch", hide_index=True)
+
+        st.metric("Audio files to copy", f"{staged_unique:,}")
 
         if _btn("Create PAMalytics project", key="save_norm_btn"):
             out_dir = project_path(proj_path, "data_normalised")
@@ -3284,12 +3277,12 @@ def view_import_results() -> None:
 
             if callable(normalise_schema):
                 try:
-                    out_df = normalise_schema(edited.copy(), build_detection_id=False)
+                    out_df = normalise_schema(project_df.copy(), build_detection_id=False)
                 except Exception as e:
                     st.warning(f"Schema normalisation failed on save (writing edited table as-is): {e}")
-                    out_df = edited.copy()
+                    out_df = project_df.copy()
             else:
-                out_df = edited.copy()
+                out_df = project_df.copy()
 
             canonical_cols = [
                 "file_id", "file_path", "file_key", "detection_id",
@@ -3302,12 +3295,8 @@ def view_import_results() -> None:
                 if col and col != "—":
                     mapped_sources.add(col)
 
-            if label_mode == "binary_presence_column":
-                if presence_col and presence_col != "—":
-                    mapped_sources.add(presence_col)
-            else:
-                if label_col and label_col != "—":
-                    mapped_sources.add(label_col)
+            if presence_source == "column" and presence_col and presence_col != "—":
+                mapped_sources.add(presence_col)
 
             helper_legacy = {"source_file", "start_s", "end_s", "score", "label", "timestamp_utc"}
             mapped_sources |= helper_legacy
@@ -3459,8 +3448,6 @@ def view_import_results() -> None:
                 problems.append("Some rows have empty file_path.")
             if out_df["detection_id"].astype(str).str.strip().eq("").any():
                 problems.append("Some rows have empty detection_id.")
-            if out_df["species_name"].astype(str).str.strip().eq("").any():
-                problems.append("Some rows have empty species_name.")
             if out_df["detection_id"].duplicated().any():
                 problems.append("detection_id must be unique; duplicates found.")
             bad_times = (
@@ -3511,8 +3498,11 @@ def view_import_results() -> None:
                     "file_id": file_id_col,
                     "detection_start_s": start_col,
                     "detection_end_s": end_col,
-                    "presence_label": (f"{presence_col}→present/absent" if label_mode == "binary_presence_column"
-                                       else (f"{label_col} (canonicalised)" if st.session_state.import_params.get("canonicalise_existing") else label_col)),
+                    "presence_label": (
+                        f"{presence_col}→present/absent"
+                        if presence_source == "column"
+                        else f"{prob_col}≥{float(confidence_threshold):g}→present"
+                    ),
                     "species_name": species_col,
                     "detection_probability": prob_col,
                     "file_path": "file_path",
@@ -3521,10 +3511,9 @@ def view_import_results() -> None:
                     "convert_ms": bool(convert_ms),
                     "assume_utc": bool(assume_utc),
                     "label_mode": label_mode,
-                    "positive_tokens": st.session_state.import_params.get("positive_tokens") if label_mode == "binary_presence_column" else None,
-                    "keep_only_present": bool(st.session_state.import_params.get("keep_only_present")) if label_mode == "binary_presence_column" else None,
-                    "canonicalise_existing": bool(st.session_state.import_params.get("canonicalise_existing")) if label_mode == "use_label_column" else None,
-                    "present_value_for_existing": st.session_state.import_params.get("present_value_for_existing") if label_mode == "use_label_column" else None,
+                    "presence_source": presence_source,
+                    "positive_tokens": positive_tokens if presence_source == "column" else None,
+                    "confidence_threshold": float(confidence_threshold) if presence_source == "confidence" else None,
                     "te_factor_default": float(te_factor_default),
                 },
                 "input_file": st.session_state.import_params.get("filename"),
@@ -3560,7 +3549,6 @@ def view_import_results() -> None:
                     _chk["file_id"].astype(str).str.strip().ne("").all()
                     and _chk["file_path"].astype(str).str.strip().ne("").all()
                     and _chk["detection_id"].astype(str).str.strip().ne("").all()
-                    and _chk["species_name"].astype(str).str.strip().ne("").all()
                     and (_chk["detection_probability"].between(0, 1)).all()
                     and (_chk["detection_end_s"] > _chk["detection_start_s"]).all()
                 )
@@ -3569,17 +3557,6 @@ def view_import_results() -> None:
 
     if st.session_state.pop("manual_just_created", False):
         st.success("PAMalytics project created successfully.")
-
-    have_norm_audio = norm_csv.exists() and audio_csv.exists()
-    if have_norm_audio:
-        st.divider()
-        render_audio_coverage(
-            norm_csv=norm_csv,
-            audio_csv=audio_csv,
-            use_stem_fallback=st.session_state.get("use_stem_fallback", True),
-            heading="Audio coverage (manual mapping)",
-        )
-        render_norm_preview(norm_csv, heading="Preview mapped detections (manual)")
 
     if ok_to_launch:
         _render_ingestion_next_actions("go_overview_from_manual", "go_dashboard_from_manual")
@@ -3593,7 +3570,7 @@ def _build_normalised_table(
     ts_col: Optional[str], convert_ms: bool, assume_utc: bool, label_mode: str,
     presence_col: Optional[str], positive_tokens: str, positive_label_name: str,
     keep_only_present: bool, label_col: Optional[str], canonicalise_existing: bool,
-    present_value_for_existing: str,
+    present_value_for_existing: str, confidence_threshold: float = 0.5,
 ):
     import pandas as pd
     from datetime import datetime as _dt2
@@ -3604,14 +3581,41 @@ def _build_normalised_table(
             s = s / 1000.0
         return s
 
+    def _presence_match_mask(series, token_text):
+        tokens = {t.strip().lower() for t in token_text.split(",") if t.strip() != ""}
+        numeric_tokens = set()
+        for token in tokens:
+            try:
+                numeric_tokens.add(float(token))
+            except (TypeError, ValueError):
+                pass
+
+        text = series.astype(str).str.strip().str.lower()
+        mask = text.isin(tokens)
+        if numeric_tokens:
+            numeric = pd.to_numeric(series, errors="coerce")
+            mask = mask | numeric.isin(numeric_tokens)
+        return mask
+
+    expected_present_count = None
     if label_mode == "binary_presence_column":
-        tokens = {t.strip().lower() for t in positive_tokens.split(",") if t.strip() != ""}
-        ser = df[presence_col].astype(str).str.strip().str.lower()
-        present_mask = ser.isin(tokens)
+        present_mask = _presence_match_mask(df[presence_col], positive_tokens)
+        expected_present_count = int(present_mask.sum())
         if keep_only_present:
             if not present_mask.any():
                 empty = pd.DataFrame(columns=["source_file", "start_s", "end_s", "label", "score", "timestamp_utc"])
                 return empty, ["No rows matched the chosen present value(s)."]
+            base = df.loc[present_mask].copy()
+        else:
+            base = df.copy()
+    elif label_mode == "confidence_threshold":
+        scores_all = pd.to_numeric(df[score_col], errors="coerce")
+        present_mask = scores_all.ge(float(confidence_threshold))
+        expected_present_count = int(present_mask.sum())
+        if keep_only_present:
+            if not present_mask.any():
+                empty = pd.DataFrame(columns=["source_file", "start_s", "end_s", "label", "score", "timestamp_utc"])
+                return empty, ["No rows met the chosen confidence threshold."]
             base = df.loc[present_mask].copy()
         else:
             base = df.copy()
@@ -3634,11 +3638,16 @@ def _build_normalised_table(
         if keep_only_present:
             norm["label"] = positive_label_name or "present"
         else:
-            ser_b = base[presence_col].astype(str).str.strip().str.lower()
-            tokens_b = {t.strip().lower() for t in positive_tokens.split(",") if t.strip() != ""}
-            present_mask_b = ser_b.isin(tokens_b)
+            present_mask_b = _presence_match_mask(base[presence_col], positive_tokens)
             norm["label"] = (positive_label_name or "present")
             norm.loc[~present_mask_b, "label"] = "absent"
+    elif label_mode == "confidence_threshold":
+        if keep_only_present:
+            norm["label"] = "present"
+        else:
+            present_mask_b = pd.to_numeric(base[score_col], errors="coerce").ge(float(confidence_threshold))
+            norm["label"] = "absent"
+            norm.loc[present_mask_b, "label"] = "present"
     else:
         lbl = base[label_col].astype(str)
         if canonicalise_existing:
@@ -3647,6 +3656,14 @@ def _build_normalised_table(
             lbl = lbl.mask(mask, "present")
             lbl = lbl.where(lbl == "present", "absent")
         norm["label"] = lbl
+
+    if label_mode in {"binary_presence_column", "confidence_threshold"}:
+        actual_present_count = int(norm["label"].astype(str).str.strip().str.lower().eq("present").sum())
+        if actual_present_count != int(expected_present_count or 0):
+            raise ValueError(
+                f"Presence normalisation count mismatch: expected {int(expected_present_count or 0):,} present rows, "
+                f"produced {actual_present_count:,}."
+            )
 
     norm["score"] = pd.to_numeric(base[score_col], errors="coerce") if (score_col and score_col != "—") else pd.NA
 

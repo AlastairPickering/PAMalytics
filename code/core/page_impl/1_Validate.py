@@ -359,6 +359,25 @@ def _dataset_choice_validate(sources: dict) -> Tuple[pd.DataFrame, str, Dict[str
 
 # Canonical validation prep
 
+def _manual_presence_column_was_used_as_species(proj_root: Path) -> bool:
+    manifest_path = proj_root / "workspace" / "ingest_mapping.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+
+    if str(manifest.get("adapter", "")).strip().lower() != "manual":
+        return False
+    options = manifest.get("options") or {}
+    if str(options.get("label_mode", "")).strip() != "binary_presence_column":
+        return False
+
+    mapping = manifest.get("mapping") or {}
+    species_source = str(mapping.get("species_name", "") or "").strip()
+    presence_mapping = str(mapping.get("presence_label", "") or "").strip()
+    presence_source = presence_mapping.split("→", 1)[0].strip()
+    return bool(species_source and species_source != "—" and species_source == presence_source)
+
 def _ensure_validation_ready(df_in: pd.DataFrame) -> pd.DataFrame:
     df = df_in.copy()
 
@@ -421,19 +440,19 @@ def _ensure_validation_ready(df_in: pd.DataFrame) -> pd.DataFrame:
     pleff = df["presence_label"].astype(str).str.strip().str.lower()
     df["FinalLabelEffective"] = np.where(pleff == "present", "present", "absent")
 
-    sp = df["species_name"].astype(str)
+    sp = df["species_name"].astype(str).str.strip()
     df["species_display"] = np.where(
-        (df["FinalLabelEffective"] != "present") | (sp.str.strip() == ""),
+        df["FinalLabelEffective"] != "present",
         "[absent]",
-        sp
+        np.where(sp != "", sp, "present")
     )
 
-    sp0 = df["species_name_original"].astype(str)
+    sp0 = df["species_name_original"].astype(str).str.strip()
     pl0 = df["presence_label_original"].astype(str).str.strip().str.lower()
     df["species_display_original"] = np.where(
-        (pl0 != "present") | (sp0.str.strip() == ""),
+        pl0 != "present",
         "[absent]",
-        sp0
+        np.where(sp0 != "", sp0, "present")
     )
     df["species_display_original"] = _clean_group_labels(df["species_display_original"], "[unknown species]")
 
@@ -483,7 +502,7 @@ def _apply_card_widget_state(
 
         choice = st.session_state.get(sp_key, None)
         if choice is None:
-            choice = "[absent]" if (current_presence != "present" or current_species.strip() == "") else current_species
+            choice = "[absent]" if current_presence != "present" else (current_species if current_species.strip() else "present")
 
         if choice == _ADD_SPECIES_OPTION:
             choice = _clean_added_species(st.session_state.get(f"{sp_key}_new", ""))
@@ -493,6 +512,9 @@ def _apply_card_widget_state(
         if choice == "[absent]" or not str(choice).strip():
             out.at[idx, "species_name"] = ""
             out.at[idx, "presence_label"] = "absent"
+        elif str(choice).strip().lower() == "present":
+            out.at[idx, "species_name"] = ""
+            out.at[idx, "presence_label"] = "present"
         else:
             out.at[idx, "species_name"] = str(choice).strip()
             out.at[idx, "presence_label"] = "present"
@@ -544,7 +566,7 @@ def _apply_card_submitted_values(
 
         current_presence = str(row.get("presence_label", "") or "").strip().lower()
         current_species = str(row.get("species_name", "") or "")
-        default_choice = "[absent]" if (current_presence != "present" or current_species.strip() == "") else current_species
+        default_choice = "[absent]" if current_presence != "present" else (current_species if current_species.strip() else "present")
 
         choice = values.get("species_value", default_choice)
         if choice == _ADD_SPECIES_OPTION:
@@ -553,6 +575,9 @@ def _apply_card_submitted_values(
         if choice == "[absent]" or not str(choice).strip():
             out.at[idx, "species_name"] = ""
             out.at[idx, "presence_label"] = "absent"
+        elif str(choice).strip().lower() == "present":
+            out.at[idx, "species_name"] = ""
+            out.at[idx, "presence_label"] = "present"
         else:
             out.at[idx, "species_name"] = str(choice).strip()
             out.at[idx, "presence_label"] = "present"
@@ -2961,7 +2986,7 @@ def _commit_card(
             det.at[i, "user_changed_by"] = user_id
             det.at[i, "user_changed_at"] = now_iso
 
-        det.at[i, "validation_state"] = "incorrect" if species_changed_here else "correct"
+        det.at[i, "validation_state"] = "incorrect" if changed_here else "correct"
 
         det.at[i, "validated_by"] = user_id
         det.at[i, "validated_at"] = now_iso
@@ -2987,7 +3012,7 @@ def _init_filter_state():
         "validate_page": 1,
         "validate_page_input": 1,
         "validate_page_sync_pending": False,
-        "validate_show_label": "present",
+        "validate_show_label": "all",
         "validate_min_prob": 0.0,
         "validate_conf_sort": "Strategy/default order",
         "validate_lock_freq": False,
@@ -3114,6 +3139,14 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
 
     st.session_state["active_dataset_label"] = dataset_label
     st.session_state["active_dataset_path"] = str(ds_paths.get(dataset_label, ""))
+
+    if _manual_presence_column_was_used_as_species(proj_root):
+        df_default = df_default.copy()
+        if "species_name" in df_default.columns:
+            df_default["species_name"] = ""
+        if "species_name_original" in df_default.columns:
+            df_default["species_name_original"] = ""
+
     st.session_state["pa_df_det"] = df_default.copy()
 
     df_all = _ensure_validation_ready(df_default)
@@ -3695,6 +3728,8 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
         if s and s.strip() and s.strip().lower() not in ("nan", "none", "<na>", "[absent]", _ADD_SPECIES_OPTION.lower())
     ]
     species_choices = sorted(pd.unique(pd.Series(species_choices, dtype=object)).tolist(), key=lambda x: x.lower())
+    if not species_choices:
+        species_choices = ["present"]
     species_choices.insert(0, "[absent]")
     species_select_options = species_choices + [_ADD_SPECIES_OPTION]
 
@@ -4045,7 +4080,7 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
 
                             if y.size > 0 and sr > 1:
                                 requested_metric_fft = int(n_fft)
-                                gdf_metric_source = _offset_detection_times(gdf, float(xmin))
+                                gdf_metric_source = _offset_detection_times(gdf_card, float(xmin))
                                 metric_fft = _card_metric_fft(
                                     gdf=gdf_metric_source,
                                     y=y,
@@ -4098,7 +4133,12 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
 
                                 cur_sp_row = str(row.get("species_name", "") or "").strip()
                                 cur_pl_row = str(row.get("presence_label", "") or "").lower()
-                                current_species_choice = "[absent]" if (cur_pl_row != "present" or cur_sp_row.strip() == "") else cur_sp_row
+                                if cur_pl_row != "present":
+                                    current_species_choice = "[absent]"
+                                elif cur_sp_row.strip():
+                                    current_species_choice = cur_sp_row
+                                else:
+                                    current_species_choice = "present"
                                 select_key = f"sp_{base}_{species_orig}_{ridx}"
                                 new_species_key = f"{select_key}_new"
                                 options_for_row = list(species_select_options)

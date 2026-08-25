@@ -45,6 +45,26 @@ def sidebar_signout_button(label: str = "Sign out") -> None:
             st.switch_page("Home.py")
 
 
+
+
+def _file_signature(path: Path) -> tuple[str, int, int]:
+    try:
+        stat = path.stat()
+        return str(path), int(stat.st_size), int(stat.st_mtime_ns)
+    except Exception:
+        return str(path), -1, -1
+
+
+@st.cache_data(show_spinner=False, max_entries=4)
+def _load_dashboard_dataset_cached(
+    project_path: str,
+    norm_sig: tuple[str, int, int],
+    enriched_sig: tuple[str, int, int],
+    audio_sig: tuple[str, int, int],
+):
+    return build_ds(Path(project_path), use_stem_fallback=True)
+
+
 def render_page() -> None:
     st.set_page_config(
         page_title="PAMalytics — Dashboard",
@@ -58,7 +78,14 @@ def render_page() -> None:
         st.stop()
 
     proj_path = Path(proj)
-    df_det, _notes = build_ds(proj_path, use_stem_fallback=True)
+    data_dir = proj_path / "data_normalised"
+    workspace_dir = proj_path / "workspace"
+    df_det, _notes = _load_dashboard_dataset_cached(
+        str(proj_path),
+        _file_signature(data_dir / "detections_normalised.csv"),
+        _file_signature(data_dir / "detections_enriched.csv"),
+        _file_signature(workspace_dir / "audio_paths.csv"),
+    )
     if df_det is None or df_det.empty:
         st.error("No matched detections with audio. Complete Import → Metadata mapping first.")
         st.stop()

@@ -121,7 +121,7 @@ def _apply_canonical_overrides(df_in: pd.DataFrame) -> pd.DataFrame:
 
 
 def ensure_userlabel(df_in: pd.DataFrame) -> pd.DataFrame:
-    df = df_in.copy()
+    df = df_in
     if "UserLabel" not in df.columns:
         df["UserLabel"] = ""
     else:
@@ -130,7 +130,7 @@ def ensure_userlabel(df_in: pd.DataFrame) -> pd.DataFrame:
 
 
 def with_effective_labels(df_in: pd.DataFrame) -> pd.DataFrame:
-    df = df_in.copy()
+    df = df_in
 
     if "FinalLabel" not in df.columns:
         if "label" in df.columns:
@@ -293,6 +293,15 @@ def _extract_prob(row: pd.Series) -> float:
                 continue
     return float("nan")
 
+def _probability_series(df: pd.DataFrame) -> pd.Series:
+    out = pd.Series(np.nan, index=df.index, dtype=float)
+    for key in ("detection_probability", "class_prob", "probability", "score"):
+        if key not in df.columns:
+            continue
+        vals = pd.to_numeric(df[key], errors="coerce")
+        out = out.where(out.notna(), vals)
+    return out
+
 
 def _collect_boxes_and_probs(gdf: pd.DataFrame):
     mids, lows, highs, ps = [], [], [], []
@@ -414,12 +423,26 @@ def _apply_time_expansion_for_playback(y: np.ndarray, sr: int, te: int) -> Tuple
     return y_out, psr
 
 
-def _audio_file_info(apath: Path) -> Tuple[int, float]:
-    info = sf.info(str(apath))
+def _dashboard_audio_signature(apath: Path) -> Tuple[int, int]:
+    try:
+        stat = apath.stat()
+        return int(stat.st_size), int(stat.st_mtime_ns)
+    except Exception:
+        return 0, 0
+
+
+@st.cache_data(show_spinner=False, max_entries=256)
+def _audio_file_info_cached(apath_str: str, file_size: int, file_mtime_ns: int) -> Tuple[int, float]:
+    info = sf.info(apath_str)
     sr = int(info.samplerate)
     frames = int(info.frames)
     dur = float(frames / sr) if sr > 0 else 0.0
     return sr, dur
+
+
+def _audio_file_info(apath: Path) -> Tuple[int, float]:
+    file_size, file_mtime_ns = _dashboard_audio_signature(apath)
+    return _audio_file_info_cached(str(apath), file_size, file_mtime_ns)
 
 
 def _detection_window_from_boxes(boxes: List[Dict[str, float]], duration_s: float, padding_s: float = 2.0) -> Tuple[float, float]:
@@ -436,8 +459,16 @@ def _detection_window_from_boxes(boxes: List[Dict[str, float]], duration_s: floa
     return float(xmin), float(xmax)
 
 
-def _read_audio_window(apath: Path, start_s: float, end_s: float) -> Tuple[np.ndarray, int, float, float]:
-    sr, dur = _audio_file_info(apath)
+@st.cache_data(show_spinner=False, max_entries=128)
+def _read_audio_window_cached(
+    apath_str: str,
+    start_s: float,
+    end_s: float,
+    file_size: int,
+    file_mtime_ns: int,
+) -> Tuple[np.ndarray, int, float, float]:
+    apath = Path(apath_str)
+    sr, dur = _audio_file_info_cached(apath_str, file_size, file_mtime_ns)
     if sr <= 0:
         return np.asarray([], dtype=np.float32), sr, 0.0, dur
 
@@ -455,7 +486,7 @@ def _read_audio_window(apath: Path, start_s: float, end_s: float) -> Tuple[np.nd
 
     try:
         y, read_sr = sf.read(
-            str(apath),
+            apath_str,
             start=start_frame,
             frames=max(1, end_frame - start_frame),
             dtype="float32",
@@ -467,10 +498,21 @@ def _read_audio_window(apath: Path, start_s: float, end_s: float) -> Tuple[np.nd
             y = np.mean(y, axis=1).astype(np.float32, copy=False)
         return y, sr, float(start_frame / sr), dur
     except Exception:
-        y_full, sr = librosa.load(str(apath), sr=None, mono=True)
+        y_full, sr = librosa.load(apath_str, sr=None, mono=True)
         start_frame = max(0, int(round(start_s * sr)))
         end_frame = min(len(y_full), max(start_frame + 1, int(round(end_s * sr))))
         return y_full[start_frame:end_frame].astype(np.float32, copy=False), int(sr), float(start_frame / sr), float(len(y_full) / sr)
+
+
+def _read_audio_window(apath: Path, start_s: float, end_s: float) -> Tuple[np.ndarray, int, float, float]:
+    file_size, file_mtime_ns = _dashboard_audio_signature(apath)
+    return _read_audio_window_cached(
+        str(apath),
+        round(float(start_s), 3),
+        round(float(end_s), 3),
+        file_size,
+        file_mtime_ns,
+    )
 
 
 def _safe_dashboard_fft(sr: int, n_samples: int) -> Optional[int]:
@@ -482,8 +524,103 @@ def _safe_dashboard_fft(sr: int, n_samples: int) -> Optional[int]:
     return max(valid) if valid else None
 
 
-def show_detection_examples(df_page: pd.DataFrame, df_all: pd.DataFrame, project_root: Path):
-    st.header("Detection examples")
+@st.cache_data(show_spinner=False, max_entries=128)
+def _dashboard_spectrogram_cached(
+    apath_str: str,
+    file_size: int,
+    file_mtime_ns: int,
+    xmin: float,
+    xmax: float,
+    n_fft: int,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, int, float, float, np.ndarray]:
+    y, sr, segment_start_s, dur = _read_audio_window_cached(
+        apath_str, xmin, xmax, file_size, file_mtime_ns
+    )
+    if y.size == 0 or sr <= 0 or n_fft <= 0:
+        return np.zeros((2, 2), dtype=float), np.arange(2, dtype=float), np.arange(2, dtype=float), sr, segment_start_s, dur, y
+    hop = max(1, int(n_fft) // 4)
+    D = librosa.stft(y=y, n_fft=int(n_fft), hop_length=hop)
+    S = np.abs(D) ** 2
+    S_dB = librosa.power_to_db(S, ref=np.max, top_db=90)
+    times = librosa.frames_to_time(np.arange(S.shape[1]), sr=sr, hop_length=hop) + float(segment_start_s)
+    freqs_hz = librosa.fft_frequencies(sr=sr, n_fft=int(n_fft))
+    return S_dB, times, freqs_hz, sr, segment_start_s, dur, y
+
+
+@st.cache_data(show_spinner=False, max_entries=128)
+def _dashboard_spectrogram_png_cached(
+    apath_str: str,
+    file_size: int,
+    file_mtime_ns: int,
+    xmin: float,
+    xmax: float,
+    ymin: float,
+    ymax: float,
+    n_fft: int,
+    boxes_signature: Tuple[Tuple[float, float, float, float, float], ...],
+) -> bytes:
+    S_dB, times, freqs_hz, sr, segment_start_s, dur, _ = _dashboard_spectrogram_cached(
+        apath_str, file_size, file_mtime_ns, xmin, xmax, n_fft
+    )
+    fig, ax = plt.subplots(figsize=(7.0, 4.0), dpi=150, constrained_layout=False)
+    extent = [times.min(), times.max(), freqs_hz.min(), freqs_hz.max()]
+    ax.imshow(
+        S_dB,
+        origin="lower",
+        aspect="auto",
+        interpolation="nearest",
+        extent=extent,
+        vmin=S_dB.max() - 90,
+        vmax=S_dB.max(),
+    )
+    ax.set_xlim(xmin, xmax)
+    ax.set_ylim(ymin, ymax)
+    ax.set_xlabel("Time (s)")
+    ax.set_ylabel("Frequency (kHz)")
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda ytick, pos: f"{ytick / 1000:.0f}"))
+
+    vspan = max(1.0, ymax - ymin)
+    vpad = 0.02 * vspan
+    fixed_high = ymin + 0.90 * vspan
+    for i, (x0, x1, lf, hf, prob) in enumerate(boxes_signature):
+        ax.add_patch(
+            Rectangle(
+                (x0, ymin),
+                x1 - x0,
+                ymax - ymin,
+                facecolor=(1, 1, 1, 0.06),
+                edgecolor=(1, 1, 1, 0.12),
+                lw=0.6,
+            )
+        )
+        if np.isfinite(prob):
+            xmid = 0.5 * (x0 + x1)
+            if np.isfinite(lf) and np.isfinite(hf):
+                y_raw = (hf + vpad) if (i % 2 == 0) else (lf - vpad)
+                va = "bottom" if (i % 2 == 0) else "top"
+            else:
+                y_raw = fixed_high
+                va = "center"
+            y_label = float(np.clip(y_raw, ymin + vpad, ymax - vpad))
+            ax.text(
+                xmid, y_label, f"{prob:.2f}", ha="center", va=va, fontsize=9, color="white",
+                bbox=dict(boxstyle="round,pad=0.18", fc=(0, 0, 0, 0.55), ec=(1, 1, 1, 0.25), lw=0.5),
+            )
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    return buf.getvalue()
+
+
+def show_detection_examples(
+    df_page: pd.DataFrame,
+    df_all: pd.DataFrame,
+    project_root: Path,
+    show_header: bool = True,
+):
+    if show_header:
+        st.header("Detection examples")
 
     c1, c2, _, c4 = st.columns(4)
     with c1:
@@ -498,11 +635,13 @@ def show_detection_examples(df_page: pd.DataFrame, df_all: pd.DataFrame, project
         df_det["basename"] = df_det.get("source_file", "").astype(str).map(lambda p: Path(p).name)
     if "filename_stem" not in df_det.columns:
         df_det["filename_stem"] = df_det["basename"].astype(str).map(lambda s: Path(s).stem.lower())
-    if "class" not in df_det.columns and "species_name" in df_det.columns:
-        df_det["class"] = df_det["species_name"]
-    disp_species = df_det.get("class", "").astype(str).str.strip()
-    norm_species = disp_species.str.lower().replace({"": np.nan, "nan": np.nan})
-    df_det["species_display"] = disp_species.where(norm_species.notna(), "[absent]")
+    disp_species = df_det.get(
+        "species_name",
+        pd.Series("", index=df_det.index, dtype=object),
+    ).astype(str).str.strip()
+    norm_species = disp_species.str.lower()
+    species_missing = norm_species.isin(["", "nan", "<na>", "none"])
+    df_det["species_display"] = disp_species.mask(species_missing, "present")
 
     if "start_s" not in df_det.columns and "detection_start_s" in df_det.columns:
         df_det["start_s"] = pd.to_numeric(df_det["detection_start_s"], errors="coerce")
@@ -519,8 +658,8 @@ def show_detection_examples(df_page: pd.DataFrame, df_all: pd.DataFrame, project
 
     per_group_max: Dict[Tuple[str, str], float] = {}
     try:
-        tmp = df_det.assign(_p=df_det.apply(_extract_prob, axis=1))
-        per_group_max = tmp.groupby(["basename", "species_display"])["_p"].max(numeric_only=True).to_dict()
+        df_det["_dashboard_probability"] = _probability_series(df_det)
+        per_group_max = df_det.groupby(["basename", "species_display"])["_dashboard_probability"].max().to_dict()
     except Exception:
         pass
 
@@ -585,7 +724,10 @@ def show_detection_examples(df_page: pd.DataFrame, df_all: pd.DataFrame, project
 
             n_det = int(len(gdf))
             try:
-                ps = gdf.apply(_extract_prob, axis=1).to_numpy()
+                if "_dashboard_probability" in gdf.columns:
+                    ps = pd.to_numeric(gdf["_dashboard_probability"], errors="coerce").to_numpy(dtype=float)
+                else:
+                    ps = _probability_series(gdf).to_numpy(dtype=float)
                 ps = ps[np.isfinite(ps)]
                 max_cp = float(np.max(ps)) if ps.size else None
             except Exception:
@@ -615,7 +757,7 @@ def show_detection_examples(df_page: pd.DataFrame, df_all: pd.DataFrame, project
                         "end_s": _num(row.get("end_s", row.get("detection_end_s"))),
                         "low_freq": _num(row.get("low_freq")),
                         "high_freq": _num(row.get("high_freq")),
-                        "prob": _num(_extract_prob(row)),
+                        "prob": _num(row.get("_dashboard_probability", _extract_prob(row))),
                     }
                     if (np.isfinite(b["start_s"]) and np.isfinite(b["end_s"]) and b["end_s"] > b["start_s"]):
                         boxes.append(b)
@@ -651,48 +793,31 @@ def show_detection_examples(df_page: pd.DataFrame, df_all: pd.DataFrame, project
                     if n_fft is None:
                         st.error("Audio segment is too short for spectrogram rendering")
                         continue
-                    hop = max(1, n_fft // 8)
-                    D = librosa.stft(y=y, n_fft=n_fft, hop_length=hop)
-                    S = np.abs(D) ** 2
-                    S_dB = librosa.power_to_db(S, ref=np.max, top_db=90)
-                    times = librosa.frames_to_time(np.arange(S.shape[1]), sr=sr, hop_length=hop) + float(segment_start_s)
-                    freqs_hz = np.linspace(0.0, sr * 0.5, S.shape[0])
+                    file_size, file_mtime_ns = _dashboard_audio_signature(apath)
+                    S_dB, times, freqs_hz, sr, segment_start_s, dur, y = _dashboard_spectrogram_cached(
+                        str(apath), file_size, file_mtime_ns, round(float(xmin), 3), round(float(xmax), 3), int(n_fft)
+                    )
                 except Exception as e:
                     st.error(f"Spectrogram setup error: {e}")
                     continue
 
                 try:
-                    fig, ax = plt.subplots(figsize=(7.0, 4.0), dpi=220, constrained_layout=False)
-                    extent = [times.min(), times.max(), freqs_hz.min(), freqs_hz.max()]
-                    ax.imshow(
-                        S_dB,
-                        origin="lower",
-                        aspect="auto",
-                        interpolation="nearest",
-                        extent=extent,
-                        vmin=S_dB.max() - 90,
-                        vmax=S_dB.max(),
-                    )
-                    ax.set_xlim(xmin, xmax)
-                    ax.set_ylim(ymin, ymax)
-                    ax.set_xlabel("Time (s)")
-                    ax.set_ylabel("Frequency (kHz)")
-                    ax.yaxis.set_major_formatter(FuncFormatter(lambda ytick, pos: f"{ytick / 1000:.0f}"))
-                    for b in boxes:
-                        x0, x1 = b["start_s"], b["end_s"]
-                        ax.add_patch(
-                            Rectangle(
-                                (x0, ymin),
-                                x1 - x0,
-                                ymax - ymin,
-                                facecolor=(1, 1, 1, 0.06),
-                                edgecolor=(1, 1, 1, 0.12),
-                                lw=0.6,
-                            )
+                    boxes_signature = tuple(
+                        (
+                            round(float(b["start_s"]), 4),
+                            round(float(b["end_s"]), 4),
+                            round(float(b["low_freq"]), 2) if np.isfinite(b["low_freq"]) else -1.0,
+                            round(float(b["high_freq"]), 2) if np.isfinite(b["high_freq"]) else -1.0,
+                            round(float(b["prob"]), 6) if np.isfinite(b["prob"]) else -1.0,
                         )
-                    _draw_prob_labels_inline(ax, gdf, xmin, xmax, ymin, ymax)
-                    st.pyplot(fig, width='stretch', clear_figure=True)
-                    plt.close(fig)
+                        for b in boxes
+                    )
+                    png_bytes = _dashboard_spectrogram_png_cached(
+                        str(apath), file_size, file_mtime_ns,
+                        round(float(xmin), 3), round(float(xmax), 3),
+                        round(float(ymin), 2), round(float(ymax), 2), int(n_fft), boxes_signature,
+                    )
+                    st.image(png_bytes, width="stretch")
                 except Exception as e:
                     st.error(f"Spectrogram error: {e}")
 
@@ -712,7 +837,7 @@ def show_detection_examples(df_page: pd.DataFrame, df_all: pd.DataFrame, project
 
 
 def _augment_grouping_fields_class(df_in: pd.DataFrame) -> pd.DataFrame:
-    df = df_in.copy()
+    df = df_in
 
     def _safe_path_str(x) -> str:
         if pd.isna(x):
@@ -756,19 +881,34 @@ def _augment_grouping_fields_class(df_in: pd.DataFrame) -> pd.DataFrame:
 
 def _load_csv_safe(p: Path) -> Optional[pd.DataFrame]:
     try:
-        if p.exists():
-            df = pd.read_csv(p, low_memory=False)
-            try:
-                df.columns = df.columns.str.strip()
-            except Exception:
-                pass
-            return df
+        if not p.exists():
+            return None
+        stat = p.stat()
+        signature = (str(p.resolve()), int(stat.st_size), int(stat.st_mtime_ns))
+        cache = st.session_state.setdefault("_dashboard_csv_cache", {})
+        cached = cache.get(signature)
+        if isinstance(cached, pd.DataFrame):
+            return cached
+        for old_key in list(cache.keys()):
+            if isinstance(old_key, tuple) and old_key and old_key[0] == signature[0]:
+                cache.pop(old_key, None)
+        df = pd.read_csv(p, low_memory=False)
+        try:
+            df.columns = df.columns.str.strip()
+        except Exception:
+            pass
+        cache[signature] = df
+        while len(cache) > 4:
+            cache.pop(next(iter(cache)))
+        return df
     except Exception:
         return None
-    return None
 
 
-def _dataset_choice(sources: Dict[str, str]) -> Tuple[pd.DataFrame, str, Dict[str, pd.DataFrame], Dict[str, Path]]:
+def _dataset_choice(
+    sources: Dict[str, str],
+    original_df: Optional[pd.DataFrame] = None,
+) -> Tuple[pd.DataFrame, str, Dict[str, pd.DataFrame], Dict[str, Path]]:
     proj_root = Path(sources.get("project") or sources.get("project_root") or ".")
     data_dir = proj_root / "data_normalised"
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -779,8 +919,8 @@ def _dataset_choice(sources: Dict[str, str]) -> Tuple[pd.DataFrame, str, Dict[st
     choices: Dict[str, pd.DataFrame] = {}
     path_map: Dict[str, Path] = {}
 
-    df_orig = _load_csv_safe(p_original)
-    if df_orig is not None:
+    df_orig = original_df if isinstance(original_df, pd.DataFrame) and not original_df.empty else _load_csv_safe(p_original)
+    if df_orig is not None and not df_orig.empty:
         choices["Original"] = df_orig
         path_map["Original"] = p_original
 
@@ -798,7 +938,7 @@ def _dataset_choice(sources: Dict[str, str]) -> Tuple[pd.DataFrame, str, Dict[st
     if isinstance(active, str) and active in choices:
         default_label = active
 
-    return choices[default_label].copy(), default_label, choices, path_map
+    return choices[default_label], default_label, choices, path_map
 
 
 def _has_data(df: pd.DataFrame, col: str) -> bool:
@@ -824,7 +964,7 @@ def render_dashboard(df: Optional[pd.DataFrame], sources: Dict[str, str], page: 
 
     proj_root = Path(sources.get("project") or sources.get("project_root") or ".")
 
-    df_default, ds_label, ds_choices, ds_paths = _dataset_choice(sources)
+    df_default, ds_label, ds_choices, ds_paths = _dataset_choice(sources, df if running_in_studio else None)
     if ds_label == "None" or df_default.empty:
         st.error("No dataset found in this project. Ingest data first.")
         return
@@ -832,16 +972,16 @@ def render_dashboard(df: Optional[pd.DataFrame], sources: Dict[str, str], page: 
     ds_labels = list(ds_choices.keys())
     ds_index = ds_labels.index(ds_label) if ds_label in ds_labels else 0
 
-    df_dt_probe = df_default.copy()
-    if "date_time" not in df_dt_probe.columns and "recording_dt" in df_dt_probe.columns:
-        df_dt_probe["date_time"] = df_dt_probe["recording_dt"].astype(str)
-    if "date_time" in df_dt_probe.columns:
-        df_dt_probe["dt"] = parse_dt_col(df_dt_probe["date_time"])
+    if "date_time" in df_default.columns:
+        dt_full_probe = parse_dt_full(df_default["date_time"])
+    elif "recording_dt" in df_default.columns:
+        dt_full_probe = parse_dt_full(df_default["recording_dt"])
     else:
-        df_dt_probe["dt"] = pd.NaT
-    no_dates = df_dt_probe["dt"].dropna().empty
+        dt_full_probe = pd.Series(pd.NaT, index=df_default.index, dtype="datetime64[ns]")
+    dt_probe = dt_full_probe.dt.normalize()
+    no_dates = dt_probe.dropna().empty
     if not no_dates:
-        min_dt, max_dt = df_dt_probe["dt"].min(), df_dt_probe["dt"].max()
+        min_dt, max_dt = dt_probe.min(), dt_probe.max()
     else:
         today = pd.Timestamp.utcnow().normalize()
         min_dt = max_dt = today
@@ -857,7 +997,9 @@ def render_dashboard(df: Optional[pd.DataFrame], sources: Dict[str, str], page: 
         "species_name"
         if (
             "species_name" in group_candidates
-            and df_default["species_name"].astype(str).replace({"": np.nan, "nan": np.nan}).nunique() > 1
+            and df_default["species_name"].astype("string").str.strip().mask(
+                lambda x: x.str.lower().isin(["", "nan", "<na>", "none"])
+            ).nunique(dropna=True) > 1
         )
         else ("recorder_id" if "recorder_id" in group_candidates else group_candidates[0])
     )
@@ -892,35 +1034,39 @@ def render_dashboard(df: Optional[pd.DataFrame], sources: Dict[str, str], page: 
                 st.rerun()
 
     if dataset_label != ds_label:
-        df_default = ds_choices[dataset_label].copy()
+        df_default = ds_choices[dataset_label]
         st.session_state["active_dataset_label"] = dataset_label
         st.session_state["active_dataset_path"] = str(ds_paths.get(dataset_label, ""))
-        st.session_state["pa_df_det"] = df_default.copy()
     st.session_state.setdefault("active_dataset_label", dataset_label)
     st.session_state.setdefault("active_dataset_path", str(ds_paths.get(dataset_label, "")))
-    st.session_state["pa_df_det"] = df_default.copy()
+    st.session_state["pa_df_det"] = df_default
 
     df_raw = _apply_canonical_overrides(df_default)
     df_all = _augment_grouping_fields_class(df_raw)
     df_all = _ensure_latlon(df_all)
 
-    df_dt = df_all.copy()
-    if "date_time" not in df_dt.columns and "recording_dt" in df_dt.columns:
-        df_dt["date_time"] = df_dt["recording_dt"].astype(str)
-    if "date_time" in df_dt.columns:
-        df_dt["dt"] = parse_dt_col(df_dt["date_time"])
+    if "date_time" not in df_all.columns and "recording_dt" in df_all.columns:
+        df_all["date_time"] = df_all["recording_dt"].astype(str)
+    if "date_time" in df_all.columns:
+        if dataset_label == ds_label and len(dt_full_probe) == len(df_all):
+            dt_full = pd.Series(dt_full_probe.to_numpy(copy=False), index=df_all.index)
+        else:
+            dt_full = parse_dt_full(df_all["date_time"])
+        df_all["dt_full"] = dt_full
+        df_all["dt"] = dt_full.dt.normalize()
     else:
-        df_dt["dt"] = pd.NaT
+        df_all["dt_full"] = pd.NaT
+        df_all["dt"] = pd.NaT
 
     if not no_dates:
         if isinstance(date_sel, (tuple, list)):
             d_start, d_end = date_sel[0], date_sel[-1]
         else:
             d_start = d_end = date_sel
-        mask = df_dt["dt"].dt.date.between(d_start, d_end)
-        df_page = df_dt.loc[mask].copy()
+        mask = df_all["dt"].dt.date.between(d_start, d_end)
+        df_page = df_all.loc[mask].copy()
     else:
-        df_page = df_dt.copy()
+        df_page = df_all
 
     if "class" not in df_page.columns and "species_name" in df_page.columns:
         df_page["class"] = df_page["species_name"].astype(str)
@@ -962,7 +1108,6 @@ def render_dashboard(df: Optional[pd.DataFrame], sources: Dict[str, str], page: 
             tmp["Detection Rate (%)"] = (tmp["Detection Rate (%)"] * 100).round(1).astype(str) + "%"
         st.dataframe(tmp, width='stretch')
 
-    df_page = _ensure_latlon(df_page)
     need_latlon = df_page[["lat", "lon"]].dropna().empty
     if need_latlon:
         df_page = _attach_latlon_from_glob(df_page, df_all)
@@ -1039,9 +1184,9 @@ def render_dashboard(df: Optional[pd.DataFrame], sources: Dict[str, str], page: 
         st.pydeck_chart(deck, height=800)
 
     # Detections over time
-    if "date_time" in df_page.columns and not df_page.empty and not df_dt["dt"].dropna().empty:
+    if "date_time" in df_page.columns and not df_page.empty:
         dfc = df_page.copy()
-        dfc["date"] = parse_dt_col(dfc["date_time"])
+        dfc["date"] = dfc["dt"] if "dt" in dfc.columns else parse_dt_col(dfc["date_time"])
 
         unique_dates = pd.DataFrame({"date": pd.to_datetime(sorted(dfc["date"].dropna().unique()))})
         unique_group = pd.DataFrame({group_key: dfc[group_key].dropna().unique()})
@@ -1084,8 +1229,10 @@ def render_dashboard(df: Optional[pd.DataFrame], sources: Dict[str, str], page: 
     # Detections by time of day
     if "date_time" in df_page.columns and not df_page.empty:
         dft = df_page.copy()
-        dft["dt"] = parse_dt_full(dft["date_time"])
-        dft["time_of_day"] = dft["dt"].dt.time
+        if "dt_full" in dft.columns:
+            dft["time_of_day"] = pd.to_datetime(dft["dt_full"], errors="coerce").dt.time
+        else:
+            dft["time_of_day"] = parse_dt_full(dft["date_time"]).dt.time
 
         tod = (
             dft.assign(_present=(dft["FinalLabelEffective"].str.lower() == "present"))
@@ -1121,4 +1268,4 @@ def render_dashboard(df: Optional[pd.DataFrame], sources: Dict[str, str], page: 
                 )
                 st.altair_chart(tod_chart, use_container_width=True)
 
-    show_detection_examples(df_page, df_all, proj_root)
+    show_detection_examples(df_page, df_all, proj_root, show_header=True)
