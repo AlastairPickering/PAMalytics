@@ -1,5 +1,5 @@
 #ifndef MyAppVersion
-  #define MyAppVersion "1.0.0"
+  #define MyAppVersion "1.0.4"
 #endif
 
 #ifndef MySourceDir
@@ -30,11 +30,11 @@ ArchitecturesInstallIn64BitMode=x64compatible
 PrivilegesRequired=admin
 CloseApplications=yes
 RestartApplications=no
-VersionInfoVersion=1.0.0.0
+VersionInfoVersion=1.0.4.0
 VersionInfoCompany=Alastair Pickering
 VersionInfoDescription=PAMalytics Windows installer
 VersionInfoProductName=PAMalytics
-VersionInfoProductVersion=1.0.0.0
+VersionInfoProductVersion=1.0.4.0
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"

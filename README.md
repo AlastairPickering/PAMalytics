@@ -3,10 +3,6 @@
 
 PAMalytics is an open-source, no-code, classifier-agnostic dashboard for reviewing bioacoustic classifier outputs. It supports detection summaries, audio/spectrogram review, validation edits, uncertainty flags, threshold recalculation and export of validated results.
 
-Please cite our pre-print: https://www.biorxiv.org/content/10.64898/2026.08.14.744822v1
-
-Pickering, A., Martinez Balvanera, S., Brown, N., Chea, S., Preston-Allen, R., Sor, R., Maynard, D.S. and Lawson, J.L., 2026. PAMalytics: a no-code application for structured validation of bioacoustic detections. bioRxiv, pp.2026-08.
-
 User guide: https://alastairpickering.github.io/PAMalytics/
 
 <img width="256" height="256" alt="PAMalytics logo" src="docs/assets/brand/pamalytics-logo.png" />
@@ -20,7 +16,7 @@ Pre-built desktop applications are available from the latest GitHub release.
 Download:
 
 ```text
-PAMalytics-v1.0.1-macOS-arm64.dmg
+PAMalytics-v1.0.4-macOS-arm64.dmg
 ```
 
 This build is for Apple Silicon Macs and is signed and notarised by Apple.
@@ -32,7 +28,7 @@ Open the DMG, drag PAMalytics into Applications, then launch it from Application
 Download:
 
 ```text
-PAMalytics-v1.0.1-windows-x64-setup.exe
+PAMalytics-v1.0.4-windows-x64-setup.exe
 ```
 
 Run the installer, then launch PAMalytics from the Windows Start menu.
@@ -43,8 +39,8 @@ The Windows installer is currently unsigned, so Windows may display a security w
 
 SHA-256 checksum files are provided alongside both installers:
 
-- `PAMalytics-v1.0.1-macOS-arm64.dmg.sha256`
-- `PAMalytics-v1.0.1-windows-x64-setup.exe.sha256`
+- `PAMalytics-v1.0.4-macOS-arm64.dmg.sha256`
+- `PAMalytics-v1.0.4-windows-x64-setup.exe.sha256`
 
 ## Building the macOS app from source
 
@@ -59,7 +55,7 @@ python -m pip install --upgrade pip setuptools wheel
 python -m pip install -r requirements-build-macos.txt
 python -m code.scripts.smoke_test
 python packaging/macos/build_app.py
-bash packaging/macos/build_dmg.sh
+bash packaging/macos/build_dmg.sh v1.0.4
 ```
 
 The DMG will be written to `release/`. 

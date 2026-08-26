@@ -6,7 +6,7 @@ For most users, the recommended way to run PAMalytics is to install the packaged
 
 ### macOS
 
-1. Download `PAMalytics-v1.0.1-macOS-arm64.dmg`.
+1. Download `PAMalytics-v1.0.4-macOS-arm64.dmg`.
 2. Open the DMG.
 3. Drag **PAMalytics** into **Applications**.
 4. Launch PAMalytics from Applications.
@@ -15,7 +15,7 @@ The macOS application is signed and notarised by Apple.
 
 ### Windows
 
-1. Download `PAMalytics-v1.0.1-windows-x64-setup.exe`.
+1. Download `PAMalytics-v1.0.4-windows-x64-setup.exe`.
 2. Run the installer.
 3. Launch PAMalytics from the Windows Start menu.
 

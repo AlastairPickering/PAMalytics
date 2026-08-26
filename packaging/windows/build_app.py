@@ -66,8 +66,8 @@ def _write_version_info() -> None:
     VERSION_FILE.write_text(
         """VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 0, 0, 0),
-    prodvers=(1, 0, 0, 0),
+    filevers=(1, 0, 4, 0),
+    prodvers=(1, 0, 4, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -82,12 +82,12 @@ def _write_version_info() -> None:
         [
           StringStruct('CompanyName', 'Alastair Pickering'),
           StringStruct('FileDescription', 'PAMalytics desktop application'),
-          StringStruct('FileVersion', '1.0.0'),
+          StringStruct('FileVersion', '1.0.4'),
           StringStruct('InternalName', 'PAMalytics'),
           StringStruct('LegalCopyright', 'Copyright © 2026 Alastair Pickering'),
           StringStruct('OriginalFilename', 'PAMalytics.exe'),
           StringStruct('ProductName', 'PAMalytics'),
-          StringStruct('ProductVersion', '1.0.0')
+          StringStruct('ProductVersion', '1.0.4')
         ]
       )
     ]),
