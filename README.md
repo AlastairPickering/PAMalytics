@@ -3,6 +3,10 @@
 
 PAMalytics is an open-source, no-code, classifier-agnostic dashboard for reviewing bioacoustic classifier outputs. It supports detection summaries, audio/spectrogram review, validation edits, uncertainty flags, threshold recalculation and export of validated results.
 
+Please cite our pre-print: https://www.biorxiv.org/content/10.64898/2026.08.14.744822v1
+
+Pickering, A., Martinez Balvanera, S., Brown, N., Chea, S., Preston-Allen, R., Sor, R., Maynard, D.S. and Lawson, J.L., 2026. PAMalytics: a no-code application for structured validation of bioacoustic detections. bioRxiv, pp.2026-08.
+
 User guide: https://alastairpickering.github.io/PAMalytics/
 
 <img width="256" height="256" alt="PAMalytics logo" src="docs/assets/brand/pamalytics-logo.png" />
