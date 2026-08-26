@@ -11,12 +11,15 @@ from typing import Optional, Tuple, Dict, List
 import numpy as np
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 import librosa
 import matplotlib.pyplot as plt
 import soundfile as sf
 import plotly.graph_objects as go
 from matplotlib.ticker import FuncFormatter
+from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.patches import Rectangle
+from code.app_paths import USER_ROOT
 
 # Page config
 try:
@@ -342,15 +345,18 @@ def _dataset_choice_validate(sources: dict) -> Tuple[pd.DataFrame, str, Dict[str
 
     df_val = _load_csv_safe(p_valid)
     if df_val is not None:
-        choices["Validated (published)"] = df_val
-        path_map["Validated (published)"] = p_valid
+        choices["Updated"] = df_val
+        path_map["Updated"] = p_valid
 
     if not choices:
         return pd.DataFrame(), "None", {}, {}
 
-    default_label = "Validated (published)" if "Validated (published)" in choices else "Original"
+    default_label = "Updated" if "Updated" in choices else "Original"
 
     active = st.session_state.get("active_dataset_label")
+    if active == "Validated (published)":
+        active = "Updated"
+        st.session_state["active_dataset_label"] = "Updated"
     if isinstance(active, str) and active in choices:
         default_label = active
 
@@ -795,8 +801,8 @@ def _tmp_audio_path(proj_root: Path, base: str, species_line: str, te: int, sr: 
 
 def _get_validate_n_fft(sr: int) -> int:
     if bool(st.session_state.get("validate_use_fft_override", False)):
-        return int(st.session_state.get("validate_fft_size", 4096))
-    return 8192 if sr > 48_000 else 4096
+        return int(st.session_state.get("validate_fft_size", AUDACITY_WINDOW_SIZE_DEFAULT))
+    return AUDACITY_WINDOW_SIZE_DEFAULT
 
 def _match_frame_count(x: np.ndarray, n_frames: int) -> np.ndarray:
     arr = np.asarray(x, dtype=float).reshape(-1)
@@ -954,6 +960,57 @@ def _offset_detection_times(gdf: pd.DataFrame, offset_s: float) -> pd.DataFrame:
             out[col] = pd.to_numeric(out[col], errors="coerce") - float(offset_s)
     return out
 
+AUDACITY_GAIN_DB_DEFAULT = 20.0
+AUDACITY_RANGE_DB_DEFAULT = 80.0
+AUDACITY_ZERO_PADDING_FACTOR = 2
+AUDACITY_WINDOW_SIZE_DEFAULT = 2048
+AUDACITY_COLORS = [
+    (0.00, "#000000"),
+    (0.25, "#000080"),
+    (0.50, "#cc00cc"),
+    (0.75, "#ff8000"),
+    (1.00, "#ffffff"),
+]
+AUDACITY_CMAP = LinearSegmentedColormap.from_list(
+    "pamalytics_audacity", [c for _, c in AUDACITY_COLORS], N=256
+)
+AUDACITY_PLOTLY_COLORSCALE = [[float(x), c] for x, c in AUDACITY_COLORS]
+
+
+def _audacity_stft(
+    y: np.ndarray,
+    sr: int,
+    window_size: int,
+    hop_length: int,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return Audacity-calibrated STFT power, dBFS levels and frequencies."""
+    win_length = max(2, int(window_size))
+    fft_size = max(win_length, win_length * AUDACITY_ZERO_PADDING_FACTOR)
+    window = librosa.filters.get_window("hann", win_length, fftbins=True)
+    D = librosa.stft(
+        y=y,
+        n_fft=fft_size,
+        win_length=win_length,
+        hop_length=max(1, int(hop_length)),
+        window=window,
+        center=True,
+    )
+    magnitude = np.abs(D)
+    coherent_gain = float(np.sum(window))
+    if coherent_gain <= 0.0:
+        coherent_gain = float(win_length)
+    amplitude = magnitude * (2.0 / coherent_gain)
+    if amplitude.shape[0] > 0:
+        amplitude[0, :] *= 0.5
+    if fft_size % 2 == 0 and amplitude.shape[0] > 1:
+        amplitude[-1, :] *= 0.5
+    tiny = np.finfo(float).tiny
+    S_dB = 20.0 * np.log10(np.maximum(amplitude, tiny))
+    S_power = magnitude ** 2
+    freqs_hz = librosa.fft_frequencies(sr=sr, n_fft=fft_size)
+    return S_power, S_dB, freqs_hz
+
+
 @st.cache_data(show_spinner=False, max_entries=128)
 def _compute_static_spectrogram_data(
     y: np.ndarray,
@@ -969,15 +1026,16 @@ def _compute_static_spectrogram_data(
     }
     if y.size == 0 or sr <= 0:
         return out
-    D = librosa.stft(y=y, n_fft=int(n_fft), hop_length=int(hop_length))
-    S_power = np.abs(D) ** 2
+    S_power, S_dB, freqs_hz = _audacity_stft(
+        y=y, sr=sr, window_size=int(n_fft), hop_length=int(hop_length)
+    )
     if S_power.size == 0:
         return out
-    out["S_dB"] = librosa.power_to_db(S_power, ref=np.max, top_db=90)
+    out["S_dB"] = S_dB
     out["times"] = librosa.frames_to_time(
         np.arange(S_power.shape[1]), sr=sr, hop_length=hop_length
     )
-    out["freqs_hz"] = librosa.fft_frequencies(sr=sr, n_fft=n_fft)
+    out["freqs_hz"] = freqs_hz
     return out
 
 
@@ -1005,15 +1063,14 @@ def _compute_spectrogram_data(
     if y.size == 0 or sr <= 0:
         return out
 
-    D = librosa.stft(y=y, n_fft=int(n_fft), hop_length=int(hop_length))
-    S_power = np.abs(D) ** 2
+    S_power, S_dB, freqs_hz = _audacity_stft(
+        y=y, sr=sr, window_size=int(n_fft), hop_length=int(hop_length)
+    )
     if S_power.size == 0:
         return out
 
     S_mag = np.sqrt(S_power)
-    S_dB = librosa.power_to_db(S_power, ref=np.max, top_db=90)
     times = librosa.frames_to_time(np.arange(S_power.shape[1]), sr=sr, hop_length=hop_length)
-    freqs_hz = librosa.fft_frequencies(sr=sr, n_fft=n_fft)
     n_frames = S_power.shape[1]
 
     frame_peak_idx = np.argmax(S_power, axis=0)
@@ -1063,79 +1120,214 @@ def _compute_spectrogram_data(
     out["frame_zcr"] = _match_frame_count(frame_zcr, n_frames)
     return out
 
+@st.cache_data(show_spinner=False, max_entries=64)
+def _compute_interactive_spectrogram_data(
+    y: np.ndarray,
+    sr: int,
+    n_fft: int,
+    hop_length: int,
+) -> Dict[str, np.ndarray]:
+    out = {
+        "S_power": np.zeros((2, 2), dtype=float),
+        "S_dB": np.zeros((2, 2), dtype=float),
+        "times": np.zeros(2, dtype=float),
+        "freqs_hz": np.zeros(2, dtype=float),
+    }
+    if y.size == 0 or sr <= 0:
+        return out
+    S_power, S_dB, freqs_hz = _audacity_stft(
+        y=y, sr=sr, window_size=int(n_fft), hop_length=int(hop_length)
+    )
+    if S_power.size == 0:
+        return out
+    out["S_power"] = S_power
+    out["S_dB"] = S_dB
+    out["times"] = librosa.frames_to_time(
+        np.arange(S_power.shape[1]), sr=sr, hop_length=hop_length
+    )
+    out["freqs_hz"] = freqs_hz
+    return out
+
+
+def _selection_bounds_from_event(
+    event,
+    selectable_x: Optional[np.ndarray] = None,
+    selectable_y: Optional[np.ndarray] = None,
+) -> Optional[Tuple[float, float, float, float]]:
+    def _get(obj, key, default=None):
+        if obj is None:
+            return default
+        try:
+            if hasattr(obj, "get"):
+                return obj.get(key, default)
+        except Exception:
+            pass
+        try:
+            return getattr(obj, key)
+        except Exception:
+            return default
+
+    try:
+        selection = _get(event, "selection", {})
+        boxes = _get(selection, "box", [])
+        if isinstance(boxes, dict) or hasattr(boxes, "keys"):
+            boxes = [boxes]
+        for b in reversed(list(boxes or [])):
+            x0 = _get(b, "x0")
+            x1 = _get(b, "x1")
+            y0 = _get(b, "y0")
+            y1 = _get(b, "y1")
+            if all(v is not None for v in (x0, x1, y0, y1)):
+                return tuple(map(float, (x0, x1, y0, y1)))
+
+            xr = _get(b, "x")
+            if xr is None:
+                xr = _get(b, "xrange")
+            yr = _get(b, "y")
+            if yr is None:
+                yr = _get(b, "yrange")
+            try:
+                if xr is not None and yr is not None and len(xr) >= 2 and len(yr) >= 2:
+                    return tuple(map(float, (xr[0], xr[1], yr[0], yr[1])))
+            except Exception:
+                pass
+
+        # Streamlit always exposes the points enclosed by a Plotly box.
+        # Deriving the bounds from those selected Cartesian points is a
+        # reliable fallback across Streamlit/Plotly versions.
+        points = _get(selection, "points", []) or []
+        xs, ys = [], []
+        for pt in points:
+            xv = _get(pt, "x")
+            yv = _get(pt, "y")
+            if xv is None or yv is None:
+                cd = _get(pt, "customdata")
+                try:
+                    if cd is not None and len(cd) >= 2:
+                        xv, yv = cd[0], cd[1]
+                except Exception:
+                    pass
+            try:
+                if xv is not None and yv is not None:
+                    xs.append(float(xv))
+                    ys.append(float(yv))
+            except Exception:
+                continue
+        if xs and ys:
+            return min(xs), max(xs), min(ys), max(ys)
+
+        # Some Streamlit/Plotly combinations return only point indices for a
+        # selected scatter surface.  Resolve those indices against the known
+        # selection mesh rather than silently losing the rectangle.
+        indices = _get(selection, "point_indices", []) or []
+        if selectable_x is not None and selectable_y is not None and indices:
+            sx = np.asarray(selectable_x).ravel()
+            sy = np.asarray(selectable_y).ravel()
+            vals_x, vals_y = [], []
+            for idx in indices:
+                try:
+                    i = int(idx)
+                    if 0 <= i < len(sx) and 0 <= i < len(sy):
+                        vals_x.append(float(sx[i]))
+                        vals_y.append(float(sy[i]))
+                except Exception:
+                    continue
+            if vals_x and vals_y:
+                return min(vals_x), max(vals_x), min(vals_y), max(vals_y)
+    except Exception:
+        return None
+    return None
+
+
+def _spectrogram_selection_stats(
+    S_power: np.ndarray,
+    S_dB: np.ndarray,
+    times: np.ndarray,
+    freqs_hz: np.ndarray,
+    bounds: Tuple[float, float, float, float],
+) -> Optional[Dict[str, float]]:
+    x0, x1, y0, y1 = map(float, bounds)
+    t0, t1 = sorted((x0, x1))
+    f0, f1 = sorted((y0, y1))
+    tmask = (times >= t0) & (times <= t1)
+    fmask = (freqs_hz >= f0) & (freqs_hz <= f1)
+    if not np.any(tmask) or not np.any(fmask):
+        return None
+    power = S_power[np.ix_(fmask, tmask)]
+    levels = S_dB[np.ix_(fmask, tmask)]
+    if power.size == 0:
+        return None
+    freqs = freqs_hz[fmask]
+    summed_by_freq = np.sum(power, axis=1)
+    denom = float(np.sum(summed_by_freq))
+    centroid = float(np.sum(freqs * summed_by_freq) / denom) if denom > 0 else np.nan
+    peak_row = int(np.argmax(summed_by_freq)) if summed_by_freq.size else 0
+    peak_freq = float(freqs[peak_row]) if freqs.size else np.nan
+    peak_level = float(np.nanmax(levels)) if np.isfinite(levels).any() else np.nan
+    return {
+        "t0": t0, "t1": t1, "f0": f0, "f1": f1,
+        "duration_s": max(0.0, t1 - t0),
+        "bandwidth_hz": max(0.0, f1 - f0),
+        "peak_freq_hz": peak_freq,
+        "centroid_hz": centroid,
+        "peak_level_dbfs": peak_level,
+    }
+
+
 def _plotly_spectrogram_figure(
     S_dB: np.ndarray,
     times: np.ndarray,
     freqs_hz: np.ndarray,
-    frame_peak_freq_hz: np.ndarray,
-    frame_centroid_hz: np.ndarray,
-    frame_bandwidth_hz: np.ndarray,
-    frame_rolloff_hz: np.ndarray,
-    frame_flatness: np.ndarray,
-    frame_rms: np.ndarray,
-    frame_zcr: np.ndarray,
     boxes: List[Dict[str, float]],
     xmin: float,
     xmax: float,
     ymin: float,
     ymax: float,
-) -> go.Figure:
-    zmax = float(np.nanmax(S_dB)) if np.size(S_dB) else 0.0
-    zmin = zmax - 90.0
+    dynamic_range_db: float = AUDACITY_RANGE_DB_DEFAULT,
+    gain_db: float = AUDACITY_GAIN_DB_DEFAULT,
+) -> Tuple[go.Figure, np.ndarray, np.ndarray]:
+    zmax = -float(gain_db)
+    zmin = zmax - float(dynamic_range_db)
 
     fig = go.Figure()
-
     fig.add_trace(
         go.Heatmap(
             z=S_dB,
             x=times,
             y=freqs_hz,
-            colorscale="Viridis",
+            colorscale=AUDACITY_PLOTLY_COLORSCALE,
             zmin=zmin,
             zmax=zmax,
-            colorbar=dict(title="dB"),
+            colorbar=dict(title="dBFS"),
             hovertemplate=(
                 "<b>Cursor</b><br>"
                 "Time: %{x:.3f} s<br>"
                 "Frequency: %{y:.0f} Hz<br>"
-                "Level: %{z:.1f} dB"
+                "Level: %{z:.1f} dBFS"
                 "<extra></extra>"
             ),
         )
     )
 
-    frame_customdata = np.column_stack([
-        frame_peak_freq_hz,
-        frame_centroid_hz,
-        frame_bandwidth_hz,
-        frame_rolloff_hz,
-        frame_flatness,
-        frame_rms,
-        frame_zcr,
-    ])
-
-    hover_y = np.full(len(times), ymin + 0.5 * (ymax - ymin), dtype=float)
-
+    # Transparent selection mesh: Plotly heatmaps do not reliably emit box
+    # selections themselves, so this lightweight scatter layer supplies the
+    # selectable Cartesian surface without changing hover or appearance.
+    sel_x = np.linspace(float(xmin), float(xmax), 121)
+    sel_y = np.linspace(float(ymin), float(ymax), 81)
+    gx, gy = np.meshgrid(sel_x, sel_y)
+    selection_x = gx.ravel()
+    selection_y = gy.ravel()
+    selection_custom = np.column_stack([selection_x, selection_y])
     fig.add_trace(
-        go.Scatter(
-            x=times,
-            y=hover_y,
+        go.Scattergl(
+            x=selection_x,
+            y=selection_y,
+            customdata=selection_custom,
             mode="markers",
-            marker=dict(size=16, opacity=0),
-            customdata=frame_customdata,
-            hovertemplate=(
-                "<b>Frame summary</b><br>"
-                "Time: %{x:.3f} s<br>"
-                "Frame peak frequency: %{customdata[0]:.0f} Hz<br>"
-                "Frame centroid: %{customdata[1]:.0f} Hz<br>"
-                "Frame bandwidth: %{customdata[2]:.0f} Hz<br>"
-                "Frame rolloff (85%): %{customdata[3]:.0f} Hz<br>"
-                "Frame flatness: %{customdata[4]:.4f}<br>"
-                "Frame RMS: %{customdata[5]:.5f}<br>"
-                "Frame ZCR: %{customdata[6]:.5f}"
-                "<extra></extra>"
-            ),
+            marker=dict(size=6, opacity=0.002),
+            hoverinfo="skip",
             showlegend=False,
+            name="selection surface",
         )
     )
 
@@ -1145,26 +1337,19 @@ def _plotly_spectrogram_figure(
         low_f = _num(b.get("low_freq"))
         high_f = _num(b.get("high_freq"))
         prob = b.get("prob", np.nan)
-
         y0 = low_f if np.isfinite(low_f) else ymin
         y1 = high_f if np.isfinite(high_f) and high_f > y0 else ymax
-
         fig.add_shape(
-            type="rect",
-            x0=x0,
-            x1=x1,
-            y0=y0,
-            y1=y1,
+            type="rect", x0=x0, x1=x1, y0=y0, y1=y1,
             line=dict(width=1, color="rgba(255,255,255,0.22)"),
             fillcolor="rgba(255,255,255,0.08)",
+            layer="above",
         )
-
         if np.isfinite(prob):
             fig.add_annotation(
                 x=(x0 + x1) * 0.5,
                 y=ymin + 0.88 * (ymax - ymin),
-                text=f"{prob:.2f}",
-                showarrow=False,
+                text=f"{prob:.2f}", showarrow=False,
                 bgcolor="rgba(0,0,0,0.55)",
                 bordercolor="rgba(255,255,255,0.25)",
                 font=dict(size=11, color="white"),
@@ -1172,24 +1357,20 @@ def _plotly_spectrogram_figure(
 
     tick_step = 1000 if (ymax - ymin) <= 15000 else 5000
     tick_vals = np.arange(max(0, int(ymin // 1000) * 1000), int(ymax) + 1, tick_step)
-
-    fig.update_xaxes(title_text="Time (s)", range=[xmin, xmax], fixedrange=True)
+    fig.update_xaxes(title_text="Time (s)", range=[xmin, xmax], fixedrange=False)
     fig.update_yaxes(
-        title_text="Frequency (kHz)",
-        range=[ymin, ymax],
+        title_text="Frequency (kHz)", range=[ymin, ymax],
         tickvals=tick_vals.tolist(),
-        ticktext=[f"{v/1000:.0f}" for v in tick_vals],
-        fixedrange=True,
+        ticktext=[f"{v/1000:.1f}" for v in tick_vals],
+        fixedrange=False,
     )
-
     fig.update_layout(
-        height=560,
-        autosize=False,
-        margin=dict(l=10, r=10, t=10, b=10),
-        hovermode="closest",
+        height=920, autosize=True, margin=dict(l=4, r=4, t=4, b=4),
+        hovermode="closest", dragmode="select",
+        newselection=dict(line=dict(color="white", width=2, dash="dot")),
+        activeselection=dict(fillcolor="rgba(255,255,255,0.12)", opacity=0.35),
     )
-
-    return fig
+    return fig, selection_x, selection_y
 
 
 def _render_interactive_validate_dialog(
@@ -1204,6 +1385,8 @@ def _render_interactive_validate_dialog(
     ymax: float,
     n_fft: int,
     hop_length: int,
+    dynamic_range_db: float = AUDACITY_RANGE_DB_DEFAULT,
+    gain_db: float = AUDACITY_GAIN_DB_DEFAULT,
 ):
     gdf_int = grouped.get_group((base, species_orig)).copy()
     apath_int = _resolve_audio_path(proj_root, gdf_int, df_all)
@@ -1272,47 +1455,72 @@ def _render_interactive_validate_dialog(
         ymin_int = 0.0
         ymax_int = nyq_int
 
-    spec_int = _compute_spectrogram_data(
+    spec_int = _compute_interactive_spectrogram_data(
         y=y_int,
         sr=sr_int,
         n_fft=n_fft_int,
         hop_length=hop_int,
     )
 
+    S_power_int = spec_int["S_power"]
     S_dB_int = spec_int["S_dB"]
     times_int = spec_int["times"] + float(xmin_int)
     freqs_hz_int = spec_int["freqs_hz"]
-    frame_peak_freq_hz_int = spec_int["frame_peak_freq_hz"]
-    frame_centroid_hz_int = spec_int["frame_centroid_hz"]
-    frame_bandwidth_hz_int = spec_int["frame_bandwidth_hz"]
-    frame_rolloff_hz_int = spec_int["frame_rolloff_hz"]
-    frame_flatness_int = spec_int["frame_flatness"]
-    frame_rms_int = spec_int["frame_rms"]
-    frame_zcr_int = spec_int["frame_zcr"]
 
-    fig_int = _plotly_spectrogram_figure(
+    fig_int, selection_x_int, selection_y_int = _plotly_spectrogram_figure(
         S_dB=S_dB_int,
         times=times_int,
         freqs_hz=freqs_hz_int,
-        frame_peak_freq_hz=frame_peak_freq_hz_int,
-        frame_centroid_hz=frame_centroid_hz_int,
-        frame_bandwidth_hz=frame_bandwidth_hz_int,
-        frame_rolloff_hz=frame_rolloff_hz_int,
-        frame_flatness=frame_flatness_int,
-        frame_rms=frame_rms_int,
-        frame_zcr=frame_zcr_int,
         boxes=boxes_int,
         xmin=xmin_int,
         xmax=xmax_int,
         ymin=ymin_int,
         ymax=ymax_int,
+        dynamic_range_db=float(dynamic_range_db),
+        gain_db=float(gain_db),
     )
 
-    st.caption(f"{base} • {species_orig}")
-    st.plotly_chart(
+    # Keep event measurements above the plot so they remain visible while reviewing.
+    event_summary_slot = st.container()
+    plot_key = f"validate_interactive_plot_{abs(hash((base, species_orig))) % 100000000}"
+    event = st.plotly_chart(
         fig_int,
-        config={"displayModeBar": True},
+        key=plot_key,
+        on_select="rerun",
+        selection_mode="box",
+        config={
+            "displayModeBar": True,
+            "displaylogo": False,
+            "scrollZoom": True,
+            "modeBarButtonsToRemove": ["lasso2d"],
+        },
     )
+
+    bounds = _selection_bounds_from_event(
+        event, selectable_x=selection_x_int, selectable_y=selection_y_int
+    )
+    with event_summary_slot:
+        if bounds is not None:
+            stats = _spectrogram_selection_stats(
+                S_power=S_power_int,
+                S_dB=S_dB_int,
+                times=times_int,
+                freqs_hz=freqs_hz_int,
+                bounds=bounds,
+            )
+            if stats is not None:
+                st.markdown(
+                    "**Selected event** · "
+                    f"{stats['t0']:.3f}–{stats['t1']:.3f} s · "
+                    f"{stats['f0']/1000:.2f}–{stats['f1']/1000:.2f} kHz · "
+                    f"**{stats['duration_s']*1000:.0f} ms** · "
+                    f"**{stats['bandwidth_hz']/1000:.2f} kHz bandwidth** · "
+                    f"Peak **{stats['peak_freq_hz']/1000:.2f} kHz** · "
+                    f"Centroid **{stats['centroid_hz']/1000:.2f} kHz** · "
+                    f"**{stats['peak_level_dbfs']:.1f} dBFS**"
+                )
+        else:
+            st.caption("Drag a box around a call to measure it. Use the Plotly toolbar for zoom/pan when needed.")
 
 def _acoustic_metrics_for_detection(
     y: np.ndarray,
@@ -1426,6 +1634,56 @@ def _compute_detection_acoustic_summary(
     return pd.DataFrame(rows)
 
 
+# Validation preference helpers
+
+def _validate_user_pref_path(user_name: str = "") -> Path:
+    # Desktop PAMalytics has one local preference store.  Keep this setting
+    # independent of transient login/session identifiers so it survives
+    # project changes, navigation and application restarts reliably.
+    d = USER_ROOT / "user_settings"
+    d.mkdir(parents=True, exist_ok=True)
+    return d / "validate_preferences.json"
+
+
+def _legacy_validate_user_pref_path(user_name: str) -> Path:
+    safe_user = "".join(ch for ch in str(user_name or "default_user") if ch.isalnum() or ch in ("-", "_")).strip("_-")
+    safe_user = safe_user or "default_user"
+    d = USER_ROOT / "user_settings"
+    d.mkdir(parents=True, exist_ok=True)
+    return d / f"validate_preferences_{safe_user}.json"
+
+
+def _load_validate_user_preferences() -> None:
+    try:
+        p = _validate_user_pref_path()
+        if not p.exists():
+            legacy = _legacy_validate_user_pref_path(_user_name())
+            if legacy.exists():
+                try:
+                    p.write_text(legacy.read_text(encoding="utf-8"), encoding="utf-8")
+                except Exception:
+                    p = legacy
+        if p.exists():
+            with open(p, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            st.session_state["validate_strategy_dont_auto_show"] = bool(
+                payload.get("strategy_dont_auto_show", False)
+            )
+    except Exception:
+        pass
+
+
+def _save_validate_user_preferences(value: Optional[bool] = None) -> None:
+    try:
+        if value is None:
+            value = bool(st.session_state.get("validate_strategy_dont_auto_show", False))
+        p = _validate_user_pref_path()
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump({"strategy_dont_auto_show": bool(value)}, f, indent=2)
+    except Exception:
+        pass
+
+
 # Strategy persistence helpers
 
 def _strategy_store_path(proj_root: Path, user_name: str) -> Path:
@@ -1449,8 +1707,12 @@ def _strategy_state_payload() -> Dict[str, object]:
         "validate_strategy_strata",
         "validate_strategy_undersized",
         "validate_strategy_metrics_source",
-        "validate_strategy_dont_auto_show",
         "validate_strategy_prompt_seen",
+        "validate_strategy_preset_label",
+        "validate_strategy_occurrence_group_column",
+        "validate_strategy_custom_species",
+        "validate_strategy_custom_site_column",
+        "validate_strategy_custom_site_value",
     ]
     return {k: st.session_state.get(k) for k in keys}
 
@@ -1465,57 +1727,121 @@ def _save_strategy_state(proj_root: Path) -> None:
 
 
 def _load_strategy_state(proj_root: Path) -> None:
-    loaded_flag = "_validate_strategy_loaded_once"
     current_user = _user_name()
-    current_key = f"{str(proj_root.resolve())}|{current_user}"
-
-    if st.session_state.get(loaded_flag) == current_key:
-        return
-
     try:
         p = _strategy_store_path(proj_root, current_user)
-        if p.exists():
-            with open(p, "r", encoding="utf-8") as f:
-                payload = json.load(f)
-
-            allowed_keys = {
-                "validate_strategy_goal",
-                "validate_strategy_balance",
-                "validate_strategy_target_mode",
-                "validate_strategy_target_value",
-                "validate_strategy_bins",
-                "validate_strategy_seed",
-                "validate_strategy_available",
-                "validate_strategy_selected",
-                "validate_strategy_strata",
-                "validate_strategy_undersized",
-                "validate_strategy_metrics_source",
-                "validate_strategy_dont_auto_show",
+        if not p.exists():
+            return
+        with open(p, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        allowed_keys = {
+            "validate_strategy_goal",
+            "validate_strategy_balance",
+            "validate_strategy_target_mode",
+            "validate_strategy_target_value",
+            "validate_strategy_bins",
+            "validate_strategy_seed",
+            "validate_strategy_available",
+            "validate_strategy_selected",
+            "validate_strategy_strata",
+            "validate_strategy_undersized",
+            "validate_strategy_metrics_source",
                 "validate_strategy_prompt_seen",
-            }
-            for k, v in payload.items():
-                if k in allowed_keys:
-                    st.session_state[k] = v
+            "validate_strategy_preset_label",
+            "validate_strategy_occurrence_group_column",
+            "validate_strategy_custom_species",
+            "validate_strategy_custom_site_column",
+            "validate_strategy_custom_site_value",
+        }
+        for k, v in payload.items():
+            if k in allowed_keys:
+                st.session_state[k] = v
     except Exception:
         pass
 
-    st.session_state[loaded_flag] = current_key
+
+# Validate display preference persistence helpers
+
+def _validate_display_store_path(proj_root: Path, user_name: str) -> Path:
+    safe_user = "".join(ch for ch in str(user_name or "default_user") if ch.isalnum() or ch in ("-", "_")).strip("_-")
+    safe_user = safe_user or "default_user"
+    d = proj_root / "workspace" / "user_settings"
+    d.mkdir(parents=True, exist_ok=True)
+    return d / f"validate_display_{safe_user}.json"
 
 
-def _sync_validate_page_input_from_page():
-    if st.session_state.get("validate_page_sync_pending", False):
-        st.session_state["validate_page_input"] = int(st.session_state.get("validate_page", 1))
-        st.session_state["validate_page_sync_pending"] = False
+def _validate_display_state_payload() -> Dict[str, object]:
+    fixed_keys = [
+        "validate_num_per_page",
+        "validate_cols_per_row",
+        "validate_show_label",
+        "validate_min_prob",
+        "validate_conf_sort",
+        "validate_lock_freq",
+        "validate_fmin_khz",
+        "validate_fmax_khz",
+        "validate_use_te_override",
+        "validate_te_override",
+        "validate_use_fft_override",
+        "validate_fft_size",
+        "validate_auto_zoom_single_detection",
+        "validate_auto_zoom_window_s",
+        "validate_group_label",
+        "validate_group_values",
+        "validate_group_col",
+    ]
+    payload = {k: st.session_state.get(k) for k in fixed_keys if k in st.session_state}
+    per_card = {}
+    for k, v in st.session_state.items():
+        ks = str(k)
+        if ks.startswith(("validate_gain_db_", "validate_dynamic_range_db_")):
+            per_card[ks] = v
+    if per_card:
+        payload["per_card_spectrogram"] = per_card
+    return payload
 
 
-def _on_validate_page_input_change():
-    st.session_state["validate_page"] = int(st.session_state.get("validate_page_input", 1))
+def _load_validate_display_state(proj_root: Path) -> None:
+    try:
+        p = _validate_display_store_path(proj_root, _user_name())
+        if not p.exists():
+            return
+        with open(p, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        for k, v in payload.items():
+            if k == "per_card_spectrogram" and isinstance(v, dict):
+                for card_key, card_value in v.items():
+                    if (
+                        str(card_key).startswith(("validate_gain_db_", "validate_dynamic_range_db_"))
+                        and card_key not in st.session_state
+                    ):
+                        st.session_state[card_key] = card_value
+            elif str(k).startswith("validate_") and k not in st.session_state:
+                st.session_state[k] = v
+    except Exception:
+        pass
+
+
+def _save_validate_display_state(proj_root: Path) -> None:
+    try:
+        p = _validate_display_store_path(proj_root, _user_name())
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump(_validate_display_state_payload(), f, indent=2)
+    except Exception:
+        pass
+
+
+def _prepare_validate_page_input():
+    canonical = max(1, int(st.session_state.get("validate_page", 1)))
+    if st.session_state.get("_validate_page_input_last_canonical") != canonical:
+        st.session_state["validate_page_input"] = canonical
+        st.session_state["_validate_page_input_last_canonical"] = canonical
+    return canonical
 
 
 def _reset_validate_page_for_sort_change():
     st.session_state["validate_page"] = 1
-    st.session_state["validate_page_input"] = 1
-    st.session_state["validate_page_sync_pending"] = False
+    st.session_state["_validate_scroll_cards_top_pending"] = True
 
 
 def _clear_validate_time_window_state():
@@ -1534,20 +1860,29 @@ def _mark_validate_time_window_override(state_key: str):
     st.session_state[state_key] = state
 
 
-def _go_to_previous_validate_page():
-    current_page = int(st.session_state.get("validate_page", 1))
-    st.session_state["validate_page"] = max(1, current_page - 1)
-    st.session_state["validate_page_sync_pending"] = True
-
-
-def _go_to_next_validate_page():
-    current_page = int(st.session_state.get("validate_page", 1))
-    total_pages = int(st.session_state.get("_validate_total_pages", 1))
-    st.session_state["validate_page"] = min(total_pages, current_page + 1)
-    st.session_state["validate_page_sync_pending"] = True
-
-
 # Strategy helpers
+
+def _occurrence_group_column_options(df: pd.DataFrame) -> List[str]:
+    excluded = {
+        "species_name", "species_name_original", "species_display_original",
+        "presence_label", "presence_label_original", "detection_probability",
+        "basename", "file", "filepath", "audio_path", "start_s", "end_s",
+        "validation_state", "validation_notes", "reviewer",
+    }
+    options = [
+        str(c) for c in df.columns
+        if not str(c).startswith("__") and str(c) not in excluded
+    ]
+    return options
+
+
+def _occurrence_group_column(df: pd.DataFrame) -> Optional[str]:
+    options = _occurrence_group_column_options(df)
+    stored = str(st.session_state.get("validate_strategy_occurrence_group_column", "")).strip()
+    if stored in options:
+        return stored
+    return None
+
 
 def _strategy_balance_options(df: pd.DataFrame, goal: Optional[str] = None) -> Dict[str, str]:
     if goal in ("find_likely_mistakes", "review_strongest"):
@@ -1559,6 +1894,13 @@ def _strategy_balance_options(df: pd.DataFrame, goal: Optional[str] = None) -> D
         if "recorder_id" in df.columns:
             opts["recorder"] = "Recorder"
         return opts
+
+    if goal == "site_occurrence":
+        group_col = _occurrence_group_column(df)
+        group_label = group_col if group_col else "site/location"
+        species_col = df.get("species_name_original", df.get("species_name", pd.Series([""] * len(df), index=df.index)))
+        has_species = species_col.astype(str).str.strip().replace({"nan": "", "<NA>": ""}).ne("").any()
+        return {"occurrence": f"Species × {group_label}" if has_species else group_label}
 
     if goal == "equal_allocation":
         return {"all": "Confidence bands only"}
@@ -1577,6 +1919,22 @@ def _strategy_balance_options(df: pd.DataFrame, goal: Optional[str] = None) -> D
 
 
 def _strategy_group_series(df: pd.DataFrame, balance: str) -> pd.Series:
+    if balance == "occurrence":
+        group_col = _occurrence_group_column(df)
+        if group_col is None or group_col not in df.columns:
+            return pd.Series(["[group not selected]"] * len(df), index=df.index)
+        group = _clean_group_labels(
+            df[group_col],
+            f"[unknown {group_col}]",
+        ).astype(str)
+        species_raw = df.get(
+            "species_name_original",
+            df.get("species_name", pd.Series([""] * len(df), index=df.index)),
+        )
+        species = species_raw.astype(str).str.strip().replace({"nan": "", "<NA>": ""})
+        if species.ne("").any():
+            return species.where(species.ne(""), "[unknown species]") + " × " + group
+        return group
     if balance.startswith("species"):
         raw = df.get("species_display_original", pd.Series([""] * len(df), index=df.index))
         return _clean_group_labels(raw, "[unknown species]")
@@ -1590,6 +1948,8 @@ def _strategy_group_series(df: pd.DataFrame, balance: str) -> pd.Series:
 
 
 def _strategy_parent_label(balance: str) -> str:
+    if balance == "occurrence":
+        return "Species × site"
     if balance.startswith("species"):
         return "Species"
     if balance.startswith("site"):
@@ -1604,6 +1964,7 @@ def _strategy_goal_label(goal: str) -> str:
         "representative_sample": "Representative sample",
         "find_likely_mistakes": "Find likely mistakes",
         "review_strongest": "Review strongest detections",
+        "site_occurrence": "Site-level occurrence",
         "custom_stratified": "Custom stratified plan",
         "equal_allocation": "Equal allocation",
     }.get(goal, "Representative sample")
@@ -1623,6 +1984,8 @@ def _strategy_target_summary(value: int, mode: str) -> str:
 
 def _strategy_defaults_for_goal(goal: str, df_len: int) -> Tuple[str, int]:
     df_len = max(1, int(df_len))
+    if goal == "site_occurrence":
+        return "per_group_clips", 5
     if goal == "custom_stratified":
         return "per_group_percent", 10
     if goal == "equal_allocation":
@@ -1641,6 +2004,11 @@ def _target_value_for_widget(
     df_len: int,
 ) -> int:
     default_mode, default_value = _strategy_defaults_for_goal(goal, df_len)
+
+    if goal == "site_occurrence":
+        if int(stored_value) >= 1:
+            return int(max(1, stored_value))
+        return int(default_value)
 
     if goal != "custom_stratified":
         return int(max(1, min(default_value, max(1, df_len))))
@@ -1671,6 +2039,15 @@ def _strategy_presets(df_len: int) -> Dict[str, Dict[str, object]]:
             "seed": 42,
             "description": "Balanced sampling across species and confidence bands."
         },
+        "Site-level occurrence": {
+            "goal": "site_occurrence",
+            "balance": "occurrence",
+            "target_mode": "per_group_clips",
+            "target_value": 5,
+            "bins": 5,
+            "seed": 42,
+            "description": "Review the highest-confidence detections for each species at each site."
+        },
         "Likely mistakes": {
             "goal": "find_likely_mistakes",
             "balance": "species",
@@ -1688,15 +2065,6 @@ def _strategy_presets(df_len: int) -> Dict[str, Dict[str, object]]:
             "bins": 5,
             "seed": 42,
             "description": "Highest-confidence detections, regardless of group."
-        },
-        "Equal allocation": {
-            "goal": "equal_allocation",
-            "balance": "all",
-            "target_mode": "total_clips",
-            "target_value": default_total,
-            "bins": 5,
-            "seed": 42,
-            "description": "Even spread across confidence bands."
         },
         "Custom": {
             "goal": "custom_stratified",
@@ -1737,7 +2105,9 @@ def _effective_strategy_settings(df_len: int, df: Optional[pd.DataFrame] = None)
     if balance not in allowed_balance:
         balance = next(iter(allowed_balance.keys()))
 
-    if goal == "equal_allocation":
+    if goal == "site_occurrence":
+        balance = "occurrence"
+    elif goal == "equal_allocation":
         balance = "all"
 
     target_mode = str(st.session_state.get("validate_strategy_target_mode", "total_clips"))
@@ -1747,7 +2117,9 @@ def _effective_strategy_settings(df_len: int, df: Optional[pd.DataFrame] = None)
 
     default_mode, default_value = _strategy_defaults_for_goal(goal, df_len)
 
-    if goal == "custom_stratified":
+    if goal == "site_occurrence":
+        target_mode = "per_group_clips"
+    elif goal == "custom_stratified":
         if target_mode not in ("total_clips", "per_group_clips", "per_group_percent"):
             target_mode = default_mode
     else:
@@ -1832,8 +2204,10 @@ def _strategy_export_summary_df(df: pd.DataFrame, proj_root: Path, user_name: st
     if goal == "equal_allocation" or "confidence" in str(balance):
         rows.append(("Confidence bands", int(bins)))
 
+    if goal != "site_occurrence":
+        rows.append(("Random seed", int(seed)))
+
     rows.extend([
-        ("Random seed", int(seed)),
         ("Available detections", available_count),
         ("Selected for review", selected_count),
         ("Groups / strata", group_count),
@@ -1878,6 +2252,13 @@ def _strategy_review_summary_text(
     balance_text = _strategy_balance_label(balance, df, goal).lower()
     target_text = _strategy_target_summary(target_value, target_mode)
 
+    if goal == "site_occurrence":
+        group_col = _occurrence_group_column(df)
+        species_col = df.get("species_name_original", df.get("species_name", pd.Series([""] * len(df), index=df.index)))
+        has_species = species_col.astype(str).str.strip().replace({"nan": "", "<NA>": ""}).ne("").any()
+        unit = f"species × {group_col}" if has_species and group_col else (group_col or "selected site/location field")
+        return f"Review the {int(target_value)} highest-confidence detections per {unit}."
+
     if goal == "find_likely_mistakes":
         if balance == "all":
             return f"Review the lowest-confidence clips only. Target {target_text} from the filtered pool."
@@ -1912,6 +2293,9 @@ def _strategy_shortfall_count(
 ) -> int:
     if df_scope.empty:
         return 0
+
+    if goal == "site_occurrence":
+        balance = "occurrence"
 
     if balance == "all":
         desired_total = _desired_total_from_settings(df_scope, goal, target_mode, target_value)
@@ -2305,6 +2689,27 @@ def _enforce_final_selection_total(
     )
 
 
+def _apply_custom_strategy_scope(df_in: pd.DataFrame, goal: str) -> pd.DataFrame:
+    if goal != "custom_stratified" or df_in.empty:
+        return df_in
+    df = df_in.copy()
+
+    species_value = str(st.session_state.get("validate_strategy_custom_species", "")).strip()
+    if species_value and species_value != "All species":
+        species_raw = df.get(
+            "species_name_original",
+            df.get("species_name", pd.Series([""] * len(df), index=df.index)),
+        ).astype(str).str.strip()
+        df = df[species_raw.eq(species_value)]
+
+    site_col = str(st.session_state.get("validate_strategy_custom_site_column", "")).strip()
+    site_value = str(st.session_state.get("validate_strategy_custom_site_value", "")).strip()
+    if site_col and site_col in df.columns and site_value and site_value != "All sites/locations":
+        df = df[df[site_col].astype(str).str.strip().eq(site_value)]
+
+    return df
+
+
 def _compute_strategy_plan(
     df_in: pd.DataFrame,
     goal: str,
@@ -2315,10 +2720,52 @@ def _compute_strategy_plan(
     seed: int,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     df = df_in.copy()
+    df = _apply_custom_strategy_scope(df, goal)
     if df.empty:
         return df, pd.DataFrame()
 
     desired_total = _desired_total_from_settings(df, goal, target_mode, target_value)
+
+    if goal == "site_occurrence":
+        group_col = _occurrence_group_column(df)
+        if group_col is None or group_col not in df.columns:
+            return df.head(0).copy(), pd.DataFrame()
+
+        work = df.copy()
+        work["__strategy_parent"] = _strategy_group_series(work, "occurrence").astype(str)
+        available = work.groupby("__strategy_parent", dropna=False).size().astype(int)
+        requested_n = max(1, int(target_value))
+        meta = pd.DataFrame({
+            "available": available,
+            "target": requested_n,
+        })
+        meta["selected"] = np.minimum(meta["available"], requested_n).astype(int)
+        meta["remaining"] = (meta["available"] - meta["selected"]).astype(int)
+        meta["parent"] = meta.index.astype(str)
+        meta["bin"] = 0
+        meta["stratum"] = meta.index.astype(str)
+
+        chosen_parts: List[pd.DataFrame] = []
+        for parent_name, g in work.groupby("__strategy_parent", dropna=False):
+            take_n = int(meta.at[parent_name, "selected"])
+            if take_n <= 0:
+                continue
+            g2 = (
+                g.sort_values(["detection_probability", "basename", "start_s"], ascending=[False, True, True])
+                .head(take_n)
+                .drop(columns="__strategy_parent", errors="ignore")
+                .copy()
+            )
+            chosen_parts.append(g2)
+
+        out = pd.concat(chosen_parts, axis=0) if chosen_parts else work.head(0).drop(columns="__strategy_parent", errors="ignore")
+        if not out.empty:
+            out["__occurrence_group"] = _strategy_group_series(out, "occurrence").astype(str)
+            out = (
+                out.sort_values(["__occurrence_group", "detection_probability", "basename", "start_s"], ascending=[True, False, True, True])
+                .drop(columns="__occurrence_group", errors="ignore")
+            )
+        return out, meta
 
     if goal == "equal_allocation":
         work = df.copy()
@@ -2580,14 +3027,15 @@ def _strategy_preview_matrix(
     seed: int,
     max_rows: int = 12,
 ) -> Tuple[pd.DataFrame, Dict[str, int]]:
+    preview_scope = _apply_custom_strategy_scope(df_in, goal)
     selected_df, meta = _compute_strategy_plan(df_in, goal, balance, target_mode, target_value, n_bins, seed)
 
     metrics = {
-        "available": int(len(df_in)),
+        "available": int(len(preview_scope)),
         "selected": int(len(selected_df)),
         "strata": int(len(meta)),
         "undersized": _strategy_shortfall_count(
-            df_scope=df_in,
+            df_scope=preview_scope,
             df_selected=selected_df,
             goal=goal,
             balance=balance,
@@ -2596,11 +3044,23 @@ def _strategy_preview_matrix(
         ),
     }
 
-    if df_in.empty:
+    if preview_scope.empty:
         return pd.DataFrame(), metrics
 
+    if goal == "site_occurrence":
+        available_groups = _strategy_group_series(preview_scope, "occurrence").astype(str).value_counts(dropna=False)
+        selected_groups = _strategy_group_series(selected_df, "occurrence").astype(str).value_counts(dropna=False)
+        preview = pd.DataFrame({
+            "available": available_groups,
+            "selected": selected_groups.reindex(available_groups.index).fillna(0).astype(int),
+        })
+        preview = preview.sort_index()
+        preview.index.name = _strategy_balance_label("occurrence", preview_scope, goal)
+        group_col = _occurrence_group_column(preview_scope) or "site/location"
+        return _finalise_preview_table(preview, fallback_label=f"[unknown {group_col}]"), metrics
+
     if goal == "equal_allocation":
-        work = df_in.copy()
+        work = preview_scope.copy()
         sel_work = selected_df.copy()
 
         work["__bin"] = _make_probability_bins(work, n_bins)
@@ -2618,7 +3078,7 @@ def _strategy_preview_matrix(
         all_row = {}
         for i, lab in enumerate(labels):
             all_row[lab] = f"{int(sel_all.get(i, 0))}/{int(avail_all.get(i, 0))}"
-        all_row["Total"] = f"{int(len(selected_df))}/{int(len(df_in))}"
+        all_row["Total"] = f"{int(len(selected_df))}/{int(len(preview_scope))}"
         rows.append(("All clips", all_row))
 
         if species_col is not None:
@@ -2672,7 +3132,7 @@ def _strategy_preview_matrix(
         return _finalise_preview_table(preview, fallback_label="[unknown selection]"), metrics
 
     if balance == "all" and goal in ("find_likely_mistakes", "review_strongest"):
-        work = df_in.copy()
+        work = preview_scope.copy()
         sel_work = selected_df.copy()
         work["__bin"] = _make_probability_bins(work, n_bins)
         sel_work["__bin"] = _make_probability_bins(sel_work, n_bins)
@@ -2684,12 +3144,12 @@ def _strategy_preview_matrix(
         preview = pd.DataFrame(index=["All clips"])
         for i, lab in enumerate(labels):
             preview[lab] = [f"{int(sel.get(i, 0))}/{int(avail.get(i, 0))}"]
-        preview["Total"] = [f"{len(selected_df)}/{len(df_in)}"]
+        preview["Total"] = [f"{len(selected_df)}/{len(preview_scope)}"]
         preview.index.name = "Selection"
         return _finalise_preview_table(preview, fallback_label="All clips"), metrics
 
     if goal in ("find_likely_mistakes", "review_strongest") and balance != "all":
-        work = df_in.copy()
+        work = preview_scope.copy()
         sel_work = selected_df.copy()
 
         work["__parent"] = _strategy_group_series(work, balance).astype(str)
@@ -2749,15 +3209,15 @@ def _strategy_preview_matrix(
 
     if balance == "all":
         preview = pd.DataFrame({
-            "available": [len(df_in)],
+            "available": [len(preview_scope)],
             "selected": [len(selected_df)],
-            "selected %": [round(100.0 * len(selected_df) / max(1, len(df_in)), 1)],
+            "selected %": [round(100.0 * len(selected_df) / max(1, len(preview_scope)), 1)],
         }, index=["All clips"])
         preview.index.name = "Selection"
         return _finalise_preview_table(preview, fallback_label="All clips"), metrics
 
     if "confidence" not in balance:
-        parent = _strategy_group_series(df_in, balance).astype(str)
+        parent = _strategy_group_series(preview_scope, balance).astype(str)
         avail = parent.value_counts(dropna=False)
         sel_parent = _strategy_group_series(selected_df, balance).astype(str)
         sel = sel_parent.value_counts(dropna=False)
@@ -2776,7 +3236,7 @@ def _strategy_preview_matrix(
         preview.index.name = _strategy_parent_label(balance)
         return _finalise_preview_table(preview, fallback_label=f"[unknown {_strategy_parent_label(balance).lower()}]"), metrics
 
-    work = _build_strategy_strata(df_in.copy(), balance, n_bins)
+    work = _build_strategy_strata(preview_scope.copy(), balance, n_bins)
     work["__parent"] = work["__strategy_parent"].astype(str)
     work["__bin"] = work["__strategy_bin"].astype(int)
 
@@ -2889,6 +3349,7 @@ def _render_strategy_summary_bar(df: pd.DataFrame):
         )
     def _open_validate_strategy_modal():
         st.session_state["validate_strategy_modal_open"] = True
+        st.session_state["validate_strategy_modal_source"] = "manual"
 
     with right:
         st.markdown("<div style='height:0.35rem'></div>", unsafe_allow_html=True)
@@ -3010,8 +3471,6 @@ def _init_filter_state():
         "validate_num_per_page": 10,
         "validate_cols_per_row": 2,
         "validate_page": 1,
-        "validate_page_input": 1,
-        "validate_page_sync_pending": False,
         "validate_show_label": "all",
         "validate_min_prob": 0.0,
         "validate_conf_sort": "Strategy/default order",
@@ -3021,7 +3480,7 @@ def _init_filter_state():
         "validate_use_te_override": False,
         "validate_te_override": 10,
         "validate_use_fft_override": False,
-        "validate_fft_size": 4096,
+        "validate_fft_size": AUDACITY_WINDOW_SIZE_DEFAULT,
         "validate_auto_zoom_single_detection": True,
         "validate_auto_zoom_window_s": 5.0,
         "validate_interactive_card": None,
@@ -3040,9 +3499,14 @@ def _init_strategy_state():
         "validate_strategy_bins": 5,
         "validate_strategy_seed": 42,
         "validate_strategy_modal_open": False,
+        "validate_strategy_modal_source": "",
         "validate_strategy_dont_auto_show": False,
         "validate_strategy_prompt_seen": False,
         "validate_strategy_preset_label": "Representative sample",
+        "validate_strategy_occurrence_group_column": "",
+        "validate_strategy_custom_species": "All species",
+        "validate_strategy_custom_site_column": "",
+        "validate_strategy_custom_site_value": "All sites/locations",
         "_validate_strategy_last_preset_applied": "",
     }
     for k, v in defaults.items():
@@ -3109,12 +3573,13 @@ def _render_pills(gdf: pd.DataFrame):
 
 
 def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None:
+    proj_root = Path(sources.get("project") or sources.get("project_root") or ".")
+    _load_strategy_state(proj_root)
+    _load_validate_display_state(proj_root)
+    _load_validate_user_preferences()
     _init_filter_state()
     _init_strategy_state()
     st.header("Validation")
-
-    proj_root = Path(sources.get("project") or sources.get("project_root") or ".")
-    _load_strategy_state(proj_root)
 
     df_default, ds_label, ds_choices, ds_paths = _dataset_choice_validate(sources)
     if ds_label == "None" or df_default.empty:
@@ -3156,28 +3621,55 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
         _save_strategy_state(proj_root)
         if not st.session_state.get("validate_strategy_dont_auto_show", False):
             st.session_state["validate_strategy_modal_open"] = True
+            st.session_state["validate_strategy_modal_source"] = "auto"
 
     if hasattr(st, "dialog"):
-        @st.dialog("Validation strategy", width="large")
+
+        def _on_strategy_dialog_dismiss():
+            st.session_state["validate_strategy_modal_open"] = False
+            st.session_state["validate_strategy_modal_source"] = ""
+
+        def _on_strategy_dont_show_change():
+            value = bool(st.session_state.get("_validate_strategy_dont_show_widget", False))
+            st.session_state["validate_strategy_dont_auto_show"] = value
+            st.session_state["validate_strategy_prompt_seen"] = True
+            _save_validate_user_preferences(value)
+            _save_strategy_state(proj_root)
+
+        @st.dialog(
+            "Validation strategy",
+            width="large",
+            on_dismiss=_on_strategy_dialog_dismiss,
+        )
         def _strategy_dialog():
             st.caption("Choose how clips should be selected for this review session.")
 
             presets = _strategy_presets(len(df_all))
             preset_labels = list(presets.keys())
 
+            def _persist_strategy_dialog_state():
+                _save_strategy_state(proj_root)
+
             current_goal_for_preset = str(st.session_state.get("validate_strategy_goal", "representative_sample"))
-            current_preset = str(st.session_state.get("validate_strategy_preset_label", "Representative sample"))
-            if current_preset not in preset_labels:
-                current_preset = "Representative sample"
+            goal_to_preset = {str(v["goal"]): k for k, v in presets.items()}
+            current_preset = goal_to_preset.get(current_goal_for_preset, "Representative sample")
+            # The radio is a transient dialog widget. Rebuild it from the active
+            # strategy so reopening the wizard cannot silently show/apply a different preset.
+            st.session_state["validate_strategy_preset_label"] = current_preset
+
+            def _on_strategy_preset_change():
+                selected = str(st.session_state.get("validate_strategy_preset_label", "Representative sample"))
+                st.session_state["_validate_strategy_last_preset_applied"] = ""
+                _apply_strategy_preset_if_requested(len(df_all), selected)
+                _save_strategy_state(proj_root)
 
             preset_label = st.radio(
                 "Review preset",
                 options=preset_labels,
-                index=preset_labels.index(current_preset) if current_preset in preset_labels else 0,
                 horizontal=True,
+                key="validate_strategy_preset_label",
+                on_change=_on_strategy_preset_change,
             )
-            st.session_state["validate_strategy_preset_label"] = preset_label
-            _apply_strategy_preset_if_requested(len(df_all), preset_label)
 
             st.markdown(
                 f"""
@@ -3203,28 +3695,100 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
             primary_left, primary_right = st.columns([1.2, 1.0])
 
             with primary_left:
-                balance_label = st.selectbox(
-                    "Balance across",
-                    options=list(balance_label_map.values()),
-                    index=list(balance_label_map.values()).index(current_balance_label),
-                )
-                selected_balance = balance_inv[balance_label]
+                if selected_goal == "site_occurrence":
+                    occurrence_options = _occurrence_group_column_options(df_all)
+                    if occurrence_options:
+                        stored_occurrence_col = str(st.session_state.get("validate_strategy_occurrence_group_column", "")).strip()
+                        if stored_occurrence_col not in occurrence_options:
+                            preferred = next((c for c in occurrence_options if c.lower() in {"site", "site_id", "location", "location_id"}), None)
+                            st.session_state["validate_strategy_occurrence_group_column"] = preferred if preferred else occurrence_options[0]
+                        occurrence_group_col = st.selectbox(
+                            "Site/location column",
+                            options=occurrence_options,
+                            key="validate_strategy_occurrence_group_column",
+                            on_change=_persist_strategy_dialog_state,
+                        )
+                    else:
+                        occurrence_group_col = None
+                        st.warning("No suitable site/location column is available.")
+                    selected_balance = "occurrence"
+                else:
+                    if st.session_state.get("validate_strategy_balance") not in balance_label_map:
+                        st.session_state["validate_strategy_balance"] = current_balance
+                    selected_balance = st.selectbox(
+                        "Balance across",
+                        options=list(balance_label_map.keys()),
+                        format_func=lambda x: balance_label_map.get(x, str(x)),
+                        key="validate_strategy_balance",
+                        on_change=_persist_strategy_dialog_state,
+                    )
 
                 if selected_goal == "custom_stratified":
-                    mode_map = {
-                        "Total clips": "total_clips",
-                        "Clips per group": "per_group_clips",
-                        "% per group": "per_group_percent",
+                    st.markdown("**Limit review to**")
+                    scope_a, scope_b = st.columns(2)
+                    with scope_a:
+                        species_raw = df_all.get(
+                            "species_name_original",
+                            df_all.get("species_name", pd.Series([""] * len(df_all), index=df_all.index)),
+                        ).astype(str).str.strip()
+                        species_values = sorted(v for v in species_raw.unique().tolist() if v and v.lower() not in {"nan", "<na>", "none"})
+                        species_options = ["All species"] + species_values
+                        current_species = str(st.session_state.get("validate_strategy_custom_species", "All species"))
+                        if current_species not in species_options:
+                            current_species = "All species"
+                        st.session_state["validate_strategy_custom_species"] = current_species
+                        custom_species = st.selectbox(
+                            "Species",
+                            species_options,
+                            key="validate_strategy_custom_species",
+                            on_change=_persist_strategy_dialog_state,
+                        )
+                    with scope_b:
+                        site_options = _occurrence_group_column_options(df_all)
+                        current_site_col = str(st.session_state.get("validate_strategy_custom_site_column", "")).strip()
+                        if current_site_col not in site_options:
+                            preferred = next((c for c in site_options if c.lower() in {"site", "site_id", "location", "location_id"}), None)
+                            current_site_col = preferred or (site_options[0] if site_options else "")
+                        if site_options:
+                            st.session_state["validate_strategy_custom_site_column"] = current_site_col
+                            custom_site_col = st.selectbox(
+                                "Site/location column",
+                                site_options,
+                                key="validate_strategy_custom_site_column",
+                                on_change=_persist_strategy_dialog_state,
+                            )
+                            site_values = sorted(v for v in df_all[custom_site_col].astype(str).str.strip().unique().tolist() if v and v.lower() not in {"nan", "<na>", "none"})
+                            site_value_options = ["All sites/locations"] + site_values
+                            current_site_value = str(st.session_state.get("validate_strategy_custom_site_value", "All sites/locations"))
+                            if current_site_value not in site_value_options:
+                                current_site_value = "All sites/locations"
+                            st.session_state["validate_strategy_custom_site_value"] = current_site_value
+                            custom_site_value = st.selectbox(
+                                "Site/location",
+                                site_value_options,
+                                key="validate_strategy_custom_site_value",
+                                on_change=_persist_strategy_dialog_state,
+                            )
+
+                if selected_goal == "site_occurrence":
+                    target_mode = "per_group_clips"
+                elif selected_goal == "custom_stratified":
+                    mode_labels = {
+                        "total_clips": "Total clips",
+                        "per_group_clips": "Clips per group",
+                        "per_group_percent": "% per group",
                     }
                     current_mode = str(st.session_state.get("validate_strategy_target_mode", default_mode))
-                    if current_mode not in mode_map.values():
+                    if current_mode not in mode_labels:
                         current_mode = default_mode
-                    mode_label = st.selectbox(
+                        st.session_state["validate_strategy_target_mode"] = current_mode
+                    target_mode = st.selectbox(
                         "How many clips",
-                        options=list(mode_map.keys()),
-                        index=list(mode_map.values()).index(current_mode),
+                        options=list(mode_labels.keys()),
+                        format_func=lambda x: mode_labels.get(x, str(x)),
+                        key="validate_strategy_target_mode",
+                        on_change=_persist_strategy_dialog_state,
                     )
-                    target_mode = mode_map[mode_label]
                 else:
                     target_mode = "total_clips"
 
@@ -3236,18 +3800,29 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                     len(df_all),
                 )
 
-                label = {
-                    "total_clips": "Total clips to review",
-                    "per_group_clips": "Clips per group",
-                    "per_group_percent": "% per group",
-                }[target_mode]
+                if selected_goal == "site_occurrence":
+                    species_col = df_all.get("species_name_original", df_all.get("species_name", pd.Series([""] * len(df_all), index=df_all.index)))
+                    has_species = species_col.astype(str).str.strip().replace({"nan": "", "<NA>": ""}).ne("").any()
+                    group_name = _occurrence_group_column(df_all) or "site/location"
+                    label = f"Detections per species × {group_name}" if has_species else f"Detections per {group_name}"
+                else:
+                    label = {
+                        "total_clips": "Total clips to review",
+                        "per_group_clips": "Clips per group",
+                        "per_group_percent": "% per group",
+                    }[target_mode]
 
+                target_max = 100 if target_mode == "per_group_percent" else max(1, len(df_all))
+                current_target = int(st.session_state.get("validate_strategy_target_value", target_value_default))
+                current_target = max(1, min(current_target, target_max))
+                st.session_state["validate_strategy_target_value"] = current_target
                 target_value = st.number_input(
                     label,
                     min_value=1,
-                    max_value=100 if target_mode == "per_group_percent" else max(1, len(df_all)),
-                    value=int(target_value_default),
+                    max_value=target_max,
                     step=1,
+                    key="validate_strategy_target_value",
+                    on_change=_persist_strategy_dialog_state,
                 )
 
             with primary_right:
@@ -3285,17 +3860,20 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                         "Confidence bands to use",
                         min_value=2,
                         max_value=20,
-                        value=int(st.session_state.get("validate_strategy_bins", 5)),
                         step=1,
                         disabled=not needs_bands,
+                        key="validate_strategy_bins",
+                        on_change=_persist_strategy_dialog_state,
                     )
                 with adv2:
                     seed_value = st.number_input(
                         "Random seed",
                         min_value=0,
                         max_value=100000,
-                        value=int(st.session_state.get("validate_strategy_seed", 42)),
                         step=1,
+                        disabled=selected_goal == "site_occurrence",
+                        key="validate_strategy_seed",
+                        on_change=_persist_strategy_dialog_state,
                     )
             if not needs_bands:
                 bins_value = int(st.session_state.get("validate_strategy_bins", 5))
@@ -3333,17 +3911,25 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
             else:
                 st.write("No preview available for the current strategy.")
 
+            pref_value = bool(st.session_state.get("validate_strategy_dont_auto_show", False))
+            # The preference file is authoritative. Synchronise the widget
+            # before it is instantiated so reopening the dialog always shows
+            # the value that will actually be honoured.
+            st.session_state["_validate_strategy_dont_show_widget"] = pref_value
             dont_show = st.checkbox(
                 "Don’t show this automatically again for me",
-                value=bool(st.session_state.get("validate_strategy_dont_auto_show", False)),
+                key="_validate_strategy_dont_show_widget",
+                on_change=_on_strategy_dont_show_change,
             )
 
             b1, b2 = st.columns(2)
             with b1:
                 if st.button("Skip for now", width="stretch"):
                     st.session_state["validate_strategy_modal_open"] = False
+                    st.session_state["validate_strategy_modal_source"] = ""
                     st.session_state["validate_strategy_dont_auto_show"] = bool(dont_show)
                     st.session_state["validate_strategy_prompt_seen"] = True
+                    _save_validate_user_preferences()
                     _save_strategy_state(proj_root)
                     if hasattr(st, "rerun"):
                         st.rerun()
@@ -3353,19 +3939,16 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
             with b2:
                 if st.button("Start review", width="stretch", type="primary"):
                     st.session_state["validate_strategy_goal"] = selected_goal
-                    st.session_state["validate_strategy_balance"] = selected_balance
-                    st.session_state["validate_strategy_target_mode"] = target_mode
-                    st.session_state["validate_strategy_target_value"] = int(target_value)
-                    st.session_state["validate_strategy_bins"] = int(bins_value)
-                    st.session_state["validate_strategy_seed"] = int(seed_value)
                     st.session_state["validate_strategy_available"] = int(preview_metrics.get("available", 0))
                     st.session_state["validate_strategy_selected"] = int(preview_metrics.get("selected", 0))
                     st.session_state["validate_strategy_strata"] = int(preview_metrics.get("strata", 0))
                     st.session_state["validate_strategy_undersized"] = int(preview_metrics.get("undersized", 0))
                     st.session_state["validate_strategy_metrics_source"] = "wizard_preview_metrics"
                     st.session_state["validate_strategy_modal_open"] = False
+                    st.session_state["validate_strategy_modal_source"] = ""
                     st.session_state["validate_strategy_dont_auto_show"] = bool(dont_show)
                     st.session_state["validate_strategy_prompt_seen"] = True
+                    _save_validate_user_preferences()
                     _save_strategy_state(proj_root)
                     if hasattr(st, "rerun"):
                         st.rerun()
@@ -3394,14 +3977,32 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                     ymax=float(selected_card["ymax"]),
                     n_fft=int(selected_card["n_fft"]),
                     hop_length=int(selected_card["hop_length"]),
+                    dynamic_range_db=float(selected_card.get("dynamic_range_db", 80.0)),
+                    gain_db=float(selected_card.get("gain_db", 20.0)),
                 )
             except Exception as e:
                 st.error(f"Interactive spectrogram error: {e}")
 
     _render_strategy_summary_bar(df_all)
 
-    if hasattr(st, "dialog") and st.session_state.get("validate_strategy_modal_open", False):
+    _strategy_modal_source = str(st.session_state.get("validate_strategy_modal_source", ""))
+    _strategy_modal_allowed = (
+        _strategy_modal_source == "manual"
+        or not bool(st.session_state.get("validate_strategy_dont_auto_show", False))
+    )
+    if (
+        hasattr(st, "dialog")
+        and st.session_state.get("validate_strategy_modal_open", False)
+        and _strategy_modal_allowed
+    ):
         _strategy_dialog()
+    elif (
+        st.session_state.get("validate_strategy_modal_open", False)
+        and _strategy_modal_source == "auto"
+        and bool(st.session_state.get("validate_strategy_dont_auto_show", False))
+    ):
+        st.session_state["validate_strategy_modal_open"] = False
+        st.session_state["validate_strategy_modal_source"] = ""
 
     top1, top2, top3 = st.columns([1, 1, 1])
     with top1:
@@ -3420,16 +4021,19 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
             key="validate_cols_per_row",
         )
 
-    _sync_validate_page_input_from_page()
+    canonical_page = _prepare_validate_page_input()
 
     with top3:
-        st.number_input(
+        requested_page = int(st.number_input(
             "Page",
             min_value=1,
             step=1,
             key="validate_page_input",
-            on_change=_on_validate_page_input_change,
-        )
+        ))
+    if requested_page != canonical_page:
+        st.session_state["validate_page"] = requested_page
+        st.session_state["_validate_scroll_cards_top_pending"] = True
+        st.rerun()
 
     with st.expander("Advanced filters", expanded=False):
         r1c1, r1c2, r1c3 = st.columns([1, 1, 1])
@@ -3511,11 +4115,11 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
 
         fft_col1, fft_col2 = st.columns([1.0, 1.2])
         with fft_col1:
-            use_fft_override = st.checkbox("Set FFT size", key="validate_use_fft_override")
+            use_fft_override = st.checkbox("Set FFT/window size", key="validate_use_fft_override")
         with fft_col2:
             st.selectbox(
-                "FFT size",
-                options=[1024, 2048, 4096, 8192, 16384],
+                "FFT/window size (samples)",
+                options=[256, 512, 1024, 2048, 4096, 8192, 16384, 32768],
                 key="validate_fft_size",
                 disabled=not use_fft_override,
             )
@@ -3704,14 +4308,31 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
 
     page_raw = int(st.session_state.get("validate_page", 1))
     PAGE = max(1, min(page_raw, total_pages))
-
-    if PAGE != int(st.session_state.get("validate_page", 1)):
+    if PAGE != page_raw:
         st.session_state["validate_page"] = PAGE
-        st.session_state["validate_page_sync_pending"] = True
+    else:
+        st.session_state["validate_page"] = PAGE
 
     start_idx = (PAGE - 1) * int(NUM_PER_PAGE)
     end_idx = min(total_cards, start_idx + int(NUM_PER_PAGE))
     page_keys = groups[start_idx:end_idx]
+    st.markdown("<div id='pam-validation-cards-top'></div>", unsafe_allow_html=True)
+    if st.session_state.pop("_validate_scroll_cards_top_pending", False):
+        components.html(
+            """<script>
+            const scrollToCards = () => {
+              const doc = window.parent.document;
+              const el = doc.getElementById('pam-validation-cards-top');
+              if (!el) return;
+              el.scrollIntoView({behavior: 'auto', block: 'start'});
+            };
+            const pageNonce = %d;
+            requestAnimationFrame(scrollToCards);
+            setTimeout(scrollToCards, 80);
+            setTimeout(scrollToCards, 250);
+            </script>""" % PAGE,
+            height=0,
+        )
     st.caption(f"Showing {len(page_keys)} of {total_cards} spectrograms (page {PAGE} of {total_pages})")
 
     species_choices = sorted(
@@ -3777,21 +4398,11 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
 
             n_displayed_det = int(len(gdf_card))
 
-            max_cp = _group_max_prob(gdf_card if not gdf_card.empty else gdf_plot)
-            title_html = (
-                f"<div class='pam-card-header pam-card-title'><strong>{base}</strong>"
-                f"<br>{species_orig}"
-                f"<br>Displayed detections: {n_displayed_det}"
-            )
-            if np.isfinite(max_cp):
-                title_html += f"<br>Max probability: {max_cp:.2f}"
-            title_html += "</div>"
-
             with cols[c]:
                 with st.container(border=True):
                     h1, h2 = st.columns([2.0, 1.0])
                     with h1:
-                        st.markdown(title_html, unsafe_allow_html=True)
+                        title_slot = st.empty()
                     with h2:
                         _render_pills(gdf_card_status)
                     y, sr = np.array([], dtype=np.float32), 1
@@ -3805,8 +4416,15 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                     hop = max(1, n_fft // 8)
 
                     if not (apath and apath.exists()):
+                        title_slot.markdown(
+                            f"<div class='pam-card-header pam-card-title'><strong>{base}</strong>"
+                            f"<br>{species_orig}<br>Displayed detections: {n_displayed_det}</div>",
+                            unsafe_allow_html=True,
+                        )
                         st.error("Audio not found")
                     else:
+                        dynamic_range_db = 80
+                        gain_db = 20
                         try:
                             sr_info, dur_info = _audio_info(apath)
                             if sr_info <= 0 or dur_info <= 0:
@@ -3816,6 +4434,16 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                             dur = float(dur_info)
                             n_fft = _get_validate_n_fft(sr)
                             hop = max(1, n_fft // 8)
+                            fft_ms = 1000.0 * float(n_fft) / float(sr)
+                            fft_hz = float(sr) / float(n_fft)
+                            title_slot.markdown(
+                                f"<div class='pam-card-header pam-card-title'><strong>{base}</strong>"
+                                f"<br>{species_orig}"
+                                f"<br>Displayed detections: {n_displayed_det}"
+                                f"<br><span style='color:#6b7280;font-size:0.82rem;'>FFT window: {int(n_fft)} samples · {fft_ms:.1f} ms · {fft_hz:.1f} Hz/bin</span>"
+                                "</div>",
+                                unsafe_allow_html=True,
+                            )
 
                             time_state_key = _safe_widget_key("validate_time_window_state", base, species_orig)
                             time_key_start = _safe_widget_key("validate_time_xmin_input", base, species_orig)
@@ -3910,6 +4538,32 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                                 "default_signature": default_signature,
                             }
 
+                            gain_key = _safe_widget_key(
+                                "validate_gain_db", base, species_orig
+                            )
+                            dynamic_range_key = _safe_widget_key(
+                                "validate_dynamic_range_db", base, species_orig
+                            )
+                            if gain_key not in st.session_state:
+                                st.session_state[gain_key] = int(AUDACITY_GAIN_DB_DEFAULT)
+                            if dynamic_range_key not in st.session_state:
+                                st.session_state[dynamic_range_key] = int(AUDACITY_RANGE_DB_DEFAULT)
+                            sg1, sg2 = st.columns(2)
+                            with sg1:
+                                gain_db = st.select_slider(
+                                    "Gain (dB)",
+                                    options=list(range(-20, 45, 5)),
+                                    key=gain_key,
+                                    help="Adjust spectrogram brightness for this card only.",
+                                )
+                            with sg2:
+                                dynamic_range_db = st.select_slider(
+                                    "Dynamic range (dB)",
+                                    options=list(range(40, 105, 5)),
+                                    key=dynamic_range_key,
+                                    help="Adjust spectrogram contrast for this card only.",
+                                )
+
                             y, sr, actual_start, actual_end = _load_audio_window(apath, xmin, xmax, fallback_sr=sr)
                             if y.size == 0 or sr <= 0:
                                 raise ValueError("Audio window could not be read")
@@ -3955,7 +4609,7 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                             xmin, xmax = 0.0, 1.0
 
                         try:
-                            fig, ax = plt.subplots(figsize=(8.6, 5.2), dpi=150, constrained_layout=False)
+                            fig, ax = plt.subplots(figsize=(8.6, 5.2), dpi=300, constrained_layout=False)
                             plot_xmin, plot_xmax = float(xmin), float(xmax)
                             if not (np.isfinite(plot_xmin) and np.isfinite(plot_xmax) and plot_xmax > plot_xmin):
                                 plot_xmin, plot_xmax = 0.0, float(dur)
@@ -3978,14 +4632,15 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                                 aspect="auto",
                                 interpolation="nearest",
                                 extent=extent,
-                                vmin=S_dB.max() - 90,
-                                vmax=S_dB.max(),
+                                vmin=-float(gain_db) - float(dynamic_range_db),
+                                vmax=-float(gain_db),
+                                cmap=AUDACITY_CMAP,
                             )
                             ax.set_xlim(0.0, plot_span)
                             ax.set_ylim(ymin, ymax)
                             ax.set_xlabel("Time (s)")
                             ax.set_ylabel("Frequency (kHz)")
-                            ax.yaxis.set_major_formatter(FuncFormatter(lambda ytick, pos: f"{ytick/1000:.0f}"))
+                            ax.yaxis.set_major_formatter(FuncFormatter(lambda ytick, pos: f"{ytick/1000:.1f}"))
                             tick_count = 6 if plot_span >= 5.0 else 5
                             tick_positions = np.linspace(0.0, plot_span, tick_count)
                             ax.set_xticks(tick_positions)
@@ -4050,6 +4705,8 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                                 "ymax": float(ymax),
                                 "n_fft": int(n_fft),
                                 "hop_length": int(hop),
+                                "dynamic_range_db": float(dynamic_range_db),
+                                "gain_db": float(gain_db),
                             }
                             _interactive_spectrogram_dialog()
 
@@ -4252,8 +4909,8 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                             out.parent.mkdir(parents=True, exist_ok=True)
                             updated_df.to_csv(out, index=False)
 
-                            st.session_state["_force_validate_dataset"] = "Validated (published)"
-                            st.session_state["active_dataset_label"] = "Validated (published)"
+                            st.session_state["_force_validate_dataset"] = "Updated"
+                            st.session_state["active_dataset_label"] = "Updated"
                             st.session_state["active_dataset_path"] = str(out)
                             st.session_state["pa_df_det"] = updated_df
                             df_all = updated_df.copy()
@@ -4267,25 +4924,118 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
     nav_left, nav_mid, nav_right = st.columns([1.2, 1.2, 4])
 
     with nav_left:
-        st.button(
+        previous_clicked = st.button(
             "Previous page",
             width="stretch",
             disabled=PAGE <= 1,
-            on_click=_go_to_previous_validate_page,
         )
 
     with nav_mid:
-        st.button(
+        next_clicked = st.button(
             "Next page",
             width="stretch",
             disabled=PAGE >= total_pages,
-            on_click=_go_to_next_validate_page,
         )
 
+    if previous_clicked:
+        st.session_state["validate_page"] = max(1, PAGE - 1)
+        st.session_state["_validate_scroll_cards_top_pending"] = True
+        st.rerun()
+    if next_clicked:
+        st.session_state["validate_page"] = min(total_pages, PAGE + 1)
+        st.session_state["_validate_scroll_cards_top_pending"] = True
+        st.rerun()
+
     st.session_state["pa_df_det"] = df_all.copy()
+    _save_strategy_state(proj_root)
+    _save_validate_display_state(proj_root)
+
+    completion_signature = hashlib.sha1(
+        (
+            _strategy_summary(df_all)
+            + "|"
+            + "|".join(sorted(df_view.get("detection_id", df_view.index.to_series()).astype(str).tolist()))
+        ).encode("utf-8")
+    ).hexdigest()
+    validation_complete = bool(total_in_scope > 0 and n_reviewed == total_in_scope)
+
+    if hasattr(st, "dialog"):
+        @st.dialog("Validation complete", width="small")
+        def _validation_complete_dialog():
+            st.markdown(
+                f"""
+                <div style="text-align:center; padding:0.2rem 0 0.8rem 0;">
+                  <div style="font-size:2.1rem; line-height:1; margin-bottom:0.45rem;">✓</div>
+                  <div style="font-size:1.05rem; font-weight:650; color:#111827;">Congratulations — validation complete</div>
+                  <div style="font-size:0.88rem; color:#6b7280; margin-top:0.25rem;">
+                    {int(n_reviewed)} selected detection{'s' if int(n_reviewed) != 1 else ''} reviewed.
+                  </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            st.caption("Download the validated subset, explore it in Dashboard, or move on to another project.")
+            popup_export = df_view.copy()
+            popup_unwanted = [
+                "validation_method", "user_changed", "user_changed_by", "user_changed_at",
+                "FinalLabelEffective", "species_display", "species_display_original",
+                "changed_flag", "reviewed_flag", "uncertain_flag_bool",
+                "source_file", "FinalLabel", "class", "class_prob", "UserLabel",
+                "is_present", "Changed", "lat", "lon", "filename_stem", "dt",
+                "time_of_day", "tod_ts", "__strategy_parent", "__strategy_bin",
+                "__strategy_stratum", "__strategy_priority",
+            ]
+            for col in ["validation_state", "validation_label", "validation_species", "validated_by", "validated_at", "uncertain_flag", "validation_notes"]:
+                if col not in popup_export.columns:
+                    popup_export[col] = ""
+            popup_export = popup_export.drop(columns=popup_unwanted, errors="ignore")
+            popup_user = (
+                str(st.session_state.get("auth_user") or st.session_state.get("user_name") or "")
+                or os.environ.get("USER") or os.environ.get("USERNAME") or "reviewer"
+            )
+            popup_name = _make_export_filename(proj_root, popup_user)
+            popup_strategy = _strategy_export_summary_df(df_all.copy(), proj_root, popup_user)
+            pop_csv = popup_export.to_csv(index=False).encode("utf-8")
+            pop_xlsx = _validated_workbook_bytes(popup_export, popup_strategy)
+            d1, d2 = st.columns(2)
+            with d1:
+                st.download_button("Download CSV", pop_csv, file_name=popup_name, mime="text/csv", width="stretch")
+            with d2:
+                st.download_button(
+                    "Download Excel", pop_xlsx, file_name=_make_export_xlsx_filename(popup_name),
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", width="stretch"
+                )
+            if st.button("View validated results in Dashboard", width="stretch", type="primary"):
+                st.session_state["active_dataset_label"] = "Validated only"
+                st.session_state["dataset_selector"] = "Validated only"
+                st.switch_page("pages/40_Dashboard.py")
+
+            if st.session_state.get("_validate_confirm_new_project", False):
+                st.warning("Download the validated results before leaving this project if they have not already been saved.")
+                c1, c2 = st.columns(2)
+                with c1:
+                    if st.button("Cancel", width="stretch"):
+                        st.session_state["_validate_confirm_new_project"] = False
+                        st.rerun()
+                with c2:
+                    if st.button("Continue", width="stretch"):
+                        st.session_state["_validate_confirm_new_project"] = False
+                        st.session_state["route"] = "hub"
+                        st.session_state.pop("_pa_pending_switch_page", None)
+                        st.switch_page("Home.py")
+            elif st.button("Start a new project", width="stretch"):
+                st.session_state["_validate_confirm_new_project"] = True
+                st.rerun()
+
+        completion_new = validation_complete and st.session_state.get("_validate_completion_seen_signature") != completion_signature
+        completion_confirming_exit = validation_complete and bool(st.session_state.get("_validate_confirm_new_project", False))
+        if completion_new:
+            st.session_state["_validate_completion_seen_signature"] = completion_signature
+        if completion_new or completion_confirming_exit:
+            _validation_complete_dialog()
 
     st.divider()
-    st.subheader("Tracked species changes (saved)")
+    st.subheader("Saved validation changes")
 
     if not df_all.empty:
         orig_sp_all = df_all.get("species_name_original", df_all.get("species_name", "")).astype(str)
@@ -4339,7 +5089,7 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
     )
     export_filename = _make_export_filename(proj_root, user_name)
 
-    export_df = df_all.copy()
+    export_df = df_view.copy()
 
     for c in ["validation_state", "validation_label", "validation_species", "validated_by", "validated_at", "uncertain_flag", "validation_notes"]:
         if c not in export_df.columns:

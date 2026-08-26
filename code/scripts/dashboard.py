@@ -557,7 +557,7 @@ def _dashboard_spectrogram_png_cached(
     ymin: float,
     ymax: float,
     n_fft: int,
-    boxes_signature: Tuple[Tuple[float, float, float, float, float], ...],
+    boxes_signature: Tuple[Tuple[float, float, Optional[float], Optional[float], Optional[float]], ...],
 ) -> bytes:
     S_dB, times, freqs_hz, sr, segment_start_s, dur, _ = _dashboard_spectrogram_cached(
         apath_str, file_size, file_mtime_ns, xmin, xmax, n_fft
@@ -577,7 +577,7 @@ def _dashboard_spectrogram_png_cached(
     ax.set_ylim(ymin, ymax)
     ax.set_xlabel("Time (s)")
     ax.set_ylabel("Frequency (kHz)")
-    ax.yaxis.set_major_formatter(FuncFormatter(lambda ytick, pos: f"{ytick / 1000:.0f}"))
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda ytick, pos: f"{ytick / 1000:.1f}"))
 
     vspan = max(1.0, ymax - ymin)
     vpad = 0.02 * vspan
@@ -593,9 +593,9 @@ def _dashboard_spectrogram_png_cached(
                 lw=0.6,
             )
         )
-        if np.isfinite(prob):
+        if prob is not None and np.isfinite(prob):
             xmid = 0.5 * (x0 + x1)
-            if np.isfinite(lf) and np.isfinite(hf):
+            if lf is not None and hf is not None and np.isfinite(lf) and np.isfinite(hf):
                 y_raw = (hf + vpad) if (i % 2 == 0) else (lf - vpad)
                 va = "bottom" if (i % 2 == 0) else "top"
             else:
@@ -624,7 +624,7 @@ def show_detection_examples(
 
     c1, c2, _, c4 = st.columns(4)
     with c1:
-        NUM_PER_PAGE = st.number_input("Spectrograms per page", min_value=4, max_value=60, value=12, step=4)
+        NUM_PER_PAGE = st.number_input("Spectrograms per page", min_value=3, max_value=60, value=9, step=3)
     with c2:
         COLS_PER_ROW = st.slider("Columns per row", min_value=2, max_value=5, value=3)
     with c4:
@@ -712,7 +712,10 @@ def show_detection_examples(
         return _by_stem(df_all, stem)
 
     n_rows = math.ceil(len(page_keys) / int(COLS_PER_ROW))
+    remaining_status = None
     for r in range(n_rows):
+        if r == 1 and n_rows > 1:
+            remaining_status = st.caption(f"First row ready — loading {len(page_keys) - int(COLS_PER_ROW)} remaining spectrograms…")
         cols = st.columns(int(COLS_PER_ROW))
         for c in range(int(COLS_PER_ROW)):
             gi = r * int(COLS_PER_ROW) + c
@@ -794,9 +797,6 @@ def show_detection_examples(
                         st.error("Audio segment is too short for spectrogram rendering")
                         continue
                     file_size, file_mtime_ns = _dashboard_audio_signature(apath)
-                    S_dB, times, freqs_hz, sr, segment_start_s, dur, y = _dashboard_spectrogram_cached(
-                        str(apath), file_size, file_mtime_ns, round(float(xmin), 3), round(float(xmax), 3), int(n_fft)
-                    )
                 except Exception as e:
                     st.error(f"Spectrogram setup error: {e}")
                     continue
@@ -806,9 +806,9 @@ def show_detection_examples(
                         (
                             round(float(b["start_s"]), 4),
                             round(float(b["end_s"]), 4),
-                            round(float(b["low_freq"]), 2) if np.isfinite(b["low_freq"]) else -1.0,
-                            round(float(b["high_freq"]), 2) if np.isfinite(b["high_freq"]) else -1.0,
-                            round(float(b["prob"]), 6) if np.isfinite(b["prob"]) else -1.0,
+                            round(float(b["low_freq"]), 2) if np.isfinite(b["low_freq"]) else None,
+                            round(float(b["high_freq"]), 2) if np.isfinite(b["high_freq"]) else None,
+                            round(float(b["prob"]), 6) if np.isfinite(b["prob"]) else None,
                         )
                         for b in boxes
                     )
@@ -833,6 +833,11 @@ def show_detection_examples(
                 except Exception as e:
                     st.error(f"Playback error: {e}")
 
+    if remaining_status is not None:
+        try:
+            remaining_status.empty()
+        except Exception:
+            pass
     st.caption("")
 
 
@@ -905,10 +910,23 @@ def _load_csv_safe(p: Path) -> Optional[pd.DataFrame]:
         return None
 
 
+def _load_dashboard_dataset(label: str, path: Path) -> Optional[pd.DataFrame]:
+    df = _load_csv_safe(path)
+    if df is None:
+        return None
+    if label == "Validated only":
+        if "validation_state" not in df.columns:
+            return df.iloc[0:0].copy()
+        reviewed = df["validation_state"].astype(str).str.strip().str.lower()
+        reviewed_mask = ~reviewed.isin(["", "nan", "<na>", "none"])
+        return df.loc[reviewed_mask].copy()
+    return df
+
+
 def _dataset_choice(
     sources: Dict[str, str],
     original_df: Optional[pd.DataFrame] = None,
-) -> Tuple[pd.DataFrame, str, Dict[str, pd.DataFrame], Dict[str, Path]]:
+) -> Tuple[pd.DataFrame, str, Dict[str, Optional[pd.DataFrame]], Dict[str, Path]]:
     proj_root = Path(sources.get("project") or sources.get("project_root") or ".")
     data_dir = proj_root / "data_normalised"
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -916,29 +934,36 @@ def _dataset_choice(
     p_original = data_dir / "detections_normalised.csv"
     p_valid_pub = data_dir / "detections_validated.csv"
 
-    choices: Dict[str, pd.DataFrame] = {}
     path_map: Dict[str, Path] = {}
-
-    df_orig = original_df if isinstance(original_df, pd.DataFrame) and not original_df.empty else _load_csv_safe(p_original)
-    if df_orig is not None and not df_orig.empty:
-        choices["Original"] = df_orig
+    if isinstance(original_df, pd.DataFrame) and not original_df.empty:
+        path_map["Original"] = p_original
+    elif p_original.exists() and p_original.stat().st_size > 0:
         path_map["Original"] = p_original
 
-    df_val_pub = _load_csv_safe(p_valid_pub)
-    if df_val_pub is not None:
-        choices["Validated (published)"] = df_val_pub
-        path_map["Validated (published)"] = p_valid_pub
+    if p_valid_pub.exists() and p_valid_pub.stat().st_size > 0:
+        path_map["Updated"] = p_valid_pub
+        path_map["Validated only"] = p_valid_pub
 
-    if not choices:
+    if not path_map:
         return pd.DataFrame(), "None", {}, {}
 
-    default_label = "Validated (published)" if "Validated (published)" in choices else "Original"
-
+    default_label = "Updated" if "Updated" in path_map else "Original"
     active = st.session_state.get("active_dataset_label")
-    if isinstance(active, str) and active in choices:
+    if active == "Validated (published)":
+        active = "Updated"
+        st.session_state["active_dataset_label"] = "Updated"
+    if isinstance(active, str) and active in path_map:
         default_label = active
 
-    return choices[default_label], default_label, choices, path_map
+    choices: Dict[str, Optional[pd.DataFrame]] = {label: None for label in path_map}
+    if default_label == "Original" and isinstance(original_df, pd.DataFrame) and not original_df.empty:
+        selected = original_df
+    else:
+        selected = _load_dashboard_dataset(default_label, path_map[default_label])
+    if selected is None:
+        selected = pd.DataFrame()
+    choices[default_label] = selected
+    return selected, default_label, choices, path_map
 
 
 def _has_data(df: pd.DataFrame, col: str) -> bool:
@@ -970,7 +995,10 @@ def render_dashboard(df: Optional[pd.DataFrame], sources: Dict[str, str], page: 
         return
 
     ds_labels = list(ds_choices.keys())
-    ds_index = ds_labels.index(ds_label) if ds_label in ds_labels else 0
+    if st.session_state.get("dataset_selector") == "Validated (published)":
+        st.session_state["dataset_selector"] = "Updated"
+    if st.session_state.get("dataset_selector") not in ds_labels:
+        st.session_state["dataset_selector"] = ds_label
 
     if "date_time" in df_default.columns:
         dt_full_probe = parse_dt_full(df_default["date_time"])
@@ -1006,7 +1034,7 @@ def render_dashboard(df: Optional[pd.DataFrame], sources: Dict[str, str], page: 
 
     c0, c1, c2, c3 = st.columns([1.3, 1.2, 1.0, 0.7])
     with c0:
-        dataset_label = st.selectbox("Dataset", ds_labels, index=ds_index, key="dataset_selector")
+        dataset_label = st.selectbox("Dataset", ds_labels, key="dataset_selector")
     with c1:
         default_range = (min_dt.date(), max_dt.date())
         date_sel = st.date_input(
@@ -1034,7 +1062,11 @@ def render_dashboard(df: Optional[pd.DataFrame], sources: Dict[str, str], page: 
                 st.rerun()
 
     if dataset_label != ds_label:
-        df_default = ds_choices[dataset_label]
+        loaded_choice = ds_choices.get(dataset_label)
+        if not isinstance(loaded_choice, pd.DataFrame):
+            loaded_choice = _load_dashboard_dataset(dataset_label, ds_paths[dataset_label])
+            ds_choices[dataset_label] = loaded_choice
+        df_default = loaded_choice if isinstance(loaded_choice, pd.DataFrame) else pd.DataFrame()
         st.session_state["active_dataset_label"] = dataset_label
         st.session_state["active_dataset_path"] = str(ds_paths.get(dataset_label, ""))
     st.session_state.setdefault("active_dataset_label", dataset_label)
@@ -1142,7 +1174,13 @@ def render_dashboard(df: Optional[pd.DataFrame], sources: Dict[str, str], page: 
     plot_df = location_stats_p.dropna(subset=["lat", "lon"])
     if not plot_df.empty:
         plot_df = plot_df.copy()
-        plot_df["radius"] = np.maximum(plot_df["present_files"] * 40, 40)
+        present_vals = pd.to_numeric(plot_df["present_files"], errors="coerce").fillna(0.0).clip(lower=0.0)
+        current_max = float(present_vals.max()) if len(present_vals) else 0.0
+        if current_max > 0:
+            scaled = np.sqrt(present_vals / current_max)
+            plot_df["radius"] = 9.0 + (23.0 * scaled)
+        else:
+            plot_df["radius"] = 9.0
         plot_df = plot_df.sort_values("radius", ascending=False)
 
         layer_scatter = pdk.Layer(
@@ -1151,12 +1189,14 @@ def render_dashboard(df: Optional[pd.DataFrame], sources: Dict[str, str], page: 
             get_position=["lon", "lat"],
             get_color="[255, 0, 0, 160]",
             get_radius="radius",
+            radius_units="pixels",
             pickable=True,
             auto_highlight=True,
             stroked=True,
             get_line_color=[0, 0, 0, 180],
             line_width_min_pixels=1,
-            radius_min_pixels=2,
+            radius_min_pixels=9,
+            radius_max_pixels=32,
         )
         layer_text = pdk.Layer(
             "TextLayer",
@@ -1269,3 +1309,4 @@ def render_dashboard(df: Optional[pd.DataFrame], sources: Dict[str, str], page: 
                 st.altair_chart(tod_chart, use_container_width=True)
 
     show_detection_examples(df_page, df_all, proj_root, show_header=True)
+
