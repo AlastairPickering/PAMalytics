@@ -1144,34 +1144,34 @@ def render_dashboard(df: Optional[pd.DataFrame], sources: Dict[str, str], page: 
     if need_latlon:
         df_page = _attach_latlon_from_glob(df_page, df_all)
 
-    present_by_group = (
-        df_page.assign(_present=(df_page["FinalLabelEffective"].str.lower() == "present"))
-        .groupby([group_key, "basename"], dropna=False)["_present"]
+    pa_map_source = df_page.dropna(subset=["lat", "lon"]).copy()
+
+    pa_map_stats = (
+        pa_map_source
+        .assign(
+            _present=(
+                pa_map_source["FinalLabelEffective"]
+                .astype(str)
+                .str.lower()
+                .eq("present")
+            )
+        )
+        .groupby(
+            [group_key, "lat", "lon", "basename"],
+            dropna=False,
+        )["_present"]
         .max()
         .reset_index()
-        .groupby(group_key, dropna=False)["_present"]
+        .groupby(
+            [group_key, "lat", "lon"],
+            dropna=False,
+        )["_present"]
         .sum()
         .reset_index(name="present_files")
     )
 
-    if "lat" in df_page.columns and "lon" in df_page.columns:
-        latlon_source = df_page.dropna(subset=["lat", "lon"])
-        if not latlon_source.empty:
-            latlon_by_group = (
-                latlon_source.groupby(group_key, dropna=False)[["lat", "lon"]]
-                .mean()
-                .reset_index()
-            )
-        else:
-            latlon_by_group = pd.DataFrame(columns=[group_key, "lat", "lon"])
-    else:
-        latlon_by_group = pd.DataFrame(columns=[group_key, "lat", "lon"])
-
-    present_by_group[group_key] = present_by_group[group_key].astype(str)
-    latlon_by_group[group_key] = latlon_by_group[group_key].astype(str)
-    location_stats_p = present_by_group.merge(latlon_by_group, on=group_key, how="left")
-
-    plot_df = location_stats_p.dropna(subset=["lat", "lon"])
+    pa_map_stats[group_key] = pa_map_stats[group_key].astype(str)
+    plot_df = pa_map_stats.copy()
     if not plot_df.empty:
         plot_df = plot_df.copy()
         present_vals = pd.to_numeric(plot_df["present_files"], errors="coerce").fillna(0.0).clip(lower=0.0)
