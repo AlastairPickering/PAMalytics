@@ -30,7 +30,6 @@ MODULES = [
     "code.core.ui",
     "code.pages.40_Dashboard",
     "code.pages.41_Validation",
-    "code.pages.43_Recalculate",
     "code.scripts.adapters.batdetect2",
     "code.scripts.adapters.birdnet",
     "code.scripts.dashboard",

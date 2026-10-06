@@ -1,7 +1,7 @@
 # PAMalytics — no-code PAM classifier validation and analytics
 [![CI (macOS & Windows)](https://github.com/AlastairPickering/PAMalytics/actions/workflows/ci.yaml/badge.svg)](https://github.com/AlastairPickering/PAMalytics/actions/workflows/ci.yaml)
 
-PAMalytics is an open-source, no-code, classifier-agnostic dashboard for reviewing bioacoustic classifier outputs. It supports detection summaries, audio/spectrogram review, validation edits, uncertainty flags, threshold recalculation and export of validated results.
+PAMalytics is an open-source, no-code, classifier-agnostic dashboard for reviewing bioacoustic classifier outputs. It supports detection summaries, audio/spectrogram review, validation edits, uncertainty flags and export of validated results.
 
 User guide: https://alastairpickering.github.io/PAMalytics/
 
@@ -16,7 +16,7 @@ Pre-built desktop applications are available from the latest GitHub release.
 Download:
 
 ```text
-PAMalytics-v1.0.4-macOS-arm64.dmg
+PAMalytics-v1.0.5-macOS-arm64.dmg
 ```
 
 This build is for Apple Silicon Macs and is signed and notarised by Apple.
@@ -28,7 +28,7 @@ Open the DMG, drag PAMalytics into Applications, then launch it from Application
 Download:
 
 ```text
-PAMalytics-v1.0.4-windows-x64-setup.exe
+PAMalytics-v1.0.5-windows-x64-setup.exe
 ```
 
 Run the installer, then launch PAMalytics from the Windows Start menu.
@@ -39,8 +39,8 @@ The Windows installer is currently unsigned, so Windows may display a security w
 
 SHA-256 checksum files are provided alongside both installers:
 
-- `PAMalytics-v1.0.4-macOS-arm64.dmg.sha256`
-- `PAMalytics-v1.0.4-windows-x64-setup.exe.sha256`
+- `PAMalytics-v1.0.5-macOS-arm64.dmg.sha256`
+- `PAMalytics-v1.0.5-windows-x64-setup.exe.sha256`
 
 ## Building the macOS app from source
 
@@ -55,7 +55,7 @@ python -m pip install --upgrade pip setuptools wheel
 python -m pip install -r requirements-build-macos.txt
 python -m code.scripts.smoke_test
 python packaging/macos/build_app.py
-bash packaging/macos/build_dmg.sh v1.0.4
+bash packaging/macos/build_dmg.sh v1.0.5
 ```
 
 The DMG will be written to `release/`. 
@@ -67,7 +67,6 @@ The DMG will be written to `release/`.
 - Audio playback and high-resolution spectrogram review
 - Card-based validation workflow with uncertainty flags and species/presence correction
 - Changed and uncertain detections tracked separately
-- Recalculate page for exploring threshold impacts
 - Non-destructive validation outputs that preserve original classifier predictions
 - Local-first operation: projects and validation state are stored on the user’s machine
 

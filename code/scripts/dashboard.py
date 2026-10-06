@@ -1157,24 +1157,18 @@ def render_dashboard(df: Optional[pd.DataFrame], sources: Dict[str, str], page: 
             )
         )
         .groupby(
-            [group_key, "lat", "lon", "basename"],
-            dropna=False,
-        )["_present"]
-        .max()
-        .reset_index()
-        .groupby(
             [group_key, "lat", "lon"],
             dropna=False,
         )["_present"]
         .sum()
-        .reset_index(name="present_files")
+        .reset_index(name="present_detections")
     )
 
     pa_map_stats[group_key] = pa_map_stats[group_key].astype(str)
     plot_df = pa_map_stats.copy()
     if not plot_df.empty:
         plot_df = plot_df.copy()
-        present_vals = pd.to_numeric(plot_df["present_files"], errors="coerce").fillna(0.0).clip(lower=0.0)
+        present_vals = pd.to_numeric(plot_df["present_detections"], errors="coerce").fillna(0.0).clip(lower=0.0)
         current_max = float(present_vals.max()) if len(present_vals) else 0.0
         if current_max > 0:
             scaled = np.sqrt(present_vals / current_max)
@@ -1202,7 +1196,7 @@ def render_dashboard(df: Optional[pd.DataFrame], sources: Dict[str, str], page: 
             "TextLayer",
             data=plot_df,
             get_position=["lon", "lat"],
-            get_text="present_files",
+            get_text="present_detections",
             get_color="[0, 0, 0, 255]",
             sizeScale=5,
             get_size=16,
@@ -1218,7 +1212,7 @@ def render_dashboard(df: Optional[pd.DataFrame], sources: Dict[str, str], page: 
             layers=[layer_scatter, layer_text],
             initial_view_state=view_state,
             tooltip={
-                "text": f"{'Species' if group_key=='species_name' else 'Recorder'}: {{{group_key}}}\nPresent files: {{present_files}}"
+                "text": f"{'Species' if group_key=='species_name' else 'Recorder'}: {{{group_key}}}\nPresent detections: {{present_detections}}"
             },
         )
         st.pydeck_chart(deck, height=800)
@@ -1236,30 +1230,27 @@ def render_dashboard(df: Optional[pd.DataFrame], sources: Dict[str, str], page: 
 
             counts = (
                 dfc.assign(_present=(dfc["FinalLabelEffective"].str.lower() == "present"))
-                .groupby(["date", group_key, "basename"], dropna=False)["_present"]
-                .max()
-                .reset_index()
                 .groupby(["date", group_key], dropna=False)["_present"]
                 .sum()
-                .reset_index(name="present_files")
+                .reset_index(name="present_detections")
             )
 
-            df_time = all_combinations.merge(counts, on=["date", group_key], how="left").fillna({"present_files": 0})
+            df_time = all_combinations.merge(counts, on=["date", group_key], how="left").fillna({"present_detections": 0})
 
             # Only show the chart if there is at least one non-zero value
-            if (df_time["present_files"] > 0).any():
+            if (df_time["present_detections"] > 0).any():
                 st.header(f"Detections Over Time (by {('Species' if group_key=='species_name' else 'Recorder')})")
                 date_chart = (
                     alt.Chart(df_time)
                     .mark_bar()
                     .encode(
                         x=alt.X("date:T", title="Date", axis=alt.Axis(format="%d-%m-%y")),
-                        y=alt.Y("present_files:Q", title="Present Files", axis=alt.Axis(format="d", tickMinStep=1)),
+                        y=alt.Y("present_detections:Q", title="Present Detections", axis=alt.Axis(format="d", tickMinStep=1)),
                         color=alt.Color(f"{group_key}:N", title=("Species" if group_key == "species_name" else "Recorder")),
                         tooltip=[
                             alt.Tooltip("date:T", title="Date", format="%d-%m-%y"),
                             alt.Tooltip(f"{group_key}:N", title=("Species" if group_key == "species_name" else "Recorder")),
-                            alt.Tooltip("present_files:Q", title="Present Files", format="d"),
+                            alt.Tooltip("present_detections:Q", title="Present Detections", format="d"),
                         ],
                     )
                     .interactive()
@@ -1276,18 +1267,15 @@ def render_dashboard(df: Optional[pd.DataFrame], sources: Dict[str, str], page: 
 
         tod = (
             dft.assign(_present=(dft["FinalLabelEffective"].str.lower() == "present"))
-            .groupby([group_key, "basename", "time_of_day"], dropna=False)["_present"]
-            .max()
-            .reset_index()
             .groupby([group_key, "time_of_day"], dropna=False)["_present"]
             .sum()
-            .reset_index(name="present_files")
+            .reset_index(name="present_detections")
         )
         tod["tod_ts"] = pd.to_datetime(tod["time_of_day"].astype(str), format="%H:%M:%S", errors="coerce")
 
         if not tod.empty:
             tod_nonzero = tod.dropna(subset=["tod_ts"])
-            tod_nonzero = tod_nonzero[tod_nonzero["present_files"] > 0]
+            tod_nonzero = tod_nonzero[tod_nonzero["present_detections"] > 0]
 
             if not tod_nonzero.empty:
                 st.header(f"Detections by Time of Day (by {('Species' if group_key=='species_name' else 'Recorder')})")
@@ -1296,12 +1284,12 @@ def render_dashboard(df: Optional[pd.DataFrame], sources: Dict[str, str], page: 
                     .mark_bar()
                     .encode(
                         x=alt.X("tod_ts:T", title="Time of Day", axis=alt.Axis(format="%H:%M")),
-                        y=alt.Y("present_files:Q", title="Present Files", axis=alt.Axis(format="d", tickMinStep=1)),
+                        y=alt.Y("present_detections:Q", title="Present Detections", axis=alt.Axis(format="d", tickMinStep=1)),
                         color=alt.Color(f"{group_key}:N", title=("Species" if group_key == "species_name" else "Recorder")),
                         tooltip=[
                             alt.Tooltip(f"{group_key}:N", title=("Species" if group_key == "species_name" else "Recorder")),
                             alt.Tooltip("tod_ts:T", title="Time", format="%H:%M"),
-                            alt.Tooltip("present_files:Q", title="Present Files", format="d"),
+                            alt.Tooltip("present_detections:Q", title="Present Detections", format="d"),
                         ],
                     )
                     .interactive()
