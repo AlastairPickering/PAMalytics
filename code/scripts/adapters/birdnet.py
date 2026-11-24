@@ -1,6 +1,7 @@
 # scripts/adapters/birdnet.py
 from __future__ import annotations
 
+from contextlib import closing
 from pathlib import Path
 from typing import Optional, List, Dict, Tuple, Any, Callable
 import os
@@ -227,7 +228,7 @@ def _sqlite_query_paths(index_db: Path, sql: str, params: Tuple[object, ...], co
         return []
     try:
         if conn is None:
-            with sqlite3.connect(f"file:{Path(index_db)}?mode=ro", uri=True) as local_conn:
+            with closing(sqlite3.connect(Path(index_db).resolve().as_uri() + "?mode=ro", uri=True)) as local_conn:
                 rows = local_conn.execute(sql, params).fetchall()
         else:
             rows = conn.execute(sql, params).fetchall()
@@ -566,7 +567,7 @@ def _resolve_audio_candidates_sqlite_status(index_db: Path, values: List[str], s
     first_ambiguous: Optional[Tuple[List[str], str, int, str, str]] = None
     first_unmatched: Optional[Tuple[List[str], str, int, str, str]] = None
     for raw_value in values:
-        matches, status, match_count, method = _match_audio_paths_sqlite_status(index_db, raw_value, source_csv=source_csv, csv_base=csv_base)
+        matches, status, match_count, method = _match_audio_paths_sqlite_status(index_db, raw_value, source_csv=source_csv, csv_base=csv_base, conn=conn)
         if len(matches) == 1 and status == "matched":
             return matches, status, match_count, method, raw_value
         if status.startswith("ambiguous_") and first_ambiguous is None:
@@ -653,7 +654,7 @@ def _expand_rows_by_audio_matches(
     matched_refs = ambiguous_refs = unmatched_refs = 0
     unique_matched_paths = set()
 
-    conn = sqlite3.connect(f"file:{Path(audio_index_db)}?mode=ro", uri=True) if use_sqlite else None
+    conn = sqlite3.connect(Path(audio_index_db).resolve().as_uri() + "?mode=ro", uri=True) if use_sqlite else None
     try:
         for n, (key, (candidate_values, source_csv)) in enumerate(key_inputs.items(), start=1):
             if use_sqlite:

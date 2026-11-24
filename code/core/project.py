@@ -32,7 +32,7 @@ def _slug(name: str) -> str:
 
 def create_project(name: str, use_case: str, created_by: Optional[str]) -> Path:
     folder = PROJECTS_ROOT / _slug(name)
-    folder.mkdir(parents=True, exist_ok=True)
+    folder.mkdir(parents=True, exist_ok=False)
     manifest = ProjectManifest(
         project_id=str(uuid.uuid4()),
         name=name,

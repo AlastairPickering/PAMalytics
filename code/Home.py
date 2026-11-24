@@ -1,4 +1,5 @@
 import json
+from contextlib import closing
 from dataclasses import dataclass, asdict, field
 from datetime import datetime, timezone as dt_timezone
 from pathlib import Path
@@ -208,7 +209,7 @@ def _default_paths(folder: Path) -> Dict[str, str]:
 
 def create_project(name: str, use_case: str, created_by: Optional[str]) -> Path:
     folder = PROJECTS_ROOT / _slug(name)
-    folder.mkdir(parents=True, exist_ok=True)
+    folder.mkdir(parents=True, exist_ok=False)
     manifest = ProjectManifest(
         project_id=str(uuid.uuid4()),
         name=name,
@@ -1245,25 +1246,67 @@ def pick_file_dialog(
         return None
 
 
-def pick_folder_dialog(title: str = "Select a folder") -> Optional[str]:
+def _run_macos_folder_dialog(title: str) -> Tuple[Optional[str], Optional[str]]:
+    """Run the native picker outside the Streamlit process; return path or error.
+
+    AppleScript cancellation (-128) is normal. Do not treat other subprocess
+    failures as successful selections or silently hide them from the user.
+    """
+    prompt = json.dumps(str(title))  # escape quotes and newlines safely
+    script = (
+        f"set chosenFolder to choose folder with prompt {prompt}\n"
+        "return POSIX path of chosenFolder"
+    )
     try:
-        system = platform.system().lower()
-        if "darwin" in system or "mac" in system:
-            script = f'set _folder to POSIX path of (choose folder with prompt "{title}")\nreturn _folder'
-            res = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
-            path = res.stdout.strip()
-            return path or None
-        else:
-            import tkinter as tk
-            from tkinter import filedialog
-            root = tk.Tk()
-            root.withdraw()
-            root.attributes("-topmost", True)
-            folder = filedialog.askdirectory(title=title)
-            root.destroy()
-            return folder or None
-    except Exception:
+        result = subprocess.run(
+            ["/usr/bin/osascript", "-e", script],
+            capture_output=True, text=True, timeout=120, check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return None, "The folder chooser timed out. You can enter the folder path directly."
+    except OSError as exc:
+        return None, f"The macOS folder chooser could not be started ({exc})."
+    if result.returncode:
+        error = (result.stderr or result.stdout or "").strip()
+        if result.returncode == 1 and ("(-128)" in error or "User canceled" in error or "User cancelled" in error):
+            return None, None
+        return None, f"The macOS folder chooser failed: {error or 'unknown AppleScript error'}."
+    folder = result.stdout.strip()
+    if not folder:
+        return None, "The folder chooser did not return a folder."
+    try:
+        candidate = _P(folder).expanduser()
+        if not candidate.is_dir():
+            return None, "The selected folder is no longer accessible."
+    except (OSError, RuntimeError):
+        return None, "The selected folder is no longer accessible."
+    return str(candidate), None
+
+
+def pick_folder_dialog(title: str = "Select a folder") -> Optional[str]:
+    system = platform.system().lower()
+    if "darwin" in system or "mac" in system:
+        path, error = _run_macos_folder_dialog(title)
+        if error:
+            st.session_state["_pa_folder_picker_error"] = error
+        return path
+    root = None
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        return filedialog.askdirectory(title=title) or None
+    except Exception as exc:
+        st.session_state["_pa_folder_picker_error"] = f"Folder chooser failed: {exc}"
         return None
+    finally:
+        if root is not None:
+            try:
+                root.destroy()
+            except Exception:
+                pass
 
 
 def _clean_dialog_path(p: str) -> str:
@@ -1335,6 +1378,10 @@ def flexible_path_picker(
             on_click=_browse_into_folder,
             args=(state_key, f"Select {label.lower()}"),
         )
+
+    picker_error = st.session_state.pop("_pa_folder_picker_error", None)
+    if picker_error:
+        st.warning(picker_error)
 
     val = _clean_dialog_path(str(st.session_state.get(state_key, "")))
     return _P(val) if val else None
@@ -1455,7 +1502,7 @@ def _audio_index_read_meta(index_db: Path) -> Dict[str, str]:
     if not index_db or not Path(index_db).exists():
         return {}
     try:
-        with sqlite3.connect(str(index_db)) as conn:
+        with closing(sqlite3.connect(str(index_db))) as conn:
             tables = {str(r[0]) for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
             if "audio_index_meta" not in tables:
                 return {}
@@ -1480,7 +1527,7 @@ def _audio_index_sample_paths(index_db: Path, limit: int = 5) -> Tuple[int, int]
     if not index_db or not Path(index_db).exists():
         return tested, found
     try:
-        with sqlite3.connect(str(index_db)) as conn:
+        with closing(sqlite3.connect(str(index_db))) as conn:
             rows = conn.execute("SELECT path FROM audio_files WHERE path IS NOT NULL AND TRIM(path) <> '' LIMIT ?", (int(limit),)).fetchall()
         for row in rows:
             tested += 1
@@ -1515,7 +1562,7 @@ def _audio_index_status(index_db: Path, audio_root: Optional[Path], allow_root_m
         return out
     try:
         root_abs = _audio_index_root_abs(audio_root)
-        with sqlite3.connect(str(index_db)) as conn:
+        with closing(sqlite3.connect(str(index_db))) as conn:
             tables = {str(r[0]) for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
             if "audio_files" not in tables:
                 out["reason"] = "Index does not contain an audio_files table."
@@ -1801,7 +1848,7 @@ def _audio_index_query_paths(index_db: Path, raw_sql: str, params: Tuple[Any, ..
         if conn is not None:
             rows = conn.execute(raw_sql, params).fetchall()
         else:
-            with sqlite3.connect(str(index_db)) as _conn:
+            with closing(sqlite3.connect(str(index_db))) as _conn:
                 rows = _conn.execute(raw_sql, params).fetchall()
         return list(dict.fromkeys([str(r[0]) for r in rows if r and _pa_clean_value(r[0])]))
     except Exception:
@@ -2276,16 +2323,20 @@ def view_hub() -> None:
         )
 
         if _btn("Create project", key="create_project_btn") and name.strip():
-            folder = create_project(
-                name=name.strip(),
-                use_case="external_results",
-                created_by=st.session_state.auth_user,
-            )
-            touch_last_opened(folder)
-            st.session_state.current_project = str(folder)
-            st.session_state.route = "overview"
-            st.success(f"Created project: `{folder.name}`")
-            st.rerun()
+            try:
+                folder = create_project(
+                    name=name.strip(),
+                    use_case="external_results",
+                    created_by=st.session_state.auth_user,
+                )
+            except FileExistsError:
+                st.error("That project folder already exists. Choose another name.")
+            else:
+                touch_last_opened(folder)
+                st.session_state.current_project = str(folder)
+                st.session_state.route = "overview"
+                st.success(f"Created project: `{folder.name}`")
+                st.rerun()
 
 
     st.subheader("Recent projects")
@@ -2949,7 +3000,7 @@ def view_import_results() -> None:
         total_refs = int(len(unique_keys))
 
         import sqlite3 as _sqlite3
-        _conn = _sqlite3.connect(f"file:{wav_index}?mode=ro", uri=True)
+        _conn = _sqlite3.connect(Path(wav_index).resolve().as_uri() + "?mode=ro", uri=True)
         _matched_refs = 0
         _ambiguous_refs = 0
         _unmatched_refs = 0

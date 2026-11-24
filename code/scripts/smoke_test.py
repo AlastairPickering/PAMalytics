@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import closing
 from pathlib import Path
 import importlib
 import os
@@ -20,7 +21,8 @@ if str(REPO_ROOT) not in sys.path:
 if str(CODE_ROOT) not in sys.path:
     sys.path.insert(0, str(CODE_ROOT))
 
-os.environ.setdefault("PAMALYTICS_HOME", tempfile.mkdtemp(prefix="pamalytics_smoke_"))
+_smoke_home = tempfile.TemporaryDirectory(prefix="pamalytics_smoke_")
+os.environ["PAMALYTICS_HOME"] = _smoke_home.name
 
 MODULES = [
     "code.app_paths",
@@ -56,10 +58,11 @@ PROJECTS_ROOT.mkdir(parents=True, exist_ok=True)
 AUTH_FILE.parent.mkdir(parents=True, exist_ok=True)
 AUTH_FILE.write_text('{"remember": false, "user": ""}', encoding="utf-8")
 
-with sqlite3.connect(":memory:") as conn:
+with closing(sqlite3.connect(":memory:")) as conn:
     conn.execute("CREATE TABLE audio_files (filename_lc TEXT, stem_lc TEXT, path TEXT, path_lc TEXT, rel_lc TEXT)")
     conn.execute("CREATE TABLE audio_index_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
 
 print("PAMalytics smoke test passed")
 print(f"Python: {sys.version.split()[0]}")
 print(f"User root: {USER_ROOT}")
+_smoke_home.cleanup()

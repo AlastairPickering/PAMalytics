@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import closing
 from pathlib import Path
 from typing import Optional, List, Dict, Tuple, Any, Callable
 import os
@@ -234,7 +235,7 @@ def _audio_index_query_paths(index_db: Path, raw_sql: str, params: Tuple[Any, ..
         return []
     try:
         if conn is None:
-            with sqlite3.connect(f"file:{Path(index_db)}?mode=ro", uri=True) as local_conn:
+            with closing(sqlite3.connect(Path(index_db).resolve().as_uri() + "?mode=ro", uri=True)) as local_conn:
                 rows = local_conn.execute(raw_sql, params).fetchall()
         else:
             rows = conn.execute(raw_sql, params).fetchall()
@@ -320,7 +321,7 @@ def _expand_rows_by_audio_index(df: pd.DataFrame, audio_index_db: Optional[Path]
     matched_refs = ambiguous_refs = unmatched_refs = 0
     unique_matched_paths = set()
 
-    with sqlite3.connect(f"file:{Path(audio_index_db)}?mode=ro", uri=True) as conn:
+    with closing(sqlite3.connect(Path(audio_index_db).resolve().as_uri() + "?mode=ro", uri=True)) as conn:
         for n, fid in enumerate(unique_fids, start=1):
             result = _match_audio_paths_sqlite_status(Path(audio_index_db), fid, conn=conn)
             cache[fid] = result

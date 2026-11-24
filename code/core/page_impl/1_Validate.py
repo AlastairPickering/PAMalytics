@@ -295,7 +295,159 @@ def _fmt_khz(x: float) -> str:
 
 # Dataset loading
 
-def _load_csv_safe(p: Path) -> Optional[pd.DataFrame]:
+_RECORDING_KEY = "__recording_key"
+_SOURCE_KEY = "__validation_source_id"
+_ROW_KEY = "__validation_row_id"
+_INTERNAL_KEYS = [_RECORDING_KEY, _SOURCE_KEY, _ROW_KEY]
+_REVIEW_COLUMNS = [
+    "species_name", "presence_label", "species_name_original", "presence_label_original",
+    "validation_state", "validation_label", "validation_species", "validated_by",
+    "validated_at", "validation_method", "validation_notes", "user_changed",
+    "user_changed_by", "user_changed_at", "uncertain_flag",
+]
+
+
+def _identity_text(df: pd.DataFrame, *columns: str, default: str = "") -> pd.Series:
+    for col in columns:
+        if col in df.columns:
+            return df[col].astype("string").fillna("").str.strip()
+    return pd.Series(default, index=df.index, dtype="string")
+
+
+def _identity_number(df: pd.DataFrame, *columns: str) -> pd.Series:
+    for col in columns:
+        if col in df.columns:
+            return pd.to_numeric(df[col], errors="coerce").astype(float)
+    return pd.Series(np.nan, index=df.index, dtype=float)
+
+
+def _recording_keys(df: pd.DataFrame) -> pd.Series:
+    keys = pd.Series("", index=df.index, dtype="string")
+    for col in ("file_path", "path", "file_path_rel", "file_path_abs", "file_path_original",
+                "original_path", "file_key", "file_id", "source_file", "basename"):
+        missing = keys.eq("")
+        if not missing.any():
+            break
+        if col in df.columns:
+            values = _identity_text(df, col).replace({"nan": "", "None": "", "<NA>": ""})
+            keys = keys.mask(missing, values)
+    keys = keys.str.replace("\\", "/", regex=False).str.replace(r"/\./", "/", regex=True).str.removeprefix("./")
+    return keys.str.lower() if os.name == "nt" else keys
+
+
+def _validation_identity_frame(df: pd.DataFrame) -> pd.DataFrame:
+    return pd.DataFrame({
+        "recording": df[_RECORDING_KEY] if _RECORDING_KEY in df.columns else _recording_keys(df),
+        "detection": _identity_text(df, "detection_id"),
+        "species": _identity_text(df, "species_name_original", "species_name", "class"),
+        "presence": _identity_text(df, "presence_label_original", "presence_label", "FinalLabelEffective", "FinalLabel", "label", default="present").str.lower(),
+        "detector": _identity_text(df, "detector_id", "detector", "classifier"),
+        "confidence": _identity_number(df, "detection_probability", "probability", "prob", "score", "class_prob", "det_prob").round(12),
+        "start": _identity_number(df, "detection_start_s", "start_s").round(9),
+        "end": _identity_number(df, "detection_end_s", "end_s").round(9),
+    }, index=df.index)
+
+
+def _legacy_anchor_keys(df: pd.DataFrame) -> pd.Series:
+    identity = _validation_identity_frame(df).drop(columns=["species", "presence"])
+    return pd.util.hash_pandas_object(identity, index=False)
+
+
+def _with_validation_identity(df: pd.DataFrame) -> pd.DataFrame:
+    if all(col in df.columns for col in _INTERNAL_KEYS):
+        return df
+    out = df.copy()
+    out[_RECORDING_KEY] = _recording_keys(out)
+    identity = _validation_identity_frame(out)
+    out[_SOURCE_KEY] = "v" + pd.util.hash_pandas_object(identity, index=False).astype(str)
+    if _ROW_KEY not in out.columns:
+        occurrence = out.groupby(_SOURCE_KEY, sort=False).cumcount().astype(str)
+        out[_ROW_KEY] = out[_SOURCE_KEY] + ":" + occurrence
+        out.attrs["validation_legacy_identity"] = True
+    return out
+
+
+def _reconcile_legacy_reviews(original: Optional[pd.DataFrame], validated: Optional[pd.DataFrame]) -> Optional[pd.DataFrame]:
+    if original is None or validated is None or not validated.attrs.get("validation_legacy_identity", False):
+        return validated
+    unmatched = ~validated[_ROW_KEY].isin(original[_ROW_KEY])
+    if not unmatched.any():
+        return validated
+    original_anchors = _legacy_anchor_keys(original)
+    validated_anchors = _legacy_anchor_keys(validated)
+    original_unique = ~original_anchors.duplicated(keep=False)
+    validated_unique = ~validated_anchors.duplicated(keep=False)
+    candidates = original.loc[original_unique].copy()
+    candidates.index = original_anchors.loc[original_unique]
+    selected = unmatched & validated_unique & validated_anchors.isin(candidates.index)
+    if not selected.any():
+        return validated
+    matched = candidates.reindex(validated_anchors.loc[selected])
+    out = validated.copy()
+    if "species_name_original" not in out.columns:
+        out["species_name_original"] = _identity_text(out, "species_name", "class")
+    if "presence_label_original" not in out.columns:
+        out["presence_label_original"] = _identity_text(out, "presence_label", "FinalLabelEffective", "FinalLabel", "label", default="present")
+    for col in _INTERNAL_KEYS:
+        out.loc[selected, col] = matched[col].to_numpy()
+    out.loc[selected, "species_name_original"] = _identity_text(matched, "species_name_original", "species_name", "class").to_numpy()
+    out.loc[selected, "presence_label_original"] = _identity_text(matched, "presence_label_original", "presence_label", "FinalLabelEffective", "FinalLabel", "label", default="present").to_numpy()
+    return out
+
+
+def _overlay_validation_metadata(df: pd.DataFrame, enriched: Optional[pd.DataFrame], original_columns) -> pd.DataFrame:
+    if enriched is None or enriched.empty:
+        return df
+    protected = set(_REVIEW_COLUMNS) | set(_INTERNAL_KEYS) | {
+        "detection_id", "file_id", "file_key", "file_path", "path", "file_path_rel", "file_path_abs",
+        "file_path_original", "original_path", "source_file", "detection_start_s", "detection_end_s",
+        "start_s", "end_s", "detection_probability", "probability", "prob", "score", "class_prob", "det_prob",
+        "class", "FinalLabelEffective", "FinalLabel", "label",
+        "species_display", "species_display_original",
+    }
+    protected.update({"detector_id", "detector", "classifier"}.intersection(original_columns))
+    columns = [col for col in enriched.columns if col not in protected]
+    if not columns:
+        return df
+    metadata = enriched[[_SOURCE_KEY] + columns]
+    if metadata[_SOURCE_KEY].duplicated().any():
+        grouped = metadata.groupby(_SOURCE_KEY, sort=False)
+        metadata = grouped.first().mask(grouped.nunique(dropna=True).gt(1))
+    else:
+        metadata = metadata.set_index(_SOURCE_KEY)
+    aligned = metadata.reindex(df[_SOURCE_KEY]).set_axis(df.index)
+    out = df.copy()
+    for col in columns:
+        if col in original_columns and col in out.columns:
+            missing = out[col].isna() | out[col].astype("string").fillna("").str.strip().eq("")
+            out[col] = out[col].mask(missing, aligned[col])
+        else:
+            out[col] = aligned[col].combine_first(out[col]) if col in out.columns else aligned[col]
+    return out
+
+
+def _identity_rows_aligned(df: pd.DataFrame, reference: pd.DataFrame) -> bool:
+    if len(df) != len(reference):
+        return False
+    fields = [
+        ("file_path", "path", "file_path_rel", "file_path_abs", "file_path_original", "original_path", "file_key", "file_id", "source_file", "basename"),
+        ("detection_id",), ("species_name_original", "species_name", "class"),
+        ("presence_label_original", "presence_label", "FinalLabelEffective", "FinalLabel", "label"),
+        ("detector_id", "detector", "classifier"),
+        ("detection_probability", "probability", "prob", "score", "class_prob", "det_prob"),
+        ("detection_start_s", "start_s"), ("detection_end_s", "end_s"),
+    ]
+    for position, candidates in enumerate(fields):
+        source = next((col for col in candidates if col in df.columns), None)
+        target = next((col for col in candidates if col in reference.columns), None)
+        if source != target or (source is not None and not df[source].equals(reference[source])):
+            return False
+        if position == 0 and (source is None or _identity_text(df, source).isin(["", "nan", "None", "<NA>"]).any()):
+            return False
+    return True
+
+
+def _load_csv_safe(p: Path, identity_reference: Optional[pd.DataFrame] = None) -> Optional[pd.DataFrame]:
     """Read a validation CSV once per session/file version.
 
     The cache is deliberately session-scoped rather than ``st.cache_data`` so a
@@ -307,6 +459,8 @@ def _load_csv_safe(p: Path) -> Optional[pd.DataFrame]:
             return None
         stat = p.stat()
         signature = (str(p), int(stat.st_size), int(stat.st_mtime_ns))
+        if identity_reference is not None:
+            signature += (tuple(identity_reference.columns),)
         cache = st.session_state.setdefault("_validate_csv_session_cache", {})
         entry = cache.get(str(p))
         if isinstance(entry, dict) and entry.get("signature") == signature:
@@ -317,37 +471,68 @@ def _load_csv_safe(p: Path) -> Optional[pd.DataFrame]:
             df.columns = df.columns.str.strip()
         except Exception:
             pass
+        if identity_reference is not None:
+            identity_input = pd.DataFrame({
+                col: df[col] if col in df.columns else df[f"{col}_x"]
+                for col in identity_reference.columns
+                if col not in _INTERNAL_KEYS and (col in df.columns or f"{col}_x" in df.columns)
+            }, index=df.index)
+            if _identity_rows_aligned(identity_input, identity_reference):
+                identity = identity_reference
+            else:
+                identity = _with_validation_identity(identity_input)
+            df[_INTERNAL_KEYS] = identity[_INTERNAL_KEYS].to_numpy()
+            df.attrs["validation_legacy_identity"] = True
+        else:
+            df = _with_validation_identity(df)
         cache[str(p)] = {"signature": signature, "df": df}
-        if len(cache) > 2:
+        if len(cache) > 3:
             for key in list(cache.keys()):
-                if key != str(p) and len(cache) > 2:
+                if key != str(p) and len(cache) > 3:
                     cache.pop(key, None)
         return df
     except Exception:
         return None
 
 
-def _dataset_choice_validate(sources: dict) -> Tuple[pd.DataFrame, str, Dict[str, pd.DataFrame], Dict[str, Path]]:
-    proj_root = Path(sources.get("project") or sources.get("project_root") or ".")
+def _load_validation_datasets(proj_root: Path):
     data_dir = proj_root / "data_normalised"
     data_dir.mkdir(parents=True, exist_ok=True)
 
     p_original = data_dir / "detections_normalised.csv"
     p_valid = data_dir / "detections_validated.csv"
 
+    df_orig = _load_csv_safe(p_original)
+    df_val = _load_csv_safe(p_valid)
+    enriched = _load_csv_safe(data_dir / "detections_enriched.csv", identity_reference=df_orig)
+    signature = (str(proj_root), id(df_orig), id(df_val), id(enriched))
+    cached = st.session_state.get("_validate_datasets_cache", {})
+    if cached.get("signature") == signature:
+        return cached["choices"], cached["paths"]
+    df_val = _reconcile_legacy_reviews(df_orig, df_val)
+
     choices: Dict[str, pd.DataFrame] = {}
     path_map: Dict[str, Path] = {}
-
-    df_orig = _load_csv_safe(p_original)
+    original_columns = df_orig.columns if df_orig is not None else list(_REVIEW_COLUMNS) + [
+        "detection_id", "file_id", "file_key", "file_path", "path", "detection_start_s", "detection_end_s", "start_s", "end_s",
+    ]
     if df_orig is not None:
-        choices["Original"] = df_orig
+        choices["Original"] = _overlay_validation_metadata(df_orig, enriched, original_columns)
+        choices["Original"].attrs["validation_dataset"] = "Original"
         path_map["Original"] = p_original
 
-    df_val = _load_csv_safe(p_valid)
     if df_val is not None:
-        choices["Updated"] = df_val
+        choices["Updated"] = _overlay_validation_metadata(df_val, enriched, original_columns)
+        choices["Updated"].attrs["validation_dataset"] = "Updated"
         path_map["Updated"] = p_valid
 
+    st.session_state["_validate_datasets_cache"] = {"signature": signature, "choices": choices, "paths": path_map}
+    return choices, path_map
+
+
+def _dataset_choice_validate(sources: dict) -> Tuple[pd.DataFrame, str, Dict[str, pd.DataFrame], Dict[str, Path]]:
+    proj_root = Path(sources.get("project") or sources.get("project_root") or ".")
+    choices, path_map = _load_validation_datasets(proj_root)
     if not choices:
         return pd.DataFrame(), "None", {}, {}
 
@@ -403,11 +588,11 @@ def _ensure_validation_ready(df_in: pd.DataFrame) -> pd.DataFrame:
         df["path"] = df["file_path"]
 
     if "basename" not in df.columns:
-        src = df.get("file_id", df.get("source_file", ""))
-        df["basename"] = src.astype(str).map(lambda p: Path(p).name)
+        src = _identity_text(df, "file_id", "source_file", "file_path")
+        df["basename"] = src.str.replace(r"^.*[/\\]", "", regex=True)
 
     if "filename_stem" not in df.columns:
-        df["filename_stem"] = df["basename"].astype(str).map(lambda s: Path(s).stem.lower())
+        df["filename_stem"] = df["basename"].astype(str).str.replace(r"(?<=.)\.[^.]*$", "", regex=True).str.lower()
 
     if "start_s" not in df.columns and "detection_start_s" in df.columns:
         df["start_s"] = pd.to_numeric(df["detection_start_s"], errors="coerce")
@@ -462,12 +647,23 @@ def _ensure_validation_ready(df_in: pd.DataFrame) -> pd.DataFrame:
     )
     df["species_display_original"] = _clean_group_labels(df["species_display_original"], "[unknown species]")
 
-    return df
+    return _with_validation_identity(df)
+
+
+def _card_mask(df: pd.DataFrame, recording_key: str, species_orig: str, selected_indices=None) -> pd.Series:
+    mask = df[_RECORDING_KEY].eq(recording_key) & df["species_display_original"].eq(species_orig)
+    if selected_indices is not None:
+        mask &= df.index.isin(selected_indices)
+    return mask
+
+
+def _detection_widget_key(prefix: str, row: pd.Series) -> str:
+    return _safe_widget_key(prefix, st.session_state.get("current_project", ""), row[_ROW_KEY])
 
 
 def _apply_card_widget_state(
     det: pd.DataFrame,
-    base: str,
+    recording_key: str,
     species_orig: str,
     selected_indices: Optional[List[int]] = None,
 ) -> pd.DataFrame:
@@ -479,14 +675,7 @@ def _apply_card_widget_state(
         "basename", "species_display_original",
     ])
 
-    mask_card = (
-        out["basename"].astype(str).eq(base)
-        & out["species_display_original"].astype(str).eq(species_orig)
-    )
-
-    if selected_indices is not None:
-        selected_idx_set = set(int(i) for i in selected_indices)
-        mask_card = mask_card & out.index.to_series().isin(selected_idx_set)
+    mask_card = _card_mask(out, recording_key, species_orig, selected_indices)
 
     card_rows = out.loc[mask_card].copy()
     if card_rows.empty:
@@ -499,9 +688,9 @@ def _apply_card_widget_state(
     for ridx, row in rgdf.iterrows():
         idx = int(row["__orig_index"])
 
-        sp_key = f"sp_{base}_{species_orig}_{ridx}"
-        unc_key = f"unc_{base}_{species_orig}_{ridx}"
-        note_key = f"note_{base}_{species_orig}_{ridx}"
+        sp_key = _detection_widget_key("sp", row)
+        unc_key = _detection_widget_key("unc", row)
+        note_key = _detection_widget_key("note", row)
 
         current_presence = str(row.get("presence_label", "") or "").strip().lower()
         current_species = str(row.get("species_name", "") or "")
@@ -536,7 +725,7 @@ def _apply_card_widget_state(
 
 def _apply_card_submitted_values(
     det: pd.DataFrame,
-    base: str,
+    recording_key: str,
     species_orig: str,
     submitted_values: Dict[int, Dict[str, object]],
     selected_indices: Optional[List[int]] = None,
@@ -549,14 +738,7 @@ def _apply_card_submitted_values(
         "basename", "species_display_original",
     ])
 
-    mask_card = (
-        out["basename"].astype(str).eq(base)
-        & out["species_display_original"].astype(str).eq(species_orig)
-    )
-
-    if selected_indices is not None:
-        selected_idx_set = set(int(i) for i in selected_indices)
-        mask_card = mask_card & out.index.to_series().isin(selected_idx_set)
+    mask_card = _card_mask(out, recording_key, species_orig, selected_indices)
 
     card_rows = out.loc[mask_card].copy()
     if card_rows.empty:
@@ -565,10 +747,11 @@ def _apply_card_submitted_values(
     card_rows = card_rows.sort_values("start_s")
     card_rows["__orig_index"] = card_rows.index
     rgdf = card_rows.reset_index(drop=True)
+    values_by_id = {str(values["row_id"]): values for values in submitted_values.values() if "row_id" in values}
 
     for ridx, row in rgdf.iterrows():
         idx = int(row["__orig_index"])
-        values = submitted_values.get(int(ridx), {}) if submitted_values else {}
+        values = values_by_id.get(str(row[_ROW_KEY]), {}) if values_by_id else submitted_values.get(int(ridx), {})
 
         current_presence = str(row.get("presence_label", "") or "").strip().lower()
         current_species = str(row.get("species_name", "") or "")
@@ -660,7 +843,12 @@ def _resolve_audio_path(proj_root: Path, row_or_df, df_all: pd.DataFrame) -> Opt
         s = row_or_df.iloc[0]
         stem = Path(str(s.get("basename", s.get("source_file", "")))).stem.lower()
 
-    rows2 = df_all[df_all["filename_stem"] == stem]
+    if rows and _RECORDING_KEY in df_all.columns and _RECORDING_KEY in rows[0].index:
+        rows2 = df_all[df_all[_RECORDING_KEY].eq(rows[0][_RECORDING_KEY])]
+    else:
+        rows2 = df_all[df_all["filename_stem"] == stem]
+        if _recording_keys(rows2).nunique() > 1:
+            return None
     if rows2.empty:
         return None
 
@@ -1274,6 +1462,67 @@ def _spectrogram_selection_stats(
     }
 
 
+# Browser-bound Plotly data must be capped independently of the underlying
+# spectrogram arrays, which remain at full resolution for acoustic measurements.
+INTERACTIVE_PLOT_MAX_TIME_BINS = 1000
+INTERACTIVE_PLOT_MAX_FREQ_BINS = 500
+
+
+def _bounded_spectrogram_for_plot(
+    S_dB: np.ndarray,
+    times: np.ndarray,
+    freqs_hz: np.ndarray,
+    max_time_bins: int = INTERACTIVE_PLOT_MAX_TIME_BINS,
+    max_freq_bins: int = INTERACTIVE_PLOT_MAX_FREQ_BINS,
+    *,
+    time_bounds: Optional[Tuple[float, float]] = None,
+    frequency_bounds: Optional[Tuple[float, float]] = None,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Thin the displayed heatmap without modifying measured spectrogram data."""
+    z = np.asarray(S_dB)
+    t = np.asarray(times)
+    f = np.asarray(freqs_hz)
+    if z.ndim != 2 or z.shape != (len(f), len(t)):
+        raise ValueError("Spectrogram axes do not match heatmap dimensions")
+    if max_time_bins < 2 or max_freq_bins < 2:
+        raise ValueError("Spectrogram display limits must be at least two bins")
+    # Reduce the time axis first to bound temporary memory; retain the
+    # strongest level in each display bin so short, narrow calls remain visible.
+    t_step = max(1, (z.shape[1] + max_time_bins - 1) // max_time_bins)
+    f_step = max(1, (z.shape[0] + max_freq_bins - 1) // max_freq_bins)
+    if t_step == 1 and f_step == 1:
+        return z, t, f
+
+    def bin_axis(values, step, bounds):
+        if step == 1:
+            return None, values
+        if bounds is None:
+            lower = float(values[0]) - (float(values[1]) - float(values[0])) * 0.5
+            upper = float(values[-1]) + (float(values[-1]) - float(values[-2])) * 0.5
+        else:
+            lower, upper = map(float, bounds)
+        if not (np.isfinite(lower) and np.isfinite(upper) and upper > lower):
+            raise ValueError("Spectrogram bin boundaries must be finite and increasing")
+        bin_count = (len(values) + step - 1) // step
+        edges = np.linspace(lower, upper, bin_count + 1)
+        starts = np.searchsorted(values, edges[:-1], side="left")
+        if starts[0] != 0 or starts[-1] >= len(values) or not np.all(np.diff(starts) > 0):
+            starts = np.arange(0, len(values), step)
+            edges = np.empty(len(starts) + 1, dtype=float)
+            edges[1:-1] = values[starts[1:] - 1] * 0.5 + values[starts[1:]] * 0.5
+            edges[0], edges[-1] = lower, upper
+            if not np.all(np.diff(edges) > 0):
+                raise ValueError("Spectrogram bin boundaries must contain their samples")
+        return starts, edges
+
+    time_starts, display_times = bin_axis(t, t_step, time_bounds)
+    frequency_starts, display_freqs = bin_axis(f, f_step, frequency_bounds)
+    reduced = z if time_starts is None else np.maximum.reduceat(z, time_starts, axis=1)
+    if frequency_starts is not None:
+        reduced = np.maximum.reduceat(reduced, frequency_starts, axis=0)
+    return reduced, display_times, display_freqs
+
+
 def _plotly_spectrogram_figure(
     S_dB: np.ndarray,
     times: np.ndarray,
@@ -1289,22 +1538,34 @@ def _plotly_spectrogram_figure(
     zmax = -float(gain_db)
     zmin = zmax - float(dynamic_range_db)
 
+    display_db, display_times, display_freqs = _bounded_spectrogram_for_plot(
+        S_dB, times, freqs_hz,
+        time_bounds=(float(xmin), float(xmax)),
+        frequency_bounds=(float(freqs_hz[0]), float(freqs_hz[-1])) if len(freqs_hz) > 1 else None,
+    )
     fig = go.Figure()
     fig.add_trace(
         go.Heatmap(
-            z=S_dB,
-            x=times,
-            y=freqs_hz,
+            z=display_db,
+            x=display_times,
+            y=display_freqs,
             colorscale=AUDACITY_PLOTLY_COLORSCALE,
             zmin=zmin,
             zmax=zmax,
             colorbar=dict(title="dBFS"),
             hovertemplate=(
-                "<b>Cursor</b><br>"
+                "<b>Bin centre</b><br>"
                 "Time: %{x:.3f} s<br>"
                 "Frequency: %{y:.0f} Hz<br>"
-                "Level: %{z:.1f} dBFS"
-                "<extra></extra>"
+                "Peak level in bin: %{z:.1f} dBFS<extra></extra>"
+                if len(display_times) != display_db.shape[1] or len(display_freqs) != display_db.shape[0]
+                else (
+                    "<b>Cursor</b><br>"
+                    "Time: %{x:.3f} s<br>"
+                    "Frequency: %{y:.0f} Hz<br>"
+                    "Level: %{z:.1f} dBFS"
+                    "<extra></extra>"
+                )
             ),
         )
     )
@@ -1377,7 +1638,7 @@ def _render_interactive_validate_dialog(
     proj_root: Path,
     df_all: pd.DataFrame,
     grouped,
-    base: str,
+    recording_key: str,
     species_orig: str,
     xmin: float,
     xmax: float,
@@ -1388,7 +1649,7 @@ def _render_interactive_validate_dialog(
     dynamic_range_db: float = AUDACITY_RANGE_DB_DEFAULT,
     gain_db: float = AUDACITY_GAIN_DB_DEFAULT,
 ):
-    gdf_int = grouped.get_group((base, species_orig)).copy()
+    gdf_int = grouped.get_group((recording_key, species_orig)).copy()
     apath_int = _resolve_audio_path(proj_root, gdf_int, df_all)
 
     if not (apath_int and apath_int.exists()):
@@ -1482,7 +1743,7 @@ def _render_interactive_validate_dialog(
 
     # Keep event measurements above the plot so they remain visible while reviewing.
     event_summary_slot = st.container()
-    plot_key = f"validate_interactive_plot_{abs(hash((base, species_orig))) % 100000000}"
+    plot_key = _safe_widget_key("validate_interactive_plot", recording_key, species_orig)
     event = st.plotly_chart(
         fig_int,
         key=plot_key,
@@ -2155,10 +2416,8 @@ def _strategy_summary(df: pd.DataFrame) -> str:
 def _validation_card_group_count(df: pd.DataFrame) -> int:
     if df is None or df.empty:
         return 0
-    if "basename" in df.columns and "species_display_original" in df.columns:
-        return int(df[["basename", "species_display_original"]].astype(str).drop_duplicates().shape[0])
-    if "detection_id" in df.columns:
-        return int(df["detection_id"].astype(str).nunique())
+    if _RECORDING_KEY in df.columns and "species_display_original" in df.columns:
+        return int(df[[_RECORDING_KEY, "species_display_original"]].drop_duplicates().shape[0])
     return int(len(df))
 
 
@@ -2627,9 +2886,9 @@ def _enforce_final_selection_total(
             .copy()
         )
 
-    if "detection_id" in df_source.columns and "detection_id" in df_selected.columns:
-        selected_ids = set(df_selected["detection_id"].astype(str))
-        pool = df_source[~df_source["detection_id"].astype(str).isin(selected_ids)].copy()
+    if _ROW_KEY in df_source.columns and _ROW_KEY in df_selected.columns:
+        selected_ids = set(df_selected[_ROW_KEY])
+        pool = df_source[~df_source[_ROW_KEY].isin(selected_ids)].copy()
     else:
         pool = df_source.drop(index=df_selected.index, errors="ignore").copy()
 
@@ -3379,10 +3638,41 @@ def _preview_height_for_rows(n_rows: int) -> int:
     return max(180, min(420, base + per_row * int(max(1, n_rows))))
 
 
+def _merge_reviewed_rows(proj_root: Path, submitted: pd.DataFrame, reviewed: pd.Series) -> pd.DataFrame:
+    choices, _ = _load_validation_datasets(proj_root)
+    latest = choices.get("Updated")
+    if latest is None:
+        if (proj_root / "data_normalised" / "detections_validated.csv").exists():
+            raise ValueError("Saved validation data could not be read; no changes were saved.")
+        return submitted
+    dataset = submitted.attrs.get("validation_dataset", st.session_state.get("active_dataset_label"))
+    if dataset == "Original" and latest.attrs.get("validation_legacy_identity", False):
+        repeated = latest.loc[latest[_SOURCE_KEY].duplicated(keep=False), _SOURCE_KEY]
+        if submitted.loc[reviewed, _SOURCE_KEY].isin(repeated).any():
+            raise ValueError("Cannot safely match repeated legacy detections from Original. Select Updated to review these rows.")
+    new_rows = submitted.loc[~submitted[_ROW_KEY].isin(latest[_ROW_KEY])]
+    unmatched_saved = latest.loc[~latest[_ROW_KEY].isin(submitted[_ROW_KEY])]
+    if not new_rows.empty and not unmatched_saved.empty:
+        if _legacy_anchor_keys(new_rows).isin(_legacy_anchor_keys(unmatched_saved)).any():
+            raise ValueError("Saved validation rows could not be matched safely; no changes were saved.")
+    out = _ensure_validation_ready(latest)
+    by_id = submitted.set_index(_ROW_KEY)
+    aligned = by_id.reindex(out[_ROW_KEY]).set_axis(out.index)
+    for col in submitted.columns.difference(out.columns):
+        out[col] = aligned[col]
+    reviewed_ids = submitted.loc[reviewed, _ROW_KEY]
+    target = out[_ROW_KEY].isin(reviewed_ids)
+    columns = [col for col in _REVIEW_COLUMNS if col in submitted.columns]
+    out.loc[target, columns] = aligned.loc[target, columns]
+    if not new_rows.empty:
+        out = pd.concat([out, new_rows], ignore_index=True)
+    return out
+
+
 def _commit_card(
     proj_root: Path,
     df_all: pd.DataFrame,
-    base: str,
+    recording_key: str,
     species_orig: str,
     selected_indices: Optional[List[int]] = None,
     submitted_values: Optional[Dict[int, Dict[str, object]]] = None,
@@ -3402,22 +3692,15 @@ def _commit_card(
     if submitted_values is not None:
         det = _apply_card_submitted_values(
             det,
-            base,
+            recording_key,
             species_orig,
             submitted_values,
             selected_indices=selected_indices,
         )
     else:
-        det = _apply_card_widget_state(det, base, species_orig, selected_indices=selected_indices)
+        det = _apply_card_widget_state(det, recording_key, species_orig, selected_indices=selected_indices)
 
-    mask_card = (
-        det["basename"].astype(str).eq(base)
-        & det["species_display_original"].astype(str).eq(species_orig)
-    )
-
-    if selected_indices is not None:
-        selected_idx_set = set(int(i) for i in selected_indices)
-        mask_card = mask_card & det.index.to_series().isin(selected_idx_set)
+    mask_card = _card_mask(det, recording_key, species_orig, selected_indices)
 
     card_rows_updated = det.loc[mask_card].copy()
     if card_rows_updated.empty:
@@ -3439,9 +3722,6 @@ def _commit_card(
     for i, changed_here, species_changed_here in zip(card_rows_updated.index, changed_mask, species_changed_mask):
         current_sp = str(det.at[i, "species_name"] or "")
         current_pl = str(det.at[i, "presence_label"] or "").strip().lower()
-        original_sp = str(det.at[i, "species_name_original"] or "")
-        original_pl = str(det.at[i, "presence_label_original"] or "").strip().lower()
-
         if changed_here:
             det.at[i, "user_changed"] = user_id or "1"
             det.at[i, "user_changed_by"] = user_id
@@ -3458,11 +3738,7 @@ def _commit_card(
         else:
             det.at[i, "validation_species"] = ""
 
-        if original_sp.strip() in ("", "<NA>", "nan"):
-            det.at[i, "species_name_original"] = current_sp
-        if original_pl.strip() in ("", "<NA>", "nan"):
-            det.at[i, "presence_label_original"] = current_pl
-
+    det = _merge_reviewed_rows(proj_root, det, mask_card)
     return det, int(changed_mask.sum()), int(len(card_rows_updated))
 
 
@@ -3962,14 +4238,14 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                 st.write("No card selected.")
                 return
 
-            sel_base = str(selected_card["base"])
+            sel_recording_key = str(selected_card["recording_key"])
             sel_species_orig = str(selected_card["species_orig"])
             try:
                 _render_interactive_validate_dialog(
                     proj_root=proj_root,
                     df_all=df_all,
                     grouped=grouped,
-                    base=sel_base,
+                    recording_key=sel_recording_key,
                     species_orig=sel_species_orig,
                     xmin=float(selected_card["xmin"]),
                     xmax=float(selected_card["xmax"]),
@@ -4276,7 +4552,7 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                 st.write("No preview available for the current strategy.")
 
     df_view = df_view.sort_values(["basename", "species_display_original", "start_s"])
-    grouped = df_view.groupby(["basename", "species_display_original"], dropna=False)
+    grouped = df_view.groupby([_RECORDING_KEY, "species_display_original"], dropna=False)
     groups: List[tuple[str, str]] = list(grouped.indices.keys())
 
     conf_sort = str(st.session_state.get("validate_conf_sort", "Strategy/default order"))
@@ -4362,14 +4638,15 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
             if gi >= len(page_keys):
                 break
 
-            base, species_orig = page_keys[gi]
-            gdf = grouped.get_group((base, species_orig)).copy()
+            recording_key, species_orig = page_keys[gi]
+            gdf = grouped.get_group((recording_key, species_orig)).copy()
+            base = str(gdf["basename"].iloc[0])
 
             if "detection_probability" not in gdf.columns:
                 gdf["detection_probability"] = gdf.apply(_best_prob_from_row, axis=1)
 
             apath = _resolve_audio_path(proj_root, gdf, df_all)
-            gdf_plot = _rows_for_resolved_audio(proj_root, gdf, apath)
+            gdf_plot = gdf
 
             all_detectable_boxes: List[Dict[str, float]] = []
             for row_index, row in gdf_plot.iterrows():
@@ -4445,9 +4722,9 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                                 unsafe_allow_html=True,
                             )
 
-                            time_state_key = _safe_widget_key("validate_time_window_state", base, species_orig)
-                            time_key_start = _safe_widget_key("validate_time_xmin_input", base, species_orig)
-                            time_key_end = _safe_widget_key("validate_time_xmax_input", base, species_orig)
+                            time_state_key = _safe_widget_key("validate_time_window_state", recording_key, species_orig)
+                            time_key_start = _safe_widget_key("validate_time_xmin_input", recording_key, species_orig)
+                            time_key_end = _safe_widget_key("validate_time_xmax_input", recording_key, species_orig)
                             stored_window = dict(st.session_state.get(time_state_key, {}))
 
                             default_start, default_end, default_signature = _default_detection_window(
@@ -4483,7 +4760,7 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                                 st.markdown("<div style='height:1.65rem'></div>", unsafe_allow_html=True)
                                 reset_window = st.button(
                                     "↺",
-                                    key=_safe_widget_key("validate_time_reset", base, species_orig),
+                                    key=_safe_widget_key("validate_time_reset", recording_key, species_orig),
                                     help="Reset x-axis to current default",
                                 )
                             if reset_window:
@@ -4539,10 +4816,10 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                             }
 
                             gain_key = _safe_widget_key(
-                                "validate_gain_db", base, species_orig
+                                "validate_gain_db", recording_key, species_orig
                             )
                             dynamic_range_key = _safe_widget_key(
-                                "validate_dynamic_range_db", base, species_orig
+                                "validate_dynamic_range_db", recording_key, species_orig
                             )
                             if gain_key not in st.session_state:
                                 st.session_state[gain_key] = int(AUDACITY_GAIN_DB_DEFAULT)
@@ -4693,11 +4970,11 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
 
                         if st.button(
                             "Open interactive spectrogram",
-                            key=_safe_widget_key("open_interactive_plotly", base, species_orig),
+                            key=_safe_widget_key("open_interactive_plotly", recording_key, species_orig),
                             width="stretch",
                         ):
                             st.session_state["validate_interactive_card"] = {
-                                "base": base,
+                                "recording_key": recording_key,
                                 "species_orig": species_orig,
                                 "xmin": float(xmin),
                                 "xmax": float(xmax),
@@ -4722,18 +4999,18 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                                 te = max(1, int(te_auto))
 
                             y_play, psr = _apply_time_expansion_for_playback(y_seg, sr, te)
-                            tmp_wav = _tmp_audio_path(proj_root, base, f"{species_orig}|{float(xmin):.3f}-{float(xmax):.3f}", int(te), int(psr), int(y_play.size))
+                            tmp_wav = _tmp_audio_path(proj_root, recording_key, f"{species_orig}|{float(xmin):.3f}-{float(xmax):.3f}", int(te), int(psr), int(y_play.size))
                             if not tmp_wav.exists() or tmp_wav.stat().st_size == 0:
                                 sf.write(str(tmp_wav), y_play, int(psr), format="WAV", subtype="PCM_16")
                             st.audio(str(tmp_wav))
                         except Exception as e:
                             st.error(f"Playback error: {e}")
 
-                    with st.form(key=_safe_widget_key("validate_card_review_form", base, species_orig), border=False):
+                    with st.form(key=_safe_widget_key("validate_card_review_form", recording_key, species_orig), border=False):
                         card_form_values: Dict[int, Dict[str, object]] = {}
 
                         with st.expander("Edit detections (species)"):
-                            acoustic_lookup: Dict[int, Dict[str, str]] = {}
+                            acoustic_lookup: Dict[str, Dict[str, str]] = {}
 
                             if y.size > 0 and sr > 1:
                                 requested_metric_fft = int(n_fft)
@@ -4772,7 +5049,7 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                                         if metric_fft != requested_metric_fft:
                                             fft_note = f" • FFT {metric_fft}"
 
-                                        acoustic_lookup[int(ridx_metric)] = {
+                                        acoustic_lookup[str(row_metric[_ROW_KEY])] = {
                                             "duration": _fmt_ms(metrics.get("duration_s", np.nan)),
                                             "peak": _fmt_khz(metrics.get("peak_freq_hz", np.nan)),
                                             "centroid": _fmt_khz(metrics.get("centroid_hz", np.nan)),
@@ -4796,7 +5073,7 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                                     current_species_choice = cur_sp_row
                                 else:
                                     current_species_choice = "present"
-                                select_key = f"sp_{base}_{species_orig}_{ridx}"
+                                select_key = _detection_widget_key("sp", row)
                                 new_species_key = f"{select_key}_new"
                                 options_for_row = list(species_select_options)
                                 if current_species_choice not in options_for_row and current_species_choice != "[absent]":
@@ -4837,10 +5114,10 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                                     uncertain_value = st.checkbox(
                                         "Uncertain",
                                         value=current_uncertain,
-                                        key=f"unc_{base}_{species_orig}_{ridx}",
+                                        key=_detection_widget_key("unc", row),
                                     )
 
-                                note_key = f"note_{base}_{species_orig}_{ridx}"
+                                note_key = _detection_widget_key("note", row)
                                 existing_note = str(row.get("validation_notes", "") or "")
                                 if note_key not in st.session_state:
                                     st.session_state[note_key] = existing_note
@@ -4853,17 +5130,18 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                                     )
 
                                 card_form_values[int(ridx)] = {
+                                    "row_id": str(row[_ROW_KEY]),
                                     "species_key": select_key,
                                     "species_value": selected_species_choice,
                                     "new_species_key": new_species_key,
                                     "new_species_value": new_species_value,
-                                    "uncertain_key": f"unc_{base}_{species_orig}_{ridx}",
+                                    "uncertain_key": _detection_widget_key("unc", row),
                                     "uncertain_value": bool(uncertain_value),
                                     "note_key": note_key,
                                     "note_value": note_value,
                                 }
 
-                                summary = acoustic_lookup.get(int(ridx))
+                                summary = acoustic_lookup.get(str(row[_ROW_KEY]))
                                 if summary:
                                     st.markdown(
                                         f"""
@@ -4889,7 +5167,7 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                         st.markdown("<div style='height:0.35rem'></div>", unsafe_allow_html=True)
                         card_review_submitted = st.form_submit_button(
                             "Mark card as reviewed",
-                            key=_safe_widget_key("mark_reviewed_form", base, species_orig),
+                            key=_safe_widget_key("mark_reviewed_form", recording_key, species_orig),
                             width="stretch",
                             type="primary",
                         )
@@ -4897,14 +5175,18 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
 
                     if card_review_submitted:
                             selected_indices = list(gdf_card.index)
-                            updated_df, _, _ = _commit_card(
-                                proj_root,
-                                df_all,
-                                base,
-                                species_orig,
-                                selected_indices=selected_indices,
-                                submitted_values=card_form_values,
-                            )
+                            try:
+                                updated_df, _, _ = _commit_card(
+                                    proj_root,
+                                    df_all,
+                                    recording_key,
+                                    species_orig,
+                                    selected_indices=selected_indices,
+                                    submitted_values=card_form_values,
+                                )
+                            except ValueError as exc:
+                                st.error(str(exc))
+                                st.stop()
                             out = proj_root / "data_normalised" / "detections_validated.csv"
                             out.parent.mkdir(parents=True, exist_ok=True)
                             updated_df.to_csv(out, index=False)
@@ -4954,7 +5236,7 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
         (
             _strategy_summary(df_all)
             + "|"
-            + "|".join(sorted(df_view.get("detection_id", df_view.index.to_series()).astype(str).tolist()))
+            + "|".join(sorted(df_view.get(_ROW_KEY, df_view.index.to_series()).astype(str).tolist()))
         ).encode("utf-8")
     ).hexdigest()
     validation_complete = bool(total_in_scope > 0 and n_reviewed == total_in_scope)
@@ -4981,14 +5263,14 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
                 "FinalLabelEffective", "species_display", "species_display_original",
                 "changed_flag", "reviewed_flag", "uncertain_flag_bool",
                 "source_file", "FinalLabel", "class", "class_prob", "UserLabel",
-                "is_present", "Changed", "lat", "lon", "filename_stem", "dt",
+                "is_present", "Changed", "filename_stem", "dt",
                 "time_of_day", "tod_ts", "__strategy_parent", "__strategy_bin",
                 "__strategy_stratum", "__strategy_priority",
             ]
             for col in ["validation_state", "validation_label", "validation_species", "validated_by", "validated_at", "uncertain_flag", "validation_notes"]:
                 if col not in popup_export.columns:
                     popup_export[col] = ""
-            popup_export = popup_export.drop(columns=popup_unwanted, errors="ignore")
+            popup_export = popup_export.drop(columns=popup_unwanted + _INTERNAL_KEYS, errors="ignore")
             popup_user = (
                 str(st.session_state.get("auth_user") or st.session_state.get("user_name") or "")
                 or os.environ.get("USER") or os.environ.get("USERNAME") or "reviewer"
@@ -5068,7 +5350,7 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
         "FinalLabelEffective", "species_display", "species_display_original",
         "changed_flag", "reviewed_flag", "uncertain_flag_bool",
         "source_file", "FinalLabel", "class",
-        "class_prob", "UserLabel", "is_present", "Changed", "lat", "lon",
+        "class_prob", "UserLabel", "is_present", "Changed",
         "filename_stem", "dt", "time_of_day", "tod_ts",
         "__strategy_parent", "__strategy_bin", "__strategy_stratum", "__strategy_priority",
     ]
@@ -5095,7 +5377,7 @@ def render_validation(detections: Optional[pd.DataFrame], sources: dict) -> None
         if c not in export_df.columns:
             export_df[c] = ""
 
-    export_df = export_df.drop(columns=UNWANTED, errors="ignore")
+    export_df = export_df.drop(columns=UNWANTED + _INTERNAL_KEYS, errors="ignore")
 
     csv_bytes = export_df.to_csv(index=False).encode("utf-8")
     strategy_export_df = _strategy_export_summary_df(df_all.copy(), proj_root, user_name)
