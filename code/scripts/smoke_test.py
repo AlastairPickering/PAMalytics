@@ -25,6 +25,7 @@ _smoke_home = tempfile.TemporaryDirectory(prefix="pamalytics_smoke_")
 os.environ["PAMALYTICS_HOME"] = _smoke_home.name
 
 MODULES = [
+    "pyarrow",
     "code.app_paths",
     "code.Home",
     "code.core.pa_data",
